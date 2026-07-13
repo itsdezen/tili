@@ -1,9 +1,11 @@
+pub mod display;
 pub mod enumerate;
 pub mod frame_setter;
 pub mod watch;
 pub mod window;
 pub mod workspace;
 
+pub use display::main_display_frame;
 pub use enumerate::{list_windows, list_windows_for_pid};
 pub use frame_setter::{InstantFrameSetter, WindowFrameSetter};
 pub use watch::{WmEvent, spawn_event_watcher};

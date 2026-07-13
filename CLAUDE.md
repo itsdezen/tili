@@ -41,18 +41,34 @@ the dependency direction is a hard boundary, not just organization:
 - **`tili-tree`** — the container tree and layout algorithms (Tiles/BSP,
   Accordion). No `AXUIElement`, no CoreFoundation, no `unsafe`. Everything
   here operates on plain `Rect`/`WindowId` (a `u32` newtype around the real
-  `CGWindowID`) so it's fully unit-testable without macOS.
+  `CGWindowID`) so it's fully unit-testable without macOS — see
+  `src/tree.rs`'s test module for the actual coverage (insert/remove with
+  parent-split collapsing, i3-style direction `navigate`, `move`'s
+  window-identity `swap_windows`, proportional `layout`). `insert_window`
+  always wraps the target leaf in a fresh 2-child `Split` rather than
+  flattening into an existing same-orientation split — a deliberate M3
+  simplification (still a valid, correctly-tiling tree; just not the
+  shallowest possible one).
 - **`tili-ax`** — the only crate allowed to touch the Accessibility API.
   Depends on `tili-tree` only for geometry types (`Rect`), never for the tree
   itself. `src/window.rs` owns the single private API call used anywhere in
   the codebase (`_AXUIElementGetWindow`, to resolve a window's real
   `CGWindowID`) — keep that call isolated there; don't add other private API
   usage without a strong reason, since staying public-API-only is what lets
-  tili run without disabling SIP. `src/frame_setter.rs` defines the
-  `WindowFrameSetter` trait — every place that moves/resizes a real window
-  must go through `dyn WindowFrameSetter`, not call the AX API directly. v1
-  only implements `InstantFrameSetter`; this trait is the seam a future
-  animated setter plugs into without touching layout code. `src/workspace.rs`
+  tili run without disabling SIP. `AxWindow::set_frame`/`focus` (also in
+  `window.rs`) are the only place real windows get moved/resized/raised —
+  position is set before size (some apps clamp size based on current
+  position) and both are best-effort (`let _ =` on the AX result; a window
+  that refuses a write is left alone, matching every other AX-based WM).
+  `src/frame_setter.rs` defines the `WindowFrameSetter` trait — every place
+  that moves/resizes a real window must go through `dyn WindowFrameSetter`,
+  not call `AxWindow::set_frame` directly. v1 only implements
+  `InstantFrameSetter`; this trait is the seam a future animated setter
+  plugs into without touching layout code. `src/display.rs` gets the main
+  display's usable frame for layout — full `CGDisplay` bounds minus a
+  hardcoded menu-bar inset; there's no `CGDisplay`-level equivalent of
+  `NSScreen.visibleFrame`, so this is a known-approximate stand-in until M9
+  brings in real `NSScreen`-based per-monitor frames. `src/workspace.rs`
   bridges `NSWorkspace` app-launch/quit notifications via `objc2`/
   `objc2-app-kit` — note it spawns its own dedicated `CFRunLoop` thread,
   since a process without `NSApplication` needs *some* thread pumping a run
@@ -72,18 +88,27 @@ the dependency direction is a hard boundary, not just organization:
   `tili-daemon` and `tili-cli` depend on in common — protocol changes belong
   here, not duplicated in both binaries.
 - **`tili-daemon`** — the actual window manager process. `src/state.rs` holds
-  `WmState`, including the live window cache kept current by reacting to
-  `tili_ax::WmEvent`s rather than by re-scanning (see M2). `src/dispatch.rs`
-  has the single `dispatch(&mut WmState, Command) -> Response` function —
-  both the Unix-socket handler and the global-hotkey handler (a
-  `CGEventTap`, not yet implemented) must call this same function, never a
-  separate code path, or CLI-invoked and hotkey-invoked behavior can drift
-  apart. `src/main.rs` is one `tokio::select!` loop merging socket accepts
-  and `tili_ax::spawn_event_watcher()`'s channel (hotkeys/config-reload join
+  `WmState`: the live `AxWindow` handles themselves (not just cached
+  metadata — M3 needs the real `AXUIElement` to move/focus a window), a
+  `tili_tree::Tree`, and a `focused: Option<NodeId>` pointer. New windows
+  are inserted next to the current focus; a process's windows are wholesale
+  replaced (removed-then-reinserted) in the tree whenever a
+  `WmEvent::WindowsChanged` fires for it — see M2. `focus`/`move_focused`
+  are the only places that call `AxWindow::focus()` (real OS focus/raise);
+  nothing calls it automatically on window creation, specifically to avoid
+  focus-stealing every already-open window when the daemon starts up and
+  gets seeded with the apps already running. `src/dispatch.rs` has the
+  single `dispatch(&mut WmState, Command) -> Response` function — both the
+  Unix-socket handler and the global-hotkey handler (a `CGEventTap`, not yet
+  implemented) must call this same function, never a separate code path, or
+  CLI-invoked and hotkey-invoked behavior can drift apart. `src/main.rs` is
+  one `tokio::select!` loop merging socket accepts and
+  `tili_ax::spawn_event_watcher()`'s channel (hotkeys/config-reload join
   this same select in later milestones) — no locks around `WmState`, because
   only one branch of the loop ever touches it at a time.
-- **`tili-cli`** — thin socket client only. The package is named `tili-cli`
-  but the binary itself is named `tili` (see the `[[bin]]` section in its
+- **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
+  `focus <dir>`, `move <dir>`). The package is named `tili-cli` but the
+  binary itself is named `tili` (see the `[[bin]]` section in its
   `Cargo.toml`). No business logic belongs here — if you're tempted to add
   logic to the CLI, it probably belongs in `tili-daemon` behind a `Command`
   instead.
@@ -95,9 +120,9 @@ the dependency direction is a hard boundary, not just organization:
 tili is built as a sequence of independently verifiable milestones (M0
 through M11), tracked in [ROADMAP.md](ROADMAP.md) — check that file for
 current status before assuming a feature exists. Code that's ahead of the
-current milestone is marked with `TODO(M<n>): ...` comments (e.g.
-`unimplemented!("set_frame: wired up in M3 (single-workspace tiling)")`) —
-these are intentional scaffolding stubs, not bugs, and should stay
+current milestone is marked with `TODO(M<n>): ...` comments and, where
+there's nothing reasonable to do yet, `unimplemented!("...: wired up in
+M<n>")` — these are intentional scaffolding stubs, not bugs, and should stay
 unimplemented until their milestone comes up rather than being filled in
 opportunistically out of order.
 

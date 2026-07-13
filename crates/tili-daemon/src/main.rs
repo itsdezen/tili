@@ -55,7 +55,7 @@ fn handle_event(state: &mut WmState, event: WmEvent) {
     match event {
         WmEvent::WindowsChanged { pid } => {
             let windows = tili_ax::list_windows_for_pid(pid);
-            state.apply_windows_changed(pid, &windows);
+            state.apply_windows_changed(pid, windows);
         }
         WmEvent::AppTerminated { pid } => state.remove_app(pid),
         WmEvent::AppLaunched { .. } => {

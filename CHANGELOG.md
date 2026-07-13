@@ -10,6 +10,27 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-13
+
+### Added
+
+- M3: real BSP tiling on one monitor. `tili-tree`'s `Tree` gains actual
+  mutation/layout/navigation algorithms (insert as a sibling of the focused
+  leaf, remove with parent-split collapsing, i3-style direction navigation
+  by walking up to the nearest matching-orientation ancestor split,
+  window-identity swap for `move`), fully unit-tested without macOS
+  (8 tests). `tili-ax`'s `AxWindow::set_frame`/`focus` are now real
+  (`AXUIElementSetAttributeValue` for position/size, `AXFocused`/`AXRaise`
+  for focus) instead of `unimplemented!()`; a new `display.rs` gets the
+  main display's usable frame (full bounds minus a hardcoded menu-bar inset
+  — proper per-monitor `NSScreen.visibleFrame` lookups land in M9).
+  `tili-daemon`'s `WmState` now keeps live `AxWindow` handles (not just
+  cached metadata) plus a `Tree` and focus pointer, wired through
+  `Command::Focus`/`Command::Move`; `tili-cli` gains `focus <dir>` and
+  `move <dir>`. Verified end-to-end on real hardware: opening several real
+  windows tiles them via BSP, and `tili focus`/`move <dir>` correctly
+  moves/raises the right window.
+
 ## [0.2.0] - 2026-07-13
 
 ### Added

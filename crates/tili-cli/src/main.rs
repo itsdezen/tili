@@ -1,8 +1,8 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
-use clap::{Parser, Subcommand};
-use tili_ipc::{Command, Response, WindowInfo};
+use clap::{Parser, Subcommand, ValueEnum};
+use tili_ipc::{Command, Direction, Response, WindowInfo};
 
 #[derive(Parser)]
 #[command(name = "tili", about = "CLI for the tili tiling window manager daemon")]
@@ -11,12 +11,35 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum DirArg {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl From<DirArg> for Direction {
+    fn from(dir: DirArg) -> Self {
+        match dir {
+            DirArg::Left => Direction::Left,
+            DirArg::Right => Direction::Right,
+            DirArg::Up => Direction::Up,
+            DirArg::Down => Direction::Down,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Check whether the daemon is reachable.
     Ping,
     /// List currently known windows.
     ListWindows,
+    /// Move focus to the window in the given direction.
+    Focus { direction: DirArg },
+    /// Swap the focused window with its neighbor in the given direction.
+    Move { direction: DirArg },
 }
 
 fn main() {
@@ -24,6 +47,8 @@ fn main() {
     let command = match cli.command {
         Commands::Ping => Command::Ping,
         Commands::ListWindows => Command::ListWindows,
+        Commands::Focus { direction } => Command::Focus(direction.into()),
+        Commands::Move { direction } => Command::Move(direction.into()),
     };
 
     match send(command) {

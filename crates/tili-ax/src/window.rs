@@ -1,5 +1,9 @@
 use axuielement::AXUIElement;
-use axuielement::ffi::{AXUIElementRef, kAXPositionAttribute, kAXSizeAttribute, kAXTitleAttribute};
+use axuielement::ffi::{
+    AXUIElementRef, kAXFocusedAttribute, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
+    kAXTitleAttribute,
+};
+use axuielement::{AXPoint, AXSize};
 use tili_tree::{Rect, WindowId};
 
 // `_AXUIElementGetWindow` is undocumented but stable and widely relied upon
@@ -105,8 +109,33 @@ impl AxWindow {
     }
 
     /// Sets the window's position + size via `AXUIElementSetAttributeValue`.
-    /// TODO(M3): implement once tiling layout needs to move real windows.
-    pub fn set_frame(&self, _target: Rect) {
-        unimplemented!("set_frame: wired up in M3 (single-workspace tiling)")
+    /// Position is set before size: some apps clamp/reflow size based on
+    /// their current position (e.g. keeping a fixed distance from a screen
+    /// edge), so moving first makes the subsequent resize land correctly.
+    /// Best-effort: a window that refuses a resize (fixed-size dialogs,
+    /// apps that don't honor AX writes) is left wherever it ends up — tili
+    /// has no way to force it, matching every other AX-based WM.
+    pub fn set_frame(&self, target: Rect) {
+        let _ = self.element.set_point_attribute(
+            kAXPositionAttribute,
+            AXPoint {
+                x: target.x,
+                y: target.y,
+            },
+        );
+        let _ = self.element.set_size_attribute(
+            kAXSizeAttribute,
+            AXSize {
+                width: target.width,
+                height: target.height,
+            },
+        );
+    }
+
+    /// Raises and focuses this window — used when tiling changes which
+    /// window should be frontmost (e.g. after `focus`/`move`).
+    pub fn focus(&self) {
+        let _ = self.element.set_bool_attribute(kAXFocusedAttribute, true);
+        let _ = self.element.perform_action(kAXRaiseAction);
     }
 }

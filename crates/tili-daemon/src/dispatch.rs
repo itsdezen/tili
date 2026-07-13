@@ -11,9 +11,27 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
                 message: e.to_string(),
             },
         },
+        Command::Focus(dir) => result_response(state.focus(to_tree_direction(dir))),
+        Command::Move(dir) => result_response(state.move_focused(to_tree_direction(dir))),
         _ => Response::Err {
             message: "not implemented yet".to_string(),
         },
+    }
+}
+
+fn to_tree_direction(dir: tili_ipc::Direction) -> tili_tree::Direction {
+    match dir {
+        tili_ipc::Direction::Left => tili_tree::Direction::Left,
+        tili_ipc::Direction::Right => tili_tree::Direction::Right,
+        tili_ipc::Direction::Up => tili_tree::Direction::Up,
+        tili_ipc::Direction::Down => tili_tree::Direction::Down,
+    }
+}
+
+fn result_response(result: Result<(), String>) -> Response {
+    match result {
+        Ok(()) => Response::Ok,
+        Err(message) => Response::Err { message },
     }
 }
 
@@ -37,5 +55,12 @@ mod tests {
         };
         let windows: Vec<tili_ipc::WindowInfo> = serde_json::from_value(payload).unwrap();
         assert!(windows.is_empty(), "empty cache before any WmEvent arrives");
+    }
+
+    #[test]
+    fn focus_with_no_windows_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::Focus(tili_ipc::Direction::Left));
+        assert!(matches!(response, Response::Err { .. }));
     }
 }
