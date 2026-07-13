@@ -99,11 +99,16 @@ jobs:
           rm -f cert.p12
           # Not `-v` ("valid") — a self-signed certificate never chains to a
           # trusted root, so it's filtered out of that list even though
-          # `codesign` itself doesn't require system trust to sign with it.
-          # Logged unfiltered first so a genuinely-missing identity is
-          # visible in the run log instead of a bare "exit code 1".
+          # `codesign` itself doesn't require system trust to sign with it
+          # (confirmed: it shows up tagged CSSMERR_TP_NOT_TRUSTED under
+          # "Matching identities", 0 under "Valid identities only" — that's
+          # expected and fine). The identity's quoted name is on the
+          # numbered "1) <hash> "<name>" (...)" line, not the first line of
+          # output ("Policy: Code Signing") — `grep -m1` scans the whole
+          # block for the first quoted string rather than assuming a fixed
+          # line number.
           security find-identity -p codesigning "$keychain"
-          identity=$(security find-identity -p codesigning "$keychain" | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+          identity=$(security find-identity -p codesigning "$keychain" | grep -m1 -oE '"[^"]+"' | tr -d '"')
           if [ -z "$identity" ]; then
             echo "::error::no codesigning identity found in $keychain after import"
             exit 1
