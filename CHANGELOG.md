@@ -10,6 +10,25 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-07-13
+
+### Added
+
+- `tili start`/`stop`/`status`: `tili start` `exec`s straight into
+  `tili-daemon` (no separate binary to remember, no wrapper process left
+  behind) as the common-case way to try tili out, replacing `tili-daemon &`
+  in the docs. `tili stop` sends a new `Command::Shutdown`, handled
+  directly in the daemon's main loop rather than through `dispatch()`
+  (it's process lifecycle, not a `WmState` mutation — the one deliberate
+  exception to that rule) and responds `Ok` before exiting. `tili status`
+  reports reachability in plain language. README's Getting started/
+  Commands sections rewritten around this simpler flow.
+
+### Changed
+
+- `example/tili.kdl`'s zero-padding gap override moved from the
+  `entertain` workspace to `random`.
+
 ## [0.11.0] - 2026-07-13
 
 ### Added
