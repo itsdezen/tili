@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use tili_ax::{AxWindow, InstantFrameSetter, WindowFrameSetter};
-use tili_ipc::{RectInfo, WindowInfo, WorkspaceInfo};
+use tili_ax::{AxWindow, InstantFrameSetter, KeyCombo, WindowFrameSetter};
+use tili_ipc::{Command, RectInfo, WindowInfo, WorkspaceInfo};
 use tili_tree::{Direction, Gaps, NodeId, Tree, WindowId};
 
 /// The workspace new windows land in, and the one active at daemon startup.
@@ -9,6 +9,12 @@ use tili_tree::{Direction, Gaps, NodeId, Tree, WindowId};
 /// this is just the one that's active before any config or explicit switch
 /// says otherwise, and the fallback if config declares none.
 const DEFAULT_WORKSPACE: &str = "main";
+
+/// The keybinding mode active before any config declares modes, and the one
+/// `ModeExit` always returns to. Doesn't need to exist in `mode_bindings` —
+/// a config with no `keybindings mode="main" { ... }` block just means no
+/// hotkeys are bound yet, not an error.
+const DEFAULT_MODE: &str = "main";
 
 /// macOS has no public API to enumerate/control Spaces, so workspaces are
 /// virtual: only the active one's windows are actually laid out on screen.
@@ -38,6 +44,10 @@ pub struct WmState {
     frame_setter: Box<dyn WindowFrameSetter>,
     gaps: Gaps,
     workspace_gaps: HashMap<String, Gaps>,
+    current_mode: String,
+    /// mode name -> (key combo -> command), built fresh from config's
+    /// `keybindings` on every `apply_config`.
+    mode_bindings: HashMap<String, HashMap<KeyCombo, Command>>,
 }
 
 impl Default for WmState {
@@ -52,6 +62,8 @@ impl Default for WmState {
             frame_setter: Box::new(InstantFrameSetter),
             gaps: Gaps::default(),
             workspace_gaps: HashMap::new(),
+            current_mode: DEFAULT_MODE.to_string(),
+            mode_bindings: HashMap::new(),
         }
     }
 }
@@ -138,11 +150,12 @@ impl WmState {
     }
 
     /// Applies a freshly-loaded (or hot-reloaded) config: updates gaps
-    /// (global + per-workspace overrides) and ensures every workspace it
-    /// declares exists (creating empty ones as needed) — without switching
-    /// to any of them, so a config edit never yanks focus away from
-    /// whatever workspace the user is actually looking at. Re-lays-out the
-    /// active workspace afterward so a gap change is visible immediately.
+    /// (global + per-workspace overrides), rebuilds the keybinding table,
+    /// and ensures every workspace it declares exists (creating empty ones
+    /// as needed) — without switching to any of them, so a config edit
+    /// never yanks focus away from whatever workspace the user is actually
+    /// looking at. Re-lays-out the active workspace afterward so a gap
+    /// change is visible immediately.
     pub fn apply_config(&mut self, config: &tili_config::Config) {
         self.gaps = to_tree_gaps(config.gaps);
         self.workspace_gaps = config
@@ -155,7 +168,66 @@ impl WmState {
             self.workspaces.entry(workspace.name.clone()).or_default();
         }
 
+        self.mode_bindings = config
+            .keybindings
+            .iter()
+            .map(|mode| {
+                let bindings = mode
+                    .bindings
+                    .iter()
+                    .filter_map(|kb| {
+                        let combo = tili_ax::parse_key_combo(&kb.key)?;
+                        Some((combo, tili_ipc::parse(&kb.command)))
+                    })
+                    .collect();
+                (mode.name.clone(), bindings)
+            })
+            .collect();
+        // A reload that drops the mode we were in (e.g. the config no
+        // longer declares it) falls back to the default rather than
+        // leaving hotkeys pointing at a table that no longer exists.
+        if self.current_mode != DEFAULT_MODE && !self.mode_bindings.contains_key(&self.current_mode)
+        {
+            self.current_mode = DEFAULT_MODE.to_string();
+        }
+
         self.relayout_active();
+    }
+
+    /// Switches which mode's keybindings are active. Returns an error if
+    /// `name` isn't a mode the config declares (the default mode, `"main"`,
+    /// is always valid even with no keybindings configured for it yet).
+    pub fn enter_mode(&mut self, name: &str) -> Result<(), String> {
+        if name == DEFAULT_MODE || self.mode_bindings.contains_key(name) {
+            self.current_mode = name.to_string();
+            Ok(())
+        } else {
+            Err(format!("unknown keybinding mode '{name}'"))
+        }
+    }
+
+    pub fn exit_mode(&mut self) {
+        self.current_mode = DEFAULT_MODE.to_string();
+    }
+
+    /// Looks up the `Command` bound to `combo` in the current mode, if any
+    /// — called when a hotkey press arrives from `tili_ax::spawn_hotkey_tap`.
+    pub fn resolve_hotkey(&self, combo: KeyCombo) -> Option<Command> {
+        self.mode_bindings
+            .get(&self.current_mode)?
+            .get(&combo)
+            .cloned()
+    }
+
+    /// Every key combo bound in the current mode — kept in sync with the
+    /// `Arc<Mutex<_>>` the hotkey tap reads synchronously (see
+    /// `tili_ax::spawn_hotkey_tap`'s docs for why that's a `Mutex` and not
+    /// routed through this state's normal single-owner-loop model).
+    pub fn active_key_combos(&self) -> HashSet<KeyCombo> {
+        self.mode_bindings
+            .get(&self.current_mode)
+            .map(|bindings| bindings.keys().copied().collect())
+            .unwrap_or_default()
     }
 
     pub fn list_workspaces(&self) -> Vec<WorkspaceInfo> {

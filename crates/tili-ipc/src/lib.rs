@@ -1,4 +1,8 @@
+mod parse;
+
 use serde::{Deserialize, Serialize};
+
+pub use parse::parse;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Direction {

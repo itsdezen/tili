@@ -10,6 +10,35 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-13
+
+### Added
+
+- M6: built-in global hotkey handling — no external tool (skhd etc.)
+  needed. `tili-ax` gains `hotkey.rs`: a `CGEventTap` on its own dedicated
+  `CFRunLoop` thread (same pattern as the NSWorkspace/AX watchers) that
+  consumes matched keypresses so they don't leak into the focused app,
+  plus `parse_key_combo` translating KDL key strings like `"alt-shift-h"`
+  into a `KeyCombo` (modifiers can appear in any order). `tili-ipc` gains
+  `parse()`, translating a keybinding's command string (`"focus left"`,
+  `"mode resize"`, etc.) into a `Command` — unrecognized strings become
+  `Command::Raw` rather than an error, so a config referencing a command
+  ahead of its milestone (or with a typo) still loads. `tili-config` now
+  actually parses `keybindings mode="..." { bind "key" "command" }` blocks
+  (previously ignored as unrecognized). `tili-daemon`'s `WmState` gains
+  `current_mode` and a `mode_bindings` table rebuilt on every
+  `apply_config`; `Command::ModeEnter`/`ModeExit` switch it. Hotkey
+  presses flow through the *same* `dispatch()` the socket handler uses —
+  no parallel command path. The one exception to tili's "no locks, single
+  owning loop" rule: the event-tap callback can't `.await` a round-trip to
+  ask "is this bound," so a small `Arc<Mutex<HashSet<KeyCombo>>>` is
+  shared with the daemon loop, re-synced after anything that could change
+  the active mode or its bindings. Updated `example/tili.kdl` with a full
+  `main`/`resize` keybinding set. Verified end-to-end on real hardware:
+  bound keys are captured/consumed globally (not leaked into the focused
+  app) and dispatch the right command, mode switching works, and editing a
+  binding in `tili.kdl` changes its behavior live with no daemon restart.
+
 ## [0.5.0] - 2026-07-13
 
 ### Added

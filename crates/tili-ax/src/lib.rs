@@ -1,6 +1,7 @@
 pub mod display;
 pub mod enumerate;
 pub mod frame_setter;
+pub mod hotkey;
 pub mod watch;
 pub mod window;
 pub mod workspace;
@@ -8,6 +9,7 @@ pub mod workspace;
 pub use display::main_display_frame;
 pub use enumerate::{list_windows, list_windows_for_pid};
 pub use frame_setter::{InstantFrameSetter, WindowFrameSetter};
+pub use hotkey::{KeyCombo, parse_key_combo, spawn_hotkey_tap};
 pub use watch::{WmEvent, spawn_event_watcher};
 pub use window::AxWindow;
 pub use workspace::{AppEvent, spawn_workspace_watcher};

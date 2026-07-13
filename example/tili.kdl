@@ -1,8 +1,8 @@
 // Copy this to ~/.config/tili/tili.kdl and edit — the daemon watches the
 // file and hot-reloads on save (see ROADMAP.md M5). Only what's used by
 // milestones landed so far is documented below; sections that don't exist
-// yet in the parser (keybindings, floating-rules) are still safe to
-// include — unrecognized sections are ignored, not rejected.
+// yet in the parser (floating-rules, M8) are still safe to include —
+// unrecognized sections are ignored, not rejected.
 
 workspaces {
     workspace "work"
@@ -25,4 +25,38 @@ settings {
     // KDL v2 booleans are `#true`/`#false` (note the `#` — bare `true`/
     // `false` is a parse error, unlike KDL v1 or most other config formats).
     auto-reload #true
+}
+
+// Global hotkeys — no external tool (skhd etc.) needed, tili captures these
+// itself. Key strings are "modifier-modifier-key", e.g. "alt-shift-h";
+// modifiers can be listed in any order. Recognized modifiers: alt/option,
+// cmd/command, ctrl/control, shift. See tili-ax/src/hotkey.rs for the full
+// list of recognized base key names (letters, digits, punctuation like
+// "slash"/"semicolon"/"minus"/"equal", and "escape"/"enter"/"space"/"tab"/
+// arrow keys).
+keybindings mode="main" {
+    bind "alt-h" "focus left"
+    bind "alt-l" "focus right"
+    bind "alt-j" "focus down"
+    bind "alt-k" "focus up"
+
+    bind "alt-shift-h" "move left"
+    bind "alt-shift-l" "move right"
+    bind "alt-shift-j" "move down"
+    bind "alt-shift-k" "move up"
+
+    bind "alt-w" "workspace work"
+    bind "alt-e" "workspace entertain"
+    bind "alt-r" "workspace random"
+
+    bind "alt-slash" "layout toggle"
+
+    // Enter a submode — its own keybindings block takes over until it
+    // exits back to "main".
+    bind "alt-shift-semicolon" "mode resize"
+}
+
+keybindings mode="resize" {
+    bind "escape" "mode main"
+    bind "enter" "mode main"
 }

@@ -55,10 +55,11 @@ well before v1.
 
 Configuration is [KDL](https://kdl.dev), read from `~/.config/tili/tili.kdl`
 and hot-reloaded on save — no restart needed. `workspaces`, `gaps` (global
-and per-workspace), and `settings.auto-reload` are parsed and applied today;
-`keybindings`/`floating-rules` are part of the target schema shown below but
-not parsed yet (M6/M8) — unrecognized sections are ignored rather than
-rejected, so it's safe to write the full schema ahead of time. See
+and per-workspace), `settings.auto-reload`, and `keybindings` (global
+hotkeys, captured by tili itself — no skhd or similar needed) are parsed
+and applied today; `floating-rules` is part of the target schema shown
+below but not parsed yet (M8) — unrecognized sections are ignored rather
+than rejected, so it's safe to write the full schema ahead of time. See
 [`example/tili.kdl`](example/tili.kdl) for a copy-pasteable starting point
 that reflects what's actually functional right now.
 

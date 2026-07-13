@@ -54,11 +54,10 @@ impl Default for Settings {
     }
 }
 
-/// The parsed `tili.kdl` document. `keybindings` and `floating_rules` are
-/// defined here (they're part of the target schema) but not yet populated
-/// from KDL — parsing them is M6 and M8's job respectively; until then they
-/// just stay empty, matching the "don't fill in code ahead of its
-/// milestone" scope discipline documented in CLAUDE.md.
+/// The parsed `tili.kdl` document. `floating_rules` is defined here (it's
+/// part of the target schema) but not yet populated from KDL — parsing it
+/// is M8's job; until then it stays empty, matching the "don't fill in code
+/// ahead of its milestone" scope discipline documented in CLAUDE.md.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub workspaces: Vec<WorkspaceConfig>,
@@ -106,7 +105,7 @@ pub fn load(path: &std::path::Path) -> Result<Config, ConfigError> {
 }
 
 /// Parses a KDL config document into a `Config`. Unrecognized top-level
-/// nodes (e.g. a `keybindings` block, ahead of M6) are silently ignored
+/// nodes (e.g. a `floating-rules` block, ahead of M8) are silently ignored
 /// rather than rejected — the schema is meant to grow across milestones
 /// without invalidating configs written against an earlier one.
 pub fn parse(source: &str) -> Result<Config, ConfigError> {
@@ -118,6 +117,7 @@ pub fn parse(source: &str) -> Result<Config, ConfigError> {
         workspaces: parse_workspaces(&doc),
         default_layout: parse_default_layout(&doc),
         settings: parse_settings(&doc),
+        keybindings: parse_keybindings(&doc),
         ..Config::default()
     };
     let (gaps, workspace_gaps) = parse_gaps(&doc);
@@ -148,6 +148,35 @@ fn parse_workspaces(doc: &KdlDocument) -> Vec<WorkspaceConfig> {
                 .and_then(|v| v.as_string())
                 .map(str::to_string);
             Some(WorkspaceConfig { name, monitor })
+        })
+        .collect()
+}
+
+/// `keybindings mode="main" { bind "alt-h" "focus left" }` — multiple
+/// sibling `keybindings` nodes can share the name with different `mode`
+/// values, so this walks *every* top-level node named `keybindings` rather
+/// than using `doc.get`, which would only find the first.
+fn parse_keybindings(doc: &KdlDocument) -> Vec<KeybindingMode> {
+    doc.nodes()
+        .iter()
+        .filter(|n| n.name().value() == "keybindings")
+        .filter_map(|n| {
+            let mode_name = n.get("mode").and_then(|v| v.as_string())?.to_string();
+            let children = n.children()?;
+            let bindings = children
+                .nodes()
+                .iter()
+                .filter(|b| b.name().value() == "bind")
+                .filter_map(|b| {
+                    let key = b.get(0)?.as_string()?.to_string();
+                    let command = b.get(1)?.as_string()?.to_string();
+                    Some(Keybinding { key, command })
+                })
+                .collect();
+            Some(KeybindingMode {
+                name: mode_name,
+                bindings,
+            })
         })
         .collect()
 }
@@ -312,8 +341,8 @@ mod tests {
     #[test]
     fn unrecognized_sections_are_ignored_not_rejected() {
         let source = r#"
-            keybindings mode="main" {
-                bind "alt-h" "focus left"
+            floating-rules {
+                rule app-id="com.apple.finder"
             }
             workspaces {
                 workspace "work"
@@ -321,7 +350,41 @@ mod tests {
         "#;
         let config = parse(source).unwrap();
         assert_eq!(config.workspaces.len(), 1);
-        assert!(config.keybindings.is_empty());
+        assert!(config.floating_rules.is_empty());
+    }
+
+    #[test]
+    fn parses_keybindings_across_multiple_modes() {
+        let source = r#"
+            keybindings mode="main" {
+                bind "alt-h" "focus left"
+                bind "alt-shift-semicolon" "mode resize"
+            }
+            keybindings mode="resize" {
+                bind "h" "resize -50"
+                bind "escape" "mode main"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.keybindings.len(), 2);
+
+        let main = config
+            .keybindings
+            .iter()
+            .find(|m| m.name == "main")
+            .unwrap();
+        assert_eq!(main.bindings.len(), 2);
+        assert_eq!(main.bindings[0].key, "alt-h");
+        assert_eq!(main.bindings[0].command, "focus left");
+
+        let resize = config
+            .keybindings
+            .iter()
+            .find(|m| m.name == "resize")
+            .unwrap();
+        assert_eq!(resize.bindings.len(), 2);
+        assert_eq!(resize.bindings[1].key, "escape");
+        assert_eq!(resize.bindings[1].command, "mode main");
     }
 
     #[test]

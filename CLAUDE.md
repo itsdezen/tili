@@ -88,14 +88,28 @@ the dependency direction is a hard boundary, not just organization:
   process's windows via `list_windows_for_pid` rather than trying to
   interpret individual notification payloads (this sidesteps having to
   reason about whether a specific `AXUIElement` is still valid to query at
-  the exact moment its destroyed-notification fires).
+  the exact moment its destroyed-notification fires). `src/hotkey.rs` (M6)
+  is the global hotkey capture: a `CGEventTap` on its own dedicated
+  `CFRunLoop` thread (same reasoning as the NSWorkspace/AX watchers above),
+  which consumes (drops) a keypress if it's in the caller-supplied
+  `active_bindings` set and passes everything else through untouched.
+  `parse_key_combo` turns a KDL key string like `"alt-shift-h"` into a
+  `KeyCombo` (`key_code_for_name` is the exhaustive keycode table — extend
+  it there if a config references a key name it doesn't recognize).
+  `active_bindings` is an `Arc<Mutex<HashSet<KeyCombo>>>` because the
+  event-tap callback must decide Keep-vs-Drop *synchronously* — it can't
+  `.await` a round-trip to `tili-daemon`'s single owning loop to ask "is
+  this bound?" This is the one place in the codebase with a shared `Mutex`
+  instead of message-passing into one owner; see `tili-daemon`'s
+  `sync_active_combos` for how it's kept from drifting.
 - **`tili-config`** — KDL parsing/validation into a `Config` struct, plus
-  file-watch hot-reload. `src/schema.rs` has the types and `parse()`;
-  unrecognized top-level sections (e.g. `keybindings`/`floating-rules` ahead
-  of M6/M8) are silently ignored, not rejected, so a config can be written
-  against the full target schema before the parser catches up — see
-  README.md's config preview vs. `example/tili.kdl` for "aspirational
-  full schema" vs. "what's actually parsed today." **KDL v2 booleans are
+  file-watch hot-reload. `src/schema.rs` has the types and `parse()`,
+  including `keybindings mode="..." { bind "key" "command" }` blocks (M6);
+  unrecognized top-level sections (e.g. `floating-rules` ahead of M8) are
+  silently ignored, not rejected, so a config can be written against the
+  full target schema before the parser catches up — see README.md's config
+  preview vs. `example/tili.kdl` for "aspirational full schema" vs. "what's
+  actually parsed today." **KDL v2 booleans are
   `#true`/`#false`** (a `#`-prefixed keyword, to disambiguate from bare
   identifiers) — bare `true`/`false` is a parse error, easy to get wrong
   when writing test fixtures or example configs; there's a test guarding
@@ -111,7 +125,13 @@ the dependency direction is a hard boundary, not just organization:
 - **`tili-ipc`** — `Command`/`Response` types shared by the daemon and CLI,
   plus the socket path/framing convention. This is the only crate both
   `tili-daemon` and `tili-cli` depend on in common — protocol changes belong
-  here, not duplicated in both binaries.
+  here, not duplicated in both binaries. `src/parse.rs`'s `parse(s: &str) ->
+  Command` (M6) turns a keybinding's command string (`"focus left"`,
+  `"mode resize"`) into a `Command` — infallible by design, an unrecognized
+  string becomes `Command::Raw` rather than a parse error, so a config
+  referencing a command ahead of its milestone (or with a typo) still loads
+  and just fails at `dispatch()` time with "not implemented yet" instead of
+  refusing to start the daemon.
 - **`tili-daemon`** — the actual window manager process. `src/state.rs` holds
   `WmState`: the live `AxWindow` handles themselves (not just cached
   metadata — M3 needs the real `AXUIElement` to move/focus/park a window),
@@ -126,18 +146,26 @@ the dependency direction is a hard boundary, not just organization:
   (real OS focus/raise); nothing calls it automatically on window creation,
   specifically to avoid focus-stealing every already-open window when the
   daemon starts up and gets seeded with the apps already running.
-  `apply_config` (M5) updates `gaps`/`workspace_gaps` from a loaded or
-  hot-reloaded `tili_config::Config` and creates any workspace it declares
-  — without switching to it, so a reload never yanks focus off whatever's
-  on screen. `src/dispatch.rs` has the single `dispatch(&mut WmState,
-  Command) -> Response` function — both the Unix-socket handler and the
-  global-hotkey handler (a `CGEventTap`, not yet implemented) must call
-  this same function, never a separate code path, or CLI-invoked and
+  `apply_config` updates `gaps`/`workspace_gaps` from a loaded or
+  hot-reloaded `tili_config::Config`, creates any workspace it declares
+  (without switching to it, so a reload never yanks focus off whatever's on
+  screen), and rebuilds `mode_bindings` (M6: `HashMap<mode name,
+  HashMap<KeyCombo, Command>>`) from `config.keybindings`.
+  `Command::ModeEnter`/`ModeExit` switch `current_mode`;
+  `resolve_hotkey(combo)` looks a press up in the current mode's table, and
+  `active_key_combos()` returns just the keys (for syncing the `Mutex` the
+  hotkey tap reads — see `tili-ax`'s `hotkey.rs`). `src/dispatch.rs` has
+  the single `dispatch(&mut WmState, Command) -> Response` function — both
+  the Unix-socket handler and the global-hotkey handler must call this
+  same function, never a separate code path, or CLI-invoked and
   hotkey-invoked behavior can drift apart. `src/main.rs` is one
   `tokio::select!` loop merging socket accepts,
-  `tili_ax::spawn_event_watcher()`'s channel, and the config-reload bridge
-  (hotkeys join this same select in a later milestone) — no locks around
-  `WmState`, because only one branch of the loop ever touches it at a time.
+  `tili_ax::spawn_event_watcher()`'s channel, the config-reload bridge, and
+  the hotkey-tap bridge — no locks around `WmState` itself, because only
+  one branch of the loop ever touches it at a time; `sync_active_combos` is
+  called after every branch that could change the active mode/bindings, to
+  keep the hotkey tap's `Mutex<HashSet<KeyCombo>>` from drifting out of
+  sync with what `WmState` actually has bound.
 - **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
   `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
   `move-to-workspace <name>`). The package is named `tili-cli` but the
@@ -172,7 +200,12 @@ preference):
 - All real window-frame mutations go through `WindowFrameSetter`, never a
   direct AX API call from daemon/tree code.
 - Hotkey-triggered and socket-triggered commands both go through
-  `dispatch()` — no parallel command-handling path.
+  `dispatch()` — no parallel command-handling path. The hotkey tap's
+  `active_bindings: Arc<Mutex<HashSet<KeyCombo>>>` (`tili-ax/src/hotkey.rs`)
+  is the *one* sanctioned exception to "no locks, single owning loop" — a
+  `CGEventTap` callback must decide synchronously whether to consume a
+  keystroke and can't await a round-trip into `WmState`'s loop to find out.
+  Don't add a second one without a similarly hard constraint forcing it.
 
 ## Release process
 

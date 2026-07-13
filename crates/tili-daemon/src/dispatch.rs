@@ -26,6 +26,11 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
         Command::MoveNodeToWorkspace(name) => {
             result_response(state.move_focused_to_workspace(&name))
         }
+        Command::ModeEnter(name) => result_response(state.enter_mode(&name)),
+        Command::ModeExit => {
+            state.exit_mode();
+            Response::Ok
+        }
         _ => Response::Err {
             message: "not implemented yet".to_string(),
         },
@@ -108,5 +113,39 @@ mod tests {
         let active: Vec<_> = workspaces.iter().filter(|w| w.active).collect();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].name, "entertain");
+    }
+
+    #[test]
+    fn entering_an_unknown_mode_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::ModeEnter("resize".to_string()));
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn mode_round_trips_via_config_then_hotkey_resolution() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            keybindings mode="main" {
+                bind "alt-shift-semicolon" "mode resize"
+            }
+            keybindings mode="resize" {
+                bind "escape" "mode main"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        let enter_resize = tili_ax::parse_key_combo("alt-shift-semicolon").unwrap();
+        assert!(state.active_key_combos().contains(&enter_resize));
+
+        let response = dispatch(&mut state, Command::ModeEnter("resize".to_string()));
+        assert!(matches!(response, Response::Ok));
+
+        let exit_resize = tili_ax::parse_key_combo("escape").unwrap();
+        assert!(state.active_key_combos().contains(&exit_resize));
+        assert!(!state.active_key_combos().contains(&enter_resize));
     }
 }

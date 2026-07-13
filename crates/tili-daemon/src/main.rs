@@ -2,6 +2,9 @@ mod dispatch;
 mod socket;
 mod state;
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use dispatch::dispatch;
 use state::WmState;
 use tili_ax::WmEvent;
@@ -23,6 +26,8 @@ async fn main() -> std::io::Result<()> {
 
     let mut events = tili_ax::spawn_event_watcher();
     let mut config_updates = spawn_config_reload_bridge();
+    let active_combos = Arc::new(Mutex::new(HashSet::new()));
+    let mut hotkeys = spawn_hotkey_bridge(active_combos.clone());
     let mut state = WmState::default();
 
     let config_path = tili_config::default_config_path();
@@ -36,10 +41,16 @@ async fn main() -> std::io::Result<()> {
             config_path.display()
         ),
     }
+    sync_active_combos(&active_combos, &state);
 
-    // Single loop, no locks: every source of change (client connections,
-    // config reloads now, hotkeys in a later milestone) is a branch of this
-    // same select!, so WmState only ever mutates from one place at a time.
+    // Single loop, no locks around WmState: every source of change (client
+    // connections, background AX/NSWorkspace events, config reloads,
+    // resolved hotkey presses) is a branch of this same select!, so state
+    // only ever mutates from one place at a time. The one exception is
+    // `active_combos`, a small Mutex<HashSet<KeyCombo>> the hotkey tap's
+    // callback reads synchronously (see `tili_ax::spawn_hotkey_tap`) — kept
+    // in sync via `sync_active_combos` after anything that could change the
+    // current mode or its bindings.
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -50,6 +61,7 @@ async fn main() -> std::io::Result<()> {
                         if let Err(e) = socket::write_response(&mut stream, &response).await {
                             eprintln!("tili-daemon: failed to write response: {e}");
                         }
+                        sync_active_combos(&active_combos, &state);
                     }
                     Err(e) => eprintln!("tili-daemon: failed to read command: {e}"),
                 }
@@ -63,6 +75,16 @@ async fn main() -> std::io::Result<()> {
             Some(config) = config_updates.recv() => {
                 println!("tili-daemon: config reloaded from {}", config_path.display());
                 state.apply_config(&config);
+                sync_active_combos(&active_combos, &state);
+            }
+            Some(combo) = hotkeys.recv() => {
+                // Hotkey-triggered commands go through the exact same
+                // dispatch() the socket handler uses above — see
+                // CLAUDE.md's design invariants for why that's non-negotiable.
+                if let Some(command) = state.resolve_hotkey(combo) {
+                    let _ = dispatch(&mut state, command);
+                }
+                sync_active_combos(&active_combos, &state);
             }
         }
     }
@@ -82,6 +104,12 @@ fn handle_event(state: &mut WmState, event: WmEvent) {
     }
 }
 
+fn sync_active_combos(shared: &Arc<Mutex<HashSet<tili_ax::KeyCombo>>>, state: &WmState) {
+    if let Ok(mut set) = shared.lock() {
+        *set = state.active_key_combos();
+    }
+}
+
 /// Bridges `tili_config`'s plain-`std::sync::mpsc` file-watcher (see its
 /// module docs for why it isn't async itself) into a tokio channel this
 /// daemon's `select!` loop can read from directly.
@@ -91,6 +119,23 @@ fn spawn_config_reload_bridge() -> tokio::sync::mpsc::UnboundedReceiver<tili_con
     std::thread::spawn(move || {
         while let Ok(config) = sync_rx.recv() {
             if tx.send(config).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Bridges `tili_ax::spawn_hotkey_tap`'s plain-`std::sync::mpsc` channel
+/// into a tokio channel, same pattern as `spawn_config_reload_bridge`.
+fn spawn_hotkey_bridge(
+    active_combos: Arc<Mutex<HashSet<tili_ax::KeyCombo>>>,
+) -> tokio::sync::mpsc::UnboundedReceiver<tili_ax::KeyCombo> {
+    let sync_rx = tili_ax::spawn_hotkey_tap(active_combos);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(combo) = sync_rx.recv() {
+            if tx.send(combo).is_err() {
                 break;
             }
         }
