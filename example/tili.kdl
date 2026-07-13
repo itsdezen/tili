@@ -14,7 +14,7 @@ gaps {
     outer 8 8 8 8
 
     // Per-workspace override — anything not listed here uses the gaps above.
-    workspace "entertain" {
+    workspace "random" {
         inner 0
         outer 0
     }
