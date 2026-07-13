@@ -1,0 +1,9 @@
+[package]
+name = "tili-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kdl = "6"
+serde.workspace = true
+notify = "6"

@@ -1,0 +1,7 @@
+[package]
+name = "tili-tree"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+slotmap = "1"

@@ -1,0 +1,10 @@
+[package]
+name = "tili-ax"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axuielement = { version = "0.9.1", features = ["async"] }
+core-foundation = "0.10.1"
+core-graphics = "0.25.0"
+tili-tree = { path = "../tili-tree" }

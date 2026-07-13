@@ -1,0 +1,13 @@
+[package]
+name = "tili-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tili-tree = { path = "../tili-tree" }
+tili-ax = { path = "../tili-ax" }
+tili-config = { path = "../tili-config" }
+tili-ipc = { path = "../tili-ipc" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true

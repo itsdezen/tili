@@ -1,0 +1,13 @@
+[package]
+name = "tili-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tili"
+path = "src/main.rs"
+
+[dependencies]
+tili-ipc = { path = "../tili-ipc" }
+clap.workspace = true
+serde_json.workspace = true
