@@ -132,20 +132,23 @@ cargo build --release --workspace
 
 tili is early enough that architectural feedback is as valuable as code.
 Check [ROADMAP.md](ROADMAP.md) for what's next — milestones are scoped to be
-independently pickup-able. Issues and PRs welcome.
+independently pickup-able. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev
+setup, the pre-PR test gate, and the design invariants PRs are expected to
+respect. Bug reports and feature requests use the issue templates; general
+questions go in [Discussions](https://github.com/itsdezen/tili/discussions).
 
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-Every PR runs this exact gate in CI before it can merge — see
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Tagged pushes
-(`vX.Y.Z`) run the same gate again before building release artifacts; see
+Releases are cut continuously as milestones land — see
 [`.github/workflows/release.yml`](.github/workflows/release.yml) and
-[CHANGELOG.md](CHANGELOG.md) for the release process and versioning
-convention.
+[CHANGELOG.md](CHANGELOG.md) for the process and versioning convention.
+
+## Security
+
+Found a vulnerability? See [SECURITY.md](SECURITY.md) — please don't open a
+public issue for security reports.
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
 
 ## License
 
