@@ -1,23 +1,137 @@
+<div align="center">
+
 # tili
 
-An i3-like tiling window manager for macOS, written in Rust. Uses only the
-public macOS Accessibility API (plus one documented private call to resolve a
-window's `CGWindowID`) — no need to disable System Integrity Protection.
+**A tiling window manager for macOS, built for speed.**
 
-Status: **M0 — scaffolding**. See `docs/plan.md`-equivalent design notes for
-the full architecture and phased roadmap; not yet functional.
+i3-style workflow · public Accessibility API only · Rust · no SIP disable
 
-## Workspace layout
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
+[![Status](https://img.shields.io/badge/status-early%20development-yellow.svg)](ROADMAP.md)
 
-- `crates/tili-tree` — pure container-tree + layout algorithms (Tiles/BSP, Accordion)
-- `crates/tili-ax` — Accessibility API integration
-- `crates/tili-config` — KDL config parsing
-- `crates/tili-ipc` — shared daemon/CLI protocol types
-- `crates/tili-daemon` — the window manager daemon
-- `crates/tili-cli` — the `tili` command-line client
-- `xtask` — release/signing helper tooling
+[Roadmap](ROADMAP.md) · [Contributing](#contributing) · [Architecture](#architecture)
 
-## Development
+</div>
+
+---
+
+## Why tili
+
+Most tiling window managers on macOS force a trade-off: either they poll the
+screen and burn CPU doing it, or they reach for private, undocumented APIs
+that break every time Apple ships a system update. tili takes neither
+shortcut.
+
+- **Event-driven, not polling.** The daemon subscribes to Accessibility and
+  workspace notifications and reacts to them — it does no work while your
+  windows aren't changing. That's the whole idea behind lower idle CPU/RAM
+  than the alternatives.
+- **Public API only.** Exactly one narrowly-scoped private call is used
+  anywhere in the codebase (to resolve a window's real `CGWindowID`) —
+  everything else is the public Accessibility API. You never disable System
+  Integrity Protection to run tili.
+- **A config format that matches how you think.** [KDL](https://kdl.dev)
+  instead of flat TOML tables — workspaces, keybinding modes, and floating
+  rules nest the way they actually relate to each other.
+- **Animation-ready architecture, not animation-as-an-afterthought.** Every
+  window-frame mutation goes through a single seam (`WindowFrameSetter`).
+  v1 ships instant moves; smooth animated transitions plug into that same
+  seam later without a rewrite.
+- **No hotkey daemon required.** tili owns its own global hotkeys. One binary,
+  one daemon, one config file.
+- **Open source, installed via Homebrew.** No App Store, no sandbox
+  restrictions on what a window manager needs to do.
+
+## Status
+
+tili is in **early development** (see [ROADMAP.md](ROADMAP.md) for the full
+milestone breakdown). It is not yet daily-drivable. Star/watch the repo if
+you want to follow along — contributions and design feedback are welcome
+well before v1.
+
+## Preview: config
+
+Configuration is [KDL](https://kdl.dev). This is a trimmed example of what a
+real setup looks like:
+
+```kdl
+workspaces {
+    workspace "work" monitor="main"
+    workspace "entertain" monitor="main"
+    workspace "random"
+}
+
+default-layout "tiles"
+
+gaps {
+    inner 4
+    outer 8 8 8 8
+}
+
+keybindings mode="main" {
+    bind "alt-h" "focus left"
+    bind "alt-shift-h" "move left"
+    bind "alt-w" "workspace work"
+    bind "alt-slash" "layout toggle"
+}
+
+floating-rules {
+    rule app-id="com.apple.finder"
+    rule app-id="com.apple.systempreferences" { width 900; height 600; center true }
+
+    defaults { center true; width-ratio 0.6; height-ratio 0.6 }
+}
+```
+
+## Architecture
+
+tili is a Cargo workspace split along strict boundaries so the hardest parts
+(the container tree, the layout algorithms) can be tested without a Mac at
+all, and the parts that touch the OS (`AXUIElement`, `NSWorkspace`, display
+reconfiguration) stay isolated in one place.
+
+```
+crates/
+├── tili-tree     pure container-tree + layout algorithms (Tiles/BSP, Accordion)
+├── tili-ax        Accessibility API integration, the WindowFrameSetter seam
+├── tili-config    KDL parsing + validation, hot-reload
+├── tili-ipc        shared daemon/CLI protocol types
+├── tili-daemon     the window manager: event loop, state, hotkeys
+└── tili-cli        the `tili` command-line client
+```
+
+The daemon is single-threaded around one piece of state: every command,
+whether it comes from a global hotkey or the CLI over a Unix socket, flows
+through the same `dispatch(&mut WmState, Command) -> Response` function. No
+locks, no drift between "what the hotkey does" and "what the CLI does."
+
+Workspaces are virtual — macOS exposes no public API to control Spaces, so
+inactive-workspace windows are parked off-screen rather than relying on real
+Spaces, the same technique other public-API-only tools in this space use.
+
+## Installation
+
+Not yet published. Once M11 (release engineering) lands, installation will
+be:
+
+```sh
+brew install tili/tap/tili
+```
+
+Until then, build from source:
+
+```sh
+git clone https://github.com/itsdezen/tili
+cd tili
+cargo build --release --workspace
+```
+
+## Contributing
+
+tili is early enough that architectural feedback is as valuable as code.
+Check [ROADMAP.md](ROADMAP.md) for what's next — milestones are scoped to be
+independently pickup-able. Issues and PRs welcome.
 
 ```sh
 cargo build --workspace
@@ -26,4 +140,4 @@ cargo test --workspace
 
 ## License
 
-MIT
+[MIT](LICENSE)
