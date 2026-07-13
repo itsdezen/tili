@@ -33,6 +33,16 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
         }
         Command::LayoutToggle => result_response(state.toggle_layout()),
         Command::LayoutSet(kind) => result_response(state.set_layout(kind)),
+        Command::FocusMonitor => {
+            state.focus_monitor_next();
+            Response::Ok
+        }
+        Command::ListMonitors => match serde_json::to_value(state.list_monitors()) {
+            Ok(payload) => Response::OkWithPayload(payload),
+            Err(e) => Response::Err {
+                message: e.to_string(),
+            },
+        },
         _ => Response::Err {
             message: "not implemented yet".to_string(),
         },

@@ -28,6 +28,7 @@ async fn main() -> std::io::Result<()> {
     let mut config_updates = spawn_config_reload_bridge();
     let active_combos = Arc::new(Mutex::new(HashSet::new()));
     let mut hotkeys = spawn_hotkey_bridge(active_combos.clone());
+    let mut displays_changed = spawn_display_watcher_bridge();
     let mut state = WmState::default();
 
     let config_path = tili_config::default_config_path();
@@ -86,6 +87,11 @@ async fn main() -> std::io::Result<()> {
                 }
                 sync_active_combos(&active_combos, &state);
             }
+            Some(()) = displays_changed.recv() => {
+                // A monitor connected/disconnected/reconfigured (M9) — the
+                // callback doesn't say which, so just re-enumerate.
+                state.on_displays_changed();
+            }
         }
     }
 }
@@ -136,6 +142,21 @@ fn spawn_hotkey_bridge(
     std::thread::spawn(move || {
         while let Ok(combo) = sync_rx.recv() {
             if tx.send(combo).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Bridges `tili_ax::spawn_display_watcher`'s plain-`std::sync::mpsc`
+/// channel into a tokio channel, same pattern as the other bridges (M9).
+fn spawn_display_watcher_bridge() -> tokio::sync::mpsc::UnboundedReceiver<()> {
+    let sync_rx = tili_ax::spawn_display_watcher();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(()) = sync_rx.recv() {
+            if tx.send(()).is_err() {
                 break;
             }
         }

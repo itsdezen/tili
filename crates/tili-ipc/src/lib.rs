@@ -26,14 +26,23 @@ pub enum Command {
     MoveNodeToWorkspace(String),
     LayoutSet(LayoutKind),
     LayoutToggle,
-    ResizeRatio { amount: f32 },
+    ResizeRatio {
+        amount: f32,
+    },
     ModeEnter(String),
     ModeExit,
     ListWindows,
     ListWorkspaces,
+    /// Cycles which connected monitor `Focus`/`Move`/`WorkspaceSwitch`/etc.
+    /// operate on. A no-op with fewer than two monitors connected.
+    FocusMonitor,
+    ListMonitors,
     ReloadConfig,
     Ping,
-    Raw { verb: String, args: Vec<String> },
+    Raw {
+        verb: String,
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +80,24 @@ pub struct WorkspaceInfo {
     pub name: String,
     pub active: bool,
     pub window_count: usize,
+    /// Which monitor this workspace is currently shown on, if any (M9).
+    /// `None` for a workspace that exists but is parked (not visible on
+    /// any connected monitor right now).
+    pub monitor: Option<u32>,
+}
+
+/// A connected display as reported by `Command::ListMonitors` (M9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorInfo {
+    /// `CGDirectDisplayID` — not guaranteed stable across sleep/wake or
+    /// hot unplug+replug, see `tili_ax::Monitor`'s docs.
+    pub id: u32,
+    pub is_main: bool,
+    /// Whether `Focus`/`Move`/`WorkspaceSwitch`/etc. currently target this
+    /// monitor.
+    pub focused: bool,
+    pub active_workspace: Option<String>,
+    pub frame: RectInfo,
 }
 
 /// Default location of the daemon's Unix socket.

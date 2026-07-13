@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use regex::Regex;
-use tili_ax::{AxWindow, InstantFrameSetter, KeyCombo, WindowFrameSetter};
-use tili_ipc::{Command, RectInfo, WindowInfo, WorkspaceInfo};
+use tili_ax::{AxWindow, InstantFrameSetter, KeyCombo, Monitor, WindowFrameSetter};
+use tili_ipc::{Command, MonitorInfo, RectInfo, WindowInfo, WorkspaceInfo};
 use tili_tree::{Direction, Gaps, NodeId, Rect, Tree, WindowId};
 
 /// The workspace new windows land in, and the one active at daemon startup.
@@ -47,9 +47,8 @@ struct CompiledFloatingRule {
 }
 
 /// Holds the daemon's entire mutable state. Both the socket handler and the
-/// (future, M6) global-hotkey handler call `dispatch` against the same
-/// `WmState`, so CLI-invoked and hotkey-invoked commands can never behave
-/// differently.
+/// global-hotkey handler call `dispatch` against the same `WmState`, so
+/// CLI-invoked and hotkey-invoked commands can never behave differently.
 ///
 /// `windows` holds the live `AxWindow` handles themselves (not just cached
 /// metadata) across *every* workspace — M3 needs the real `AXUIElement` to
@@ -58,12 +57,22 @@ struct CompiledFloatingRule {
 /// only via `placements`. `workspace_focus` remembers the last-focused
 /// node per workspace, so switching back to one restores where you left
 /// off rather than defaulting to the root every time.
+///
+/// M9: each connected monitor shows at most one workspace at a time
+/// (`active_workspace: monitor id -> workspace name` — a workspace absent
+/// from this map is parked, wherever it last was). `focused_monitor` is
+/// which one `Focus`/`Move`/`WorkspaceSwitch`/etc. target; `FocusMonitor`
+/// is the only thing that changes it. Config-driven workspace-to-monitor
+/// pinning (`WorkspaceConfig.monitor`) is intentionally left unwired here —
+/// M9's bar is hot-plug/unplug safety, not that finer-grained UX.
 pub struct WmState {
     windows: HashMap<WindowId, AxWindow>,
     placements: HashMap<WindowId, Placement>,
     workspaces: HashMap<String, Tree>,
     workspace_focus: HashMap<String, NodeId>,
-    active_workspace: String,
+    monitors: Vec<Monitor>,
+    active_workspace: HashMap<u32, String>,
+    focused_monitor: u32,
     frame_setter: Box<dyn WindowFrameSetter>,
     gaps: Gaps,
     workspace_gaps: HashMap<String, Gaps>,
@@ -80,12 +89,20 @@ impl Default for WmState {
     fn default() -> Self {
         let mut workspaces = HashMap::new();
         workspaces.insert(DEFAULT_WORKSPACE.to_string(), Tree::new());
+
+        let monitors = tili_ax::list_monitors();
+        let focused_monitor = monitors.first().map(|m| m.id).unwrap_or(0);
+        let mut active_workspace = HashMap::new();
+        active_workspace.insert(focused_monitor, DEFAULT_WORKSPACE.to_string());
+
         Self {
             windows: HashMap::new(),
             placements: HashMap::new(),
             workspaces,
             workspace_focus: HashMap::new(),
-            active_workspace: DEFAULT_WORKSPACE.to_string(),
+            monitors,
+            active_workspace,
+            focused_monitor,
             frame_setter: Box::new(InstantFrameSetter),
             gaps: Gaps::default(),
             workspace_gaps: HashMap::new(),
@@ -129,6 +146,7 @@ impl WmState {
             self.remove_placement(id);
         }
 
+        let active_workspace = self.active_workspace_name();
         for window in fresh {
             let id = window.id();
             let is_new = !self.placements.contains_key(&id);
@@ -148,7 +166,7 @@ impl WmState {
                 self.placements.insert(
                     id,
                     Placement {
-                        workspace: self.active_workspace.clone(),
+                        workspace: active_workspace.clone(),
                         floating: true,
                     },
                 );
@@ -156,15 +174,15 @@ impl WmState {
                     self.frame_setter.set_frame(w, frame);
                 }
             } else {
-                let near = self.workspace_focus.get(&self.active_workspace).copied();
+                let near = self.workspace_focus.get(&active_workspace).copied();
                 let node = self.active_tree_mut().insert_window(id, near);
                 self.workspace_focus
-                    .entry(self.active_workspace.clone())
+                    .entry(active_workspace.clone())
                     .or_insert(node);
                 self.placements.insert(
                     id,
                     Placement {
-                        workspace: self.active_workspace.clone(),
+                        workspace: active_workspace.clone(),
                         floating: false,
                     },
                 );
@@ -187,7 +205,7 @@ impl WmState {
             self.windows.remove(&id);
             self.remove_placement(id);
         }
-        self.relayout_active();
+        self.relayout_all_visible();
     }
 
     pub fn list_windows(&self) -> Vec<WindowInfo> {
@@ -288,7 +306,7 @@ impl WmState {
             .collect();
         self.floating_defaults = config.floating_defaults;
 
-        self.relayout_active();
+        self.relayout_all_visible();
     }
 
     /// Switches which mode's keybindings are active. Returns an error if
@@ -333,12 +351,99 @@ impl WmState {
             .iter()
             .map(|(name, tree)| WorkspaceInfo {
                 name: name.clone(),
-                active: *name == self.active_workspace,
+                active: self.active_workspace.values().any(|n| n == name),
                 window_count: tree.window_ids().len(),
+                monitor: self
+                    .active_workspace
+                    .iter()
+                    .find(|(_, n)| *n == name)
+                    .map(|(&id, _)| id),
             })
             .collect();
         workspaces.sort_by(|a, b| a.name.cmp(&b.name));
         workspaces
+    }
+
+    /// Every connected monitor and what it's currently showing (M9).
+    pub fn list_monitors(&self) -> Vec<MonitorInfo> {
+        self.monitors
+            .iter()
+            .map(|m| MonitorInfo {
+                id: m.id,
+                is_main: m.is_main,
+                focused: m.id == self.focused_monitor,
+                active_workspace: self.active_workspace.get(&m.id).cloned(),
+                frame: RectInfo {
+                    x: m.frame.x,
+                    y: m.frame.y,
+                    width: m.frame.width,
+                    height: m.frame.height,
+                },
+            })
+            .collect()
+    }
+
+    /// Cycles `focused_monitor` to the next connected monitor, wrapping —
+    /// a no-op with fewer than two monitors connected.
+    pub fn focus_monitor_next(&mut self) {
+        if self.monitors.len() < 2 {
+            return;
+        }
+        let ids: Vec<u32> = self.monitors.iter().map(|m| m.id).collect();
+        let current_idx = ids
+            .iter()
+            .position(|&id| id == self.focused_monitor)
+            .unwrap_or(0);
+        self.focused_monitor = ids[(current_idx + 1) % ids.len()];
+    }
+
+    /// Re-enumerates connected monitors in response to a hot-plug/unplug
+    /// signal from `tili_ax::spawn_display_watcher`. A disconnected
+    /// monitor's active workspace is parked (its windows aren't lost, just
+    /// no longer shown anywhere, exactly like switching away from it); a
+    /// newly connected monitor gets a fresh, empty workspace. Every
+    /// still-visible workspace is re-laid-out afterward since frames may
+    /// have changed even for monitors that stayed connected (resolution or
+    /// arrangement change).
+    pub fn on_displays_changed(&mut self) {
+        let new_monitors = tili_ax::list_monitors();
+        let new_ids: HashSet<u32> = new_monitors.iter().map(|m| m.id).collect();
+        let old_ids: HashSet<u32> = self.monitors.iter().map(|m| m.id).collect();
+        let disconnected: Vec<u32> = old_ids.difference(&new_ids).copied().collect();
+        let connected: Vec<u32> = new_ids.difference(&old_ids).copied().collect();
+
+        self.monitors = new_monitors;
+
+        for id in disconnected {
+            if let Some(name) = self.active_workspace.remove(&id) {
+                let outgoing: Vec<WindowId> = self
+                    .workspaces
+                    .get(&name)
+                    .map(Tree::window_ids)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .chain(self.floating_windows_in(&name))
+                    .collect();
+                for (i, wid) in outgoing.into_iter().enumerate() {
+                    self.park(wid, i);
+                }
+            }
+        }
+
+        if !self.monitors.iter().any(|m| m.id == self.focused_monitor) {
+            self.focused_monitor = self.monitors.first().map(|m| m.id).unwrap_or(0);
+        }
+
+        for id in connected {
+            let name = format!("monitor-{id}");
+            self.workspaces.entry(name.clone()).or_default();
+            self.active_workspace.insert(id, name);
+        }
+
+        for id in self.active_workspace.keys().copied().collect::<Vec<_>>() {
+            self.relayout_monitor(id);
+            self.reposition_floating_for_monitor(id);
+        }
     }
 
     /// Moves the focus pointer to the window adjacent to the current focus
@@ -408,36 +513,68 @@ impl WmState {
         }
     }
 
-    /// Switches which workspace is active on the (single, until M9) monitor:
-    /// parks every window in the outgoing workspace off-screen (tiled and
-    /// floating alike), lays out the incoming one's tiled tree for real and
+    /// Switches which workspace is active on `focused_monitor`: parks every
+    /// window in the outgoing workspace off-screen (tiled and floating
+    /// alike), lays out the incoming one's tiled tree for real and
     /// re-centers its floating windows, and restores its remembered focus.
     /// Creates the target workspace (empty) if it doesn't exist yet. A
-    /// no-op if `name` is already active.
+    /// no-op if `name` is already active on `focused_monitor`.
+    ///
+    /// If `name` is currently shown on a *different* monitor, that monitor
+    /// swaps to whatever was on `focused_monitor` — two monitors never show
+    /// the same workspace at once, since each has its own `Tree` layout
+    /// computed against its own frame.
     pub fn switch_workspace(&mut self, name: &str) {
-        if name == self.active_workspace {
+        let monitor_id = self.focused_monitor;
+        let current = self.active_workspace.get(&monitor_id).cloned();
+        if current.as_deref() == Some(name) {
             return;
         }
 
-        let outgoing: Vec<WindowId> = self
-            .active_tree()
-            .window_ids()
-            .into_iter()
-            .chain(self.floating_windows_in(&self.active_workspace))
-            .collect();
-        for (i, id) in outgoing.into_iter().enumerate() {
-            self.park(id, i);
+        let swap_monitor = self
+            .active_workspace
+            .iter()
+            .find(|(id, n)| **id != monitor_id && n.as_str() == name)
+            .map(|(&id, _)| id);
+
+        if let Some(outgoing_name) = &current {
+            let outgoing: Vec<WindowId> = self
+                .workspaces
+                .get(outgoing_name)
+                .map(Tree::window_ids)
+                .unwrap_or_default()
+                .into_iter()
+                .chain(self.floating_windows_in(outgoing_name))
+                .collect();
+            for (i, id) in outgoing.into_iter().enumerate() {
+                self.park(id, i);
+            }
         }
 
-        self.active_workspace = name.to_string();
+        if let Some(swap_id) = swap_monitor {
+            match &current {
+                Some(outgoing_name) => {
+                    self.active_workspace.insert(swap_id, outgoing_name.clone());
+                }
+                None => {
+                    self.active_workspace.remove(&swap_id);
+                }
+            }
+        }
+
         self.workspaces.entry(name.to_string()).or_default();
+        self.active_workspace.insert(monitor_id, name.to_string());
 
         self.relayout_active();
         self.reposition_floating_in_active_workspace();
+        if let Some(swap_id) = swap_monitor {
+            self.relayout_monitor(swap_id);
+            self.reposition_floating_for_monitor(swap_id);
+        }
 
         let restore = self
             .workspace_focus
-            .get(&self.active_workspace)
+            .get(name)
             .copied()
             .or_else(|| self.active_tree().default_focus());
         if let Some(node) = restore {
@@ -447,11 +584,13 @@ impl WmState {
     }
 
     /// Moves the focused window into a different workspace's tree and
-    /// parks it immediately (since, unless `target_name` happens to also be
-    /// the active workspace, it's no longer visible). Focus moves to
-    /// whatever the active workspace suggests next.
+    /// parks it immediately, unless the target workspace happens to
+    /// already be visible on some other monitor — in that case it's
+    /// relaid-out there right away instead of sitting parked. Focus moves
+    /// to whatever the active workspace suggests next.
     pub fn move_focused_to_workspace(&mut self, target_name: &str) -> Result<(), String> {
-        if target_name == self.active_workspace {
+        let active_workspace = self.active_workspace_name();
+        if target_name == active_workspace {
             return Ok(());
         }
         let current_node = self.focused_node().ok_or("no window is focused")?;
@@ -463,11 +602,10 @@ impl WmState {
         let suggested = self.active_tree_mut().remove_window(id);
         match suggested {
             Some(n) => {
-                self.workspace_focus
-                    .insert(self.active_workspace.clone(), n);
+                self.workspace_focus.insert(active_workspace.clone(), n);
             }
             None => {
-                self.workspace_focus.remove(&self.active_workspace);
+                self.workspace_focus.remove(&active_workspace);
             }
         }
 
@@ -485,22 +623,37 @@ impl WmState {
         );
 
         self.park(id, 0);
+        let visible_elsewhere = self
+            .active_workspace
+            .iter()
+            .find(|(mid, n)| **mid != self.focused_monitor && n.as_str() == target_name)
+            .map(|(&mid, _)| mid);
+        if let Some(mid) = visible_elsewhere {
+            self.relayout_monitor(mid);
+        }
         self.relayout_active();
         Ok(())
     }
 
+    fn active_workspace_name(&self) -> String {
+        self.active_workspace
+            .get(&self.focused_monitor)
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_WORKSPACE.to_string())
+    }
+
     fn active_tree(&self) -> &Tree {
         // Always present: every place that changes `active_workspace` also
-        // ensures the corresponding entry exists first.
+        // ensures the corresponding `workspaces` entry exists first, and the
+        // `DEFAULT_WORKSPACE` fallback is inserted in `Default::default()`.
         self.workspaces
-            .get(&self.active_workspace)
+            .get(&self.active_workspace_name())
             .expect("active workspace always has a tree entry")
     }
 
     fn active_tree_mut(&mut self) -> &mut Tree {
-        self.workspaces
-            .entry(self.active_workspace.clone())
-            .or_default()
+        let name = self.active_workspace_name();
+        self.workspaces.entry(name).or_default()
     }
 
     fn floating_windows_in(&self, workspace: &str) -> Vec<WindowId> {
@@ -541,12 +694,14 @@ impl WmState {
     }
 
     fn focused_node(&self) -> Option<NodeId> {
-        self.workspace_focus.get(&self.active_workspace).copied()
+        self.workspace_focus
+            .get(&self.active_workspace_name())
+            .copied()
     }
 
     fn set_focused_node(&mut self, node: NodeId) {
         self.workspace_focus
-            .insert(self.active_workspace.clone(), node);
+            .insert(self.active_workspace_name(), node);
     }
 
     fn raise_focused(&self) {
@@ -558,33 +713,66 @@ impl WmState {
         }
     }
 
-    /// Moves a window off-screen without resizing it. `offset_index`
-    /// spreads multiple simultaneously-parked windows apart so they don't
-    /// all land on the exact same off-screen coordinate.
+    /// Moves a window off-screen without resizing it, outside the combined
+    /// bounds of every *currently connected* monitor so a parked window can
+    /// never land on a real display no matter how many are attached or how
+    /// they're arranged. `offset_index` spreads multiple simultaneously-
+    /// parked windows apart so they don't all land on the exact same
+    /// off-screen coordinate.
     fn park(&mut self, id: WindowId, offset_index: usize) {
-        let main = tili_ax::main_display_frame();
-        let x = main.x + main.width + PARK_MARGIN + (offset_index as f64 * PARK_OFFSET_STEP);
-        let y = main.y;
+        let bounds = tili_ax::combined_bounds(&self.monitors);
+        let x = bounds.x + bounds.width + PARK_MARGIN + (offset_index as f64 * PARK_OFFSET_STEP);
+        let y = bounds.y;
         if let Some(window) = self.windows.get_mut(&id) {
             window.set_position(x, y);
         }
     }
 
-    /// Recomputes every window's frame in the *active* workspace and
+    fn monitor_frame(&self, monitor_id: u32) -> Option<Rect> {
+        self.monitors
+            .iter()
+            .find(|m| m.id == monitor_id)
+            .map(|m| m.frame)
+    }
+
+    /// Recomputes every tiled window's frame on `focused_monitor` and
     /// applies it via the `WindowFrameSetter` seam — never a direct AX call
-    /// from here. Windows in other workspaces are left exactly where they
-    /// are (parked), since they're not visible right now. Only touches
-    /// *tiled* windows — floating windows keep whatever position they were
-    /// last centered/parked at (see `reposition_floating_in_active_workspace`
-    /// for when floating windows do get repositioned).
+    /// from here. See `relayout_monitor` for the actual per-monitor logic;
+    /// most callers only ever need to affect the focused monitor since
+    /// that's the only one their own mutation touched.
     fn relayout_active(&mut self) {
-        let area = tili_ax::main_display_frame();
-        let gaps = self
-            .workspace_gaps
-            .get(&self.active_workspace)
-            .copied()
-            .unwrap_or(self.gaps);
-        let placements = self.active_tree().layout(area, gaps);
+        self.relayout_monitor(self.focused_monitor);
+    }
+
+    /// Re-lays-out every monitor that's currently showing something —
+    /// used after a change (config reload, app termination) that could
+    /// plausibly have touched a workspace visible on a *non*-focused
+    /// monitor.
+    fn relayout_all_visible(&mut self) {
+        for id in self.active_workspace.keys().copied().collect::<Vec<_>>() {
+            self.relayout_monitor(id);
+        }
+    }
+
+    /// Recomputes every tiled window's frame in whatever workspace is
+    /// active on `monitor_id` and applies it via the `WindowFrameSetter`
+    /// seam. A no-op if `monitor_id` isn't connected or has no active
+    /// workspace assigned. Windows in other (parked) workspaces are left
+    /// exactly where they are. Only touches *tiled* windows — floating
+    /// windows keep whatever position they were last centered/parked at
+    /// (see `reposition_floating_for_monitor`).
+    fn relayout_monitor(&mut self, monitor_id: u32) {
+        let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
+            return;
+        };
+        let Some(area) = self.monitor_frame(monitor_id) else {
+            return;
+        };
+        let Some(tree) = self.workspaces.get(&name) else {
+            return;
+        };
+        let gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
+        let placements = tree.layout(area, gaps);
         for (id, rect) in placements {
             if let Some(window) = self.windows.get_mut(&id) {
                 self.frame_setter.set_frame(window, rect);
@@ -592,17 +780,28 @@ impl WmState {
         }
     }
 
-    /// Re-centers/sizes every floating window belonging to the active
-    /// workspace — called when a workspace becomes active again after
-    /// being parked, so floating windows land back where they should
-    /// rather than staying at their off-screen parked coordinates.
+    /// Re-centers/sizes every floating window belonging to whatever
+    /// workspace is active on `focused_monitor` — called when a workspace
+    /// becomes active again after being parked, so floating windows land
+    /// back where they should rather than staying at their off-screen
+    /// parked coordinates.
     fn reposition_floating_in_active_workspace(&mut self) {
-        let ids = self.floating_windows_in(&self.active_workspace);
+        self.reposition_floating_for_monitor(self.focused_monitor);
+    }
+
+    fn reposition_floating_for_monitor(&mut self, monitor_id: u32) {
+        let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
+            return;
+        };
+        let Some(area) = self.monitor_frame(monitor_id) else {
+            return;
+        };
+        let ids = self.floating_windows_in(&name);
         for id in ids {
             let frame = self
                 .windows
                 .get(&id)
-                .and_then(|w| self.compute_floating_frame(w));
+                .and_then(|w| self.compute_floating_frame_in(w, area));
             if let Some(frame) = frame
                 && let Some(window) = self.windows.get_mut(&id)
             {
@@ -613,8 +812,20 @@ impl WmState {
 
     /// Returns the frame a floating window should be placed at if `window`
     /// matches a floating rule (first match wins), or `None` if it doesn't
-    /// match any — meaning it should be tiled instead.
+    /// match any — meaning it should be tiled instead. Sized/centered
+    /// against `focused_monitor`'s frame, since new windows always land on
+    /// the focused monitor's active workspace.
     fn compute_floating_frame(&self, window: &AxWindow) -> Option<Rect> {
+        let area = self.monitor_frame(self.focused_monitor).unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 900.0,
+        });
+        self.compute_floating_frame_in(window, area)
+    }
+
+    fn compute_floating_frame_in(&self, window: &AxWindow, area: Rect) -> Option<Rect> {
         let bundle_id = window.bundle_id()?;
         let rule = self.floating_rules.iter().find(|rule| {
             rule.app_id == bundle_id
@@ -624,7 +835,6 @@ impl WmState {
                     .is_none_or(|re| re.is_match(window.title()))
         })?;
 
-        let area = tili_ax::main_display_frame();
         let width = rule
             .width
             .map(f64::from)

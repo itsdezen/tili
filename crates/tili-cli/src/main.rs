@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use tili_ipc::{Command, Direction, LayoutKind, Response, WindowInfo, WorkspaceInfo};
+use tili_ipc::{Command, Direction, LayoutKind, MonitorInfo, Response, WindowInfo, WorkspaceInfo};
 
 #[derive(Parser)]
 #[command(name = "tili", about = "CLI for the tili tiling window manager daemon")]
@@ -55,6 +55,10 @@ enum Commands {
     MoveToWorkspace { name: String },
     /// Toggle, or explicitly set, the focused window's container layout.
     Layout { mode: LayoutArg },
+    /// Cycle which connected monitor commands act on.
+    FocusMonitor,
+    /// List connected monitors, marking which one is focused.
+    ListMonitors,
 }
 
 /// What shape of payload to expect back, so the CLI doesn't have to guess
@@ -63,6 +67,7 @@ enum ExpectedPayload {
     None,
     Windows,
     Workspaces,
+    Monitors,
 }
 
 fn main() {
@@ -85,6 +90,8 @@ fn main() {
             };
             (command, ExpectedPayload::None)
         }
+        Commands::FocusMonitor => (Command::FocusMonitor, ExpectedPayload::None),
+        Commands::ListMonitors => (Command::ListMonitors, ExpectedPayload::Monitors),
     };
 
     match send(command) {
@@ -132,6 +139,7 @@ fn print_response(response: Response, expected: ExpectedPayload) {
         Response::OkWithPayload(payload) => match expected {
             ExpectedPayload::Windows => print_windows(payload),
             ExpectedPayload::Workspaces => print_workspaces(payload),
+            ExpectedPayload::Monitors => print_monitors(payload),
             ExpectedPayload::None => println!("{payload}"),
         },
     }
@@ -158,7 +166,32 @@ fn print_workspaces(payload: serde_json::Value) {
         Ok(workspaces) => {
             for w in workspaces {
                 let marker = if w.active { "*" } else { " " };
-                println!("{marker} {:<20} {} window(s)", w.name, w.window_count);
+                let monitor = w
+                    .monitor
+                    .map(|id| format!("monitor={id}"))
+                    .unwrap_or_default();
+                println!(
+                    "{marker} {:<20} {} window(s)  {monitor}",
+                    w.name, w.window_count
+                );
+            }
+        }
+        Err(_) => println!("(response payload not recognized)"),
+    }
+}
+
+fn print_monitors(payload: serde_json::Value) {
+    match serde_json::from_value::<Vec<MonitorInfo>>(payload) {
+        Ok(monitors) if monitors.is_empty() => println!("no monitors found"),
+        Ok(monitors) => {
+            for m in monitors {
+                let marker = if m.focused { "*" } else { " " };
+                let main = if m.is_main { "main" } else { "    " };
+                let workspace = m.active_workspace.unwrap_or_else(|| "-".to_string());
+                println!(
+                    "{marker} {:<10} {main}  {:.0}x{:.0}+{:.0}+{:.0}  {workspace}",
+                    m.id, m.frame.width, m.frame.height, m.frame.x, m.frame.y
+                );
             }
         }
         Err(_) => println!("(response payload not recognized)"),

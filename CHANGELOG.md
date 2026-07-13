@@ -10,6 +10,44 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-13
+
+### Added
+
+- M9: multi-monitor support. `tili-ax` gains real display enumeration
+  (`list_monitors`, via `CGDisplay::active_displays`, re-enumerated fresh on
+  every call rather than cached) and `spawn_display_watcher`, a
+  `CGDisplayRegisterReconfigurationCallback` on its own dedicated
+  `CFRunLoop` thread (same pattern as the NSWorkspace/AX watchers) that
+  signals "something about the display setup changed, re-enumerate" — the
+  flags aren't interpreted bit-by-bit, since re-running `list_monitors` is
+  simpler and covers hot-plug, unplug, resolution, and rearrangement
+  changes uniformly. `WmState.active_workspace` becomes a
+  `HashMap<monitor id, workspace name>` — each connected monitor shows at
+  most one workspace, laid out against its own frame; `focused_monitor`
+  (new `Command::FocusMonitor` / `tili focus-monitor`, cycling, no-op with
+  fewer than two monitors) is which one `Focus`/`Move`/`WorkspaceSwitch`
+  target. `switch_workspace` now swaps a workspace already visible on
+  another monitor rather than ever showing the same workspace on two
+  monitors at once. On a monitor disconnecting, whatever workspace was
+  showing there is parked (exactly like switching away from it — no window
+  is lost, just no longer visible anywhere) and its monitor slot is
+  dropped; a newly connected monitor gets a fresh empty workspace. Parking
+  now targets a coordinate outside the *combined* bounds of every connected
+  monitor (`tili_ax::combined_bounds`, unit-tested) instead of just past
+  main's bounds — fixes a latent bug where a parked window could
+  theoretically land on a second real monitor positioned to the right of
+  main. `floating-rules` centering/sizing and `tili list-workspaces`/new
+  `tili list-monitors` are all monitor-aware. Config-driven workspace-to-
+  monitor pinning (`WorkspaceConfig.monitor`, parsed since M5) stays
+  intentionally unwired — M9's bar is hot-plug/unplug safety, not that
+  finer-grained UX. Verified end-to-end on real hardware: connecting a
+  second display lets `focus-monitor` + `workspace <name>` tile a different
+  workspace there independently of the main display, and unplugging it
+  parks that workspace's windows (they reappear, still tiled correctly,
+  the moment they're switched back to on a remaining display) rather than
+  losing or stranding them.
+
 ## [0.8.0] - 2026-07-13
 
 ### Added

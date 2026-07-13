@@ -83,11 +83,24 @@ the dependency direction is a hard boundary, not just organization:
   that moves/resizes a real window must go through `dyn WindowFrameSetter`,
   not call `AxWindow::set_frame` directly. v1 only implements
   `InstantFrameSetter`; this trait is the seam a future animated setter
-  plugs into without touching layout code. `src/display.rs` gets the main
-  display's usable frame for layout — full `CGDisplay` bounds minus a
-  hardcoded menu-bar inset; there's no `CGDisplay`-level equivalent of
-  `NSScreen.visibleFrame`, so this is a known-approximate stand-in until M9
-  brings in real `NSScreen`-based per-monitor frames. `src/workspace.rs`
+  plugs into without touching layout code. `src/display.rs` (M9)
+  enumerates every connected display via `CGDisplay::active_displays()` —
+  `list_monitors()` is re-run fresh on every call (nothing cached) so
+  hot-plug/unplug just falls out of calling it again; each `Monitor`'s
+  usable `frame` is its full `CGDisplay` bounds minus a hardcoded menu-bar
+  inset applied only when `is_main` (secondary displays don't carry a menu
+  bar). This is a deliberate, documented simplification over real
+  `NSScreen.visibleFrame` (which would be more precise about notches/Dock
+  placement but requires flipping between `NSScreen`'s bottom-left-origin
+  coordinate space and AX/`CGDisplay`'s top-left-origin one — judged not
+  worth the risk for what M9 needs). `combined_bounds(&[Monitor])` is a
+  pure, unit-tested helper giving the union of every connected monitor's
+  bounds, used to keep parked windows outside of *all* real displays, not
+  just main. `spawn_display_watcher()` registers a
+  `CGDisplayRegisterReconfigurationCallback` on its own dedicated
+  `CFRunLoop` thread (same reasoning as the NSWorkspace/AX watchers) and
+  just signals "something changed, re-enumerate" per callback — it doesn't
+  interpret `CGDisplayChangeSummaryFlags`. `src/workspace.rs`
   bridges `NSWorkspace` app-launch/quit notifications via `objc2`/
   `objc2-app-kit` — note it spawns its own dedicated `CFRunLoop` thread,
   since a process without `NSApplication` needs *some* thread pumping a run
@@ -162,18 +175,46 @@ the dependency direction is a hard boundary, not just organization:
   `compute_floating_frame`, which checks `AxWindow::bundle_id()` against
   each compiled rule in order and computes a centered/sized `Rect` from the
   rule's or the config's `defaults`' width/height-ratio) live entirely
-  outside any `Tree` — `relayout_active` only ever touches tiled windows;
-  floating ones only get repositioned at creation and when their workspace
-  becomes active again (`reposition_floating_in_active_workspace`), not on
-  every layout-affecting event, so a user's manual drag of a floating
-  window isn't undone by, say, a gap change. `workspace_focus` remembers
-  each workspace's last-focused node so switching back restores where you
-  left off. Only the *active* workspace's tiled tree ever gets laid out on
-  real screen coordinates (`relayout_active`); every other workspace's
-  windows (tiled or floating) sit wherever `switch_workspace` last parked
-  them (off-screen, since macOS has no public Spaces API to actually hide
-  them). New windows always join the active workspace next to the current
-  focus (if tiled) or just get centered (if floating).
+  outside any `Tree` — floating ones only get repositioned at creation and
+  when their workspace becomes active again, not on every layout-affecting
+  event, so a user's manual drag of a floating window isn't undone by, say,
+  a gap change. `workspace_focus` remembers each workspace's last-focused
+  node so switching back restores where you left off. New windows always
+  join the active workspace next to the current focus (if tiled) or just
+  get centered (if floating).
+
+  **M9 — multi-monitor.** `active_workspace: HashMap<u32, String>` maps
+  each connected monitor's id (`tili_ax::Monitor::id`) to whichever
+  workspace it's currently showing — a workspace absent from this map is
+  parked, wherever it last was. `focused_monitor: u32` is which one
+  `Focus`/`Move`/`WorkspaceSwitch`/layout commands actually target;
+  `relayout_active`/`active_tree`/`active_tree_mut` all resolve through it
+  (via `active_workspace_name()`), so most of the pre-M9 code didn't need
+  to change — only `switch_workspace`, `apply_windows_changed`, and
+  `move_focused_to_workspace` needed to become monitor-name-aware.
+  `Command::FocusMonitor` (`focus_monitor_next`) is the *only* thing that
+  changes `focused_monitor`; it cycles through `self.monitors`, no-op
+  under two. `switch_workspace` swaps with whatever monitor is already
+  showing the target workspace, if any — two monitors can never display
+  the same workspace at once, since each has its own `Tree` layout
+  computed against its own frame. `on_displays_changed` (called from
+  `main.rs` on every `spawn_display_watcher` signal) is the hot-plug/
+  unplug handler: a disconnected monitor's workspace gets parked and its
+  slot dropped (same mechanics as switching away from it — nothing is
+  lost, just no longer shown anywhere); a newly connected monitor gets a
+  fresh empty `"monitor-<id>"` workspace; every still-visible workspace
+  gets re-laid-out afterward since frames may have changed even for
+  monitors that stayed connected. `relayout_active`/`relayout_monitor`/
+  `relayout_all_visible` are three thicknesses of "recompute and apply
+  frames" — most callers only need the focused monitor (`relayout_active`),
+  but anything that could touch a workspace visible on a *different*
+  monitor (app termination, config reload) uses `relayout_all_visible`.
+  `park()` targets `tili_ax::combined_bounds(&self.monitors)`, not just
+  main's bounds, so a parked window can't land on a real second monitor.
+  Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
+  parsed since M5) is intentionally still unwired — M9's bar is
+  hot-plug/unplug safety, not that finer-grained UX.
+
   `focus`/`move_focused` are the only places that call `AxWindow::focus()`
   (real OS focus/raise); nothing calls it automatically on window creation,
   specifically to avoid focus-stealing every already-open window when the
@@ -208,7 +249,8 @@ the dependency direction is a hard boundary, not just organization:
   sync with what `WmState` actually has bound.
 - **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
   `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
-  `move-to-workspace <name>`, `layout <toggle|tiles|accordion>`). The
+  `move-to-workspace <name>`, `layout <toggle|tiles|accordion>`,
+  `focus-monitor`, `list-monitors`). The
   package is named `tili-cli` but the binary itself is named `tili` (see
   the `[[bin]]` section in its
   `Cargo.toml`). No business logic belongs here — if you're tempted to add

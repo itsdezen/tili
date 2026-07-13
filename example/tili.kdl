@@ -50,6 +50,10 @@ keybindings mode="main" {
 
     bind "alt-slash" "layout toggle"
 
+    // Cycles which connected monitor the above all target — a no-op with
+    // only one monitor. See ROADMAP.md M9.
+    bind "alt-m" "focus-monitor"
+
     // Enter a submode — its own keybindings block takes over until it
     // exits back to "main".
     bind "alt-shift-semicolon" "mode resize"

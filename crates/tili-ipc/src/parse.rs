@@ -24,6 +24,8 @@ pub fn parse(command: &str) -> Command {
         ["mode", name] => Command::ModeEnter((*name).to_string()),
         ["list-windows"] => Command::ListWindows,
         ["list-workspaces"] => Command::ListWorkspaces,
+        ["focus-monitor"] => Command::FocusMonitor,
+        ["list-monitors"] => Command::ListMonitors,
         ["reload-config"] => Command::ReloadConfig,
         ["ping"] => Command::Ping,
         _ => raw(&tokens),

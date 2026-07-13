@@ -6,7 +6,9 @@ pub mod watch;
 pub mod window;
 pub mod workspace;
 
-pub use display::main_display_frame;
+pub use display::{
+    Monitor, combined_bounds, list_monitors, main_display_frame, spawn_display_watcher,
+};
 pub use enumerate::{list_windows, list_windows_for_pid};
 pub use frame_setter::{InstantFrameSetter, WindowFrameSetter};
 pub use hotkey::{KeyCombo, parse_key_combo, spawn_hotkey_tap};
