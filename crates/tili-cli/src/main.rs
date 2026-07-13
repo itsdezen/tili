@@ -39,6 +39,15 @@ enum LayoutArg {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Start tili-daemon in the foreground (Ctrl-C to stop). For an
+    /// always-running background daemon that survives logout/reboot, use
+    /// `tili daemon install` instead.
+    Start,
+    /// Gracefully stop a running daemon (started via `tili start` or
+    /// `tili daemon install`).
+    Stop,
+    /// Report whether the daemon is running and reachable.
+    Status,
     /// Check whether the daemon is reachable.
     Ping,
     /// List currently known windows.
@@ -87,14 +96,29 @@ enum ExpectedPayload {
 fn main() {
     let cli = Cli::parse();
 
-    // Doesn't talk to the daemon's socket at all — a local filesystem +
-    // launchctl operation, handled before the send()/dispatch() path below.
-    if let Commands::Daemon { action } = &cli.command {
-        match action {
-            DaemonAction::Install => install_launch_agent(),
-            DaemonAction::Uninstall => uninstall_launch_agent(),
+    // None of these three go through the generic send()/print_response
+    // path below: Start never talks to the socket at all, and Stop/Status
+    // want their own wording instead of the generic "couldn't reach
+    // daemon" error (which is a hard failure for every other command, but
+    // an expected, calmly-reported outcome for these two).
+    match &cli.command {
+        Commands::Start => start_daemon(),
+        Commands::Stop => {
+            stop_daemon();
+            return;
         }
-        return;
+        Commands::Status => {
+            print_status();
+            return;
+        }
+        Commands::Daemon { action } => {
+            match action {
+                DaemonAction::Install => install_launch_agent(),
+                DaemonAction::Uninstall => uninstall_launch_agent(),
+            }
+            return;
+        }
+        _ => {}
     }
 
     let (command, expected) = match cli.command {
@@ -117,6 +141,9 @@ fn main() {
         }
         Commands::FocusMonitor => (Command::FocusMonitor, ExpectedPayload::None),
         Commands::ListMonitors => (Command::ListMonitors, ExpectedPayload::Monitors),
+        Commands::Start => unreachable!("handled above before the socket connection"),
+        Commands::Stop => unreachable!("handled above before the socket connection"),
+        Commands::Status => unreachable!("handled above before the socket connection"),
         Commands::Daemon { .. } => unreachable!("handled above before the socket connection"),
     };
 
@@ -125,7 +152,7 @@ fn main() {
         Err(e) => {
             eprintln!(
                 "tili: couldn't reach tili-daemon at {}: {e}\n\
-                 (is the daemon running? try `cargo run --bin tili-daemon`)",
+                 (is the daemon running? try `tili start`)",
                 tili_ipc::default_socket_path().display()
             );
             std::process::exit(1);
@@ -226,6 +253,46 @@ fn daemon_binary_path() -> std::path::PathBuf {
         .and_then(|p| p.parent().map(|dir| dir.join("tili-daemon")))
         .filter(|p| p.exists())
         .unwrap_or_else(|| std::path::PathBuf::from("tili-daemon"))
+}
+
+/// `tili start` — the common-case entry point for trying tili out: `exec`s
+/// straight into `tili-daemon` (replacing this process, not spawning a
+/// child) so Ctrl-C/signals reach the daemon directly and there's no
+/// wrapper process left behind. Never returns on success — see
+/// `std::os::unix::process::CommandExt::exec`'s docs. For a daemon that
+/// keeps running across logout/reboot, use `tili daemon install` instead.
+fn start_daemon() -> ! {
+    use std::os::unix::process::CommandExt;
+
+    let binary = daemon_binary_path();
+    let err = std::process::Command::new(&binary).exec();
+    eprintln!("tili: couldn't start {}: {err}", binary.display());
+    std::process::exit(1);
+}
+
+/// `tili stop` — sends `Command::Shutdown`, which the daemon handles
+/// directly in its main loop (not through `dispatch()`) since it's process
+/// lifecycle, not a `WmState` mutation. A daemon that's already not
+/// running is reported calmly, not as an error — stopping something
+/// that's already stopped isn't a failure.
+fn stop_daemon() {
+    match send(Command::Shutdown) {
+        Ok(Response::Ok) => println!("tili: daemon stopped"),
+        Ok(other) => println!("tili: daemon responded unexpectedly to stop: {other:?}"),
+        Err(_) => println!("tili: daemon is not running"),
+    }
+}
+
+/// `tili status` — same underlying check as `tili ping`, worded for a
+/// human glancing at it rather than for scripting.
+fn print_status() {
+    match send(Command::Ping) {
+        Ok(_) => println!(
+            "tili-daemon is running (socket: {})",
+            tili_ipc::default_socket_path().display()
+        ),
+        Err(_) => println!("tili-daemon is not running"),
+    }
 }
 
 fn install_launch_agent() {

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use dispatch::dispatch;
 use state::WmState;
 use tili_ax::WmEvent;
+use tili_ipc::{Command, Response};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -59,6 +60,15 @@ async fn main() -> std::io::Result<()> {
             accepted = listener.accept() => {
                 let (mut stream, _addr) = accepted?;
                 match socket::read_command(&mut stream).await {
+                    Ok(Command::Shutdown) => {
+                        // Respond before exiting so a client waiting on the
+                        // reply (`tili stop`) doesn't hang — not routed
+                        // through dispatch(), since it's process lifecycle,
+                        // not a WmState mutation.
+                        let _ = socket::write_response(&mut stream, &Response::Ok).await;
+                        println!("tili-daemon: shutting down");
+                        break;
+                    }
                     Ok(command) => {
                         let response = dispatch(&mut state, command);
                         if let Err(e) = socket::write_response(&mut stream, &response).await {
@@ -84,7 +94,13 @@ async fn main() -> std::io::Result<()> {
                 // Hotkey-triggered commands go through the exact same
                 // dispatch() the socket handler uses above — see
                 // CLAUDE.md's design invariants for why that's non-negotiable.
+                // Shutdown is the one exception, same reasoning as the
+                // socket branch above.
                 if let Some(command) = state.resolve_hotkey(combo) {
+                    if matches!(command, Command::Shutdown) {
+                        println!("tili-daemon: shutting down (hotkey)");
+                        break;
+                    }
                     let _ = dispatch(&mut state, command);
                 }
                 sync_active_combos(&active_combos, &state);
@@ -101,6 +117,9 @@ async fn main() -> std::io::Result<()> {
             }
         }
     }
+
+    let _ = std::fs::remove_file(tili_ipc::default_socket_path());
+    Ok(())
 }
 
 /// M10: a brand-new install has no `~/.config/tili/tili.kdl` yet — without

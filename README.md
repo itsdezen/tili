@@ -59,24 +59,30 @@ config schema and CLI surface can change between releases — check
 brew install itsdezen/tap/tili
 ```
 
-1. **Grant Accessibility permission** — the first time `tili-daemon` runs
-   it triggers the system prompt; you can also add it manually in
-   *System Settings → Privacy & Security → Accessibility*.
-2. **Write a config** — copy [`example/tili.kdl`](example/tili.kdl) to
-   `~/.config/tili/tili.kdl` and edit (or just run `tili-daemon` once —
-   it writes a starter config there automatically if none exists yet).
-   The daemon hot-reloads on save, no restart needed.
-3. **Start the daemon.** Either run it once to try it out:
-   ```sh
-   tili-daemon &
-   ```
-   or install it as a LaunchAgent so it starts automatically at every
-   login (opt-in, not done by `brew install`):
-   ```sh
-   tili daemon install
-   ```
-4. **Use the keybindings from your config** (or the `tili` CLI directly —
-   see [Commands](#commands) below) to focus/move/tile windows.
+```sh
+tili start
+```
+
+That's it to try it out — `tili start` *is* the daemon (no separate
+`tili-daemon` command to remember), running in the foreground until you
+Ctrl-C it (or run `tili stop`/`tili status` from another terminal). First
+run:
+- Triggers the **Accessibility permission** prompt (add `tili-daemon`
+  manually in *System Settings → Privacy & Security → Accessibility* if
+  you miss it).
+- Writes a starter config to `~/.config/tili/tili.kdl` if none exists yet
+  — edit it and save, no restart needed, changes hot-reload. See
+  [`example/tili.kdl`](example/tili.kdl) for the full commented version.
+
+Use the keybindings from your config (or the `tili` CLI directly — see
+[Commands](#commands) below) to focus/move/tile windows.
+
+Once you're happy with it, make it start automatically at every login
+instead of running `tili start` by hand each time:
+
+```sh
+tili daemon install
+```
 
 ## Other ways to install
 
@@ -142,12 +148,18 @@ floating-rules {
 
 ## Commands
 
-`tili <command>` talks to the running daemon over a Unix socket — the same
-commands are also what keybindings in your config resolve to (e.g. `bind
-"alt-h" "focus left"`).
+`tili start`/`stop`/`status` and `tili daemon install`/`uninstall` manage
+the daemon itself; everything else below is a client command sent over a
+Unix socket to a daemon that's already running — the same commands are
+also what keybindings in your config resolve to (e.g. `bind "alt-h" "focus
+left"`).
 
 | Command | What it does |
 |---|---|
+| `tili start` | Run the daemon in the foreground (Ctrl-C to stop) |
+| `tili stop` | Gracefully stop a running daemon |
+| `tili status` | Report whether the daemon is running |
+| `tili daemon install` / `uninstall` | Manage the auto-start-at-login LaunchAgent |
 | `tili focus <left\|right\|up\|down>` | Move focus to the window in that direction |
 | `tili move <left\|right\|up\|down>` | Swap the focused window with its neighbor |
 | `tili layout <toggle\|tiles\|accordion>` | Toggle or set the focused container's layout |
@@ -157,8 +169,7 @@ commands are also what keybindings in your config resolve to (e.g. `bind
 | `tili focus-monitor` | Cycle which connected monitor commands target |
 | `tili list-monitors` | List connected monitors |
 | `tili list-windows` | List known windows (tiled/floating, frame, pid) |
-| `tili daemon install` / `uninstall` | Manage the auto-start-at-login LaunchAgent |
-| `tili ping` | Check the daemon is reachable |
+| `tili ping` | Check the daemon is reachable (scripting-friendly; see `status`) |
 
 ## Architecture
 

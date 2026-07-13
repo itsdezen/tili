@@ -38,6 +38,11 @@ pub enum Command {
     FocusMonitor,
     ListMonitors,
     ReloadConfig,
+    /// Gracefully stops the daemon: responds `Ok` (so a client waiting on
+    /// the reply doesn't hang) before the process exits. Handled directly
+    /// in `tili-daemon`'s main loop, not through `dispatch()` — it isn't a
+    /// `WmState` mutation, it's process lifecycle.
+    Shutdown,
     Ping,
     Raw {
         verb: String,

@@ -27,6 +27,7 @@ pub fn parse(command: &str) -> Command {
         ["focus-monitor"] => Command::FocusMonitor,
         ["list-monitors"] => Command::ListMonitors,
         ["reload-config"] => Command::ReloadConfig,
+        ["shutdown"] => Command::Shutdown,
         ["ping"] => Command::Ping,
         _ => raw(&tokens),
     }
@@ -90,6 +91,11 @@ mod tests {
             Command::ModeEnter(name) if name == "resize"
         ));
         assert!(matches!(parse("mode exit"), Command::ModeExit));
+    }
+
+    #[test]
+    fn parses_shutdown() {
+        assert!(matches!(parse("shutdown"), Command::Shutdown));
     }
 
     #[test]

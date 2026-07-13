@@ -261,7 +261,12 @@ the dependency direction is a hard boundary, not just organization:
   the single `dispatch(&mut WmState, Command) -> Response` function — both
   the Unix-socket handler and the global-hotkey handler must call this
   same function, never a separate code path, or CLI-invoked and
-  hotkey-invoked behavior can drift apart. `src/main.rs` is one
+  hotkey-invoked behavior can drift apart. `Command::Shutdown` is the one
+  deliberate exception — it's process lifecycle, not a `WmState` mutation,
+  so both `main.rs`'s socket-accept and hotkey `select!` arms check for it
+  and `break` the loop directly instead of routing it through `dispatch()`
+  (which would have nowhere to signal "please exit the process" from).
+  `src/main.rs` is one
   `tokio::select!` loop merging socket accepts,
   `tili_ax::spawn_event_watcher()`'s channel, the config-reload bridge, the
   hotkey-tap bridge, the display-watcher bridge (M9), and the mouse-watcher
@@ -277,7 +282,7 @@ the dependency direction is a hard boundary, not just organization:
 - **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
   `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
   `move-to-workspace <name>`, `layout <toggle|tiles|accordion>`,
-  `focus-monitor`, `list-monitors`). The
+  `focus-monitor`, `list-monitors`, `stop`, `status`). The
   package is named `tili-cli` but the binary itself is named `tili` (see
   the `[[bin]]` section in its
   `Cargo.toml`). No business logic belongs here — if you're tempted to add
@@ -285,16 +290,25 @@ the dependency direction is a hard boundary, not just organization:
   instead. `print_response` needs an `ExpectedPayload` hint per subcommand
   since `Response::OkWithPayload` carries an untyped `serde_json::Value` —
   add a new variant there (not JSON-shape sniffing) when a command gets a
-  new payload type. The one exception to "no business logic here": `tili
-  daemon install`/`uninstall` (M10) — these manage a LaunchAgent (write/
-  remove `~/Library/LaunchAgents/com.tili.daemon.plist`, drive `launchctl
-  load|unload -w`) entirely on the local filesystem, never touching the
-  daemon's socket at all, so routing them through `dispatch()` wouldn't
-  make sense; `main()` intercepts `Commands::Daemon` and returns before
-  the socket-connecting code path. `daemon_binary_path()` resolves
-  `tili-daemon` relative to the running `tili` binary's own directory
-  (`std::env::current_exe()`), not `PATH`, since a LaunchAgent's
-  environment doesn't guarantee one.
+  new payload type. Three exceptions to "no business logic here," all
+  intercepted in `main()` before the socket-connecting code path (each
+  `return`s or diverges instead of falling through to the generic
+  `send()`/`print_response` path):
+  - `tili start` — `daemon_binary_path()` resolves `tili-daemon` relative
+    to the running `tili` binary's own directory (`std::env::current_exe()`),
+    not `PATH` (a LaunchAgent's environment doesn't guarantee one), then
+    `exec`s straight into it (`std::os::unix::process::CommandExt::exec`,
+    replacing this process rather than spawning a child) — `start_daemon()`
+    returns `!` and only returns control to Rust at all if `exec` itself
+    failed.
+  - `tili daemon install`/`uninstall` (M10) — manage a LaunchAgent (write/
+    remove `~/Library/LaunchAgents/com.tili.daemon.plist`, drive `launchctl
+    load|unload -w`) entirely on the local filesystem, never touching the
+    daemon's socket.
+  - `tili stop`/`status` *do* talk to the socket (via `Command::Shutdown`/
+    `Ping`) but get their own wording instead of the generic "couldn't
+    reach daemon" error path — a daemon that's already stopped is an
+    expected, calmly-reported outcome for `stop`, not a failure.
 - **`xtask`** — release/signing tooling (M11). `bundle` wraps
   `tili-daemon`/`tili` in a minimal `tili.app` at
   `target/<target>/release/tili.app` (bundle id `com.tili.daemon` — the
