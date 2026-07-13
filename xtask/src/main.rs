@@ -124,6 +124,16 @@ fn bundle(target: &str, version: &str) {
     println!("xtask: bundled {}", app.display());
 }
 
+/// `xtask/entitlements.plist` is a bare `<dict/>` — tili isn't sandboxed
+/// (it needs the Accessibility API and a Unix socket outside any
+/// container) and needs no special entitlements beyond what hardened
+/// runtime requires by default; the file only exists so `--options
+/// runtime` has something to point at. Accessibility itself is a TCC
+/// grant tied to the bundle id + signing identity, not a codesign
+/// entitlement. Keep that file free of comments/extra content — the
+/// `AMFIUnserializeXML` parser codesign uses for entitlements is far
+/// stricter than a normal XML parser and rejects even well-formed XML
+/// comments ("syntax error near line N").
 fn codesign(app_path: &Path, identity: &str) {
     let status = Command::new("codesign")
         .args([
