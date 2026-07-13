@@ -44,14 +44,25 @@ the dependency direction is a hard boundary, not just organization:
   `CGWindowID`) so it's fully unit-testable without macOS — see
   `src/tree.rs`'s test module for the actual coverage (insert/remove with
   parent-split collapsing, i3-style direction `navigate`, `move`'s
-  window-identity `swap_windows`, proportional `layout`). `insert_window`
-  always wraps the target leaf in a fresh 2-child `Split` rather than
-  flattening into an existing same-orientation split — a deliberate M3
-  simplification (still a valid, correctly-tiling tree; just not the
-  shallowest possible one). `layout(area, gaps)` takes a `Gaps` (outer
-  padding around the whole area, inner spacing between siblings, both
-  `f64` — `tili-config`'s parsed `u32` gaps get converted at the
-  `tili-daemon` boundary since this crate can't depend on `tili-config`).
+  window-identity `swap_windows`, proportional `layout`, Accordion
+  toggle/cycle/wrap). `insert_window` always wraps the target leaf in a
+  fresh 2-child `Split` rather than flattening into an existing
+  same-orientation split — a deliberate M3 simplification (still a valid,
+  correctly-tiling tree; just not the shallowest possible one — also means
+  a "flat" Accordion built via sequential inserts only ever has 2
+  children, see the M7 accordion tests). `layout(area, gaps)` takes a
+  `Gaps` (outer padding around the whole area, inner spacing between
+  siblings, both `f64` — `tili-config`'s parsed `u32` gaps get converted
+  at the `tili-daemon` boundary since this crate can't depend on
+  `tili-config`). `toggle_layout(from)` (M7) converts `from`'s parent
+  container between `Split` and `Accordion` in place — converting *to*
+  Accordion sets `active` to `from`'s own position so the
+  currently-visible window doesn't change. `focus_in_direction(from, dir)`
+  is the Accordion-aware navigation entry point `WmState` actually calls
+  (not plain `navigate`): if `from`'s parent is an `Accordion`, `dir`
+  cycles (and wraps at the ends) which child is active instead of doing
+  spatial `Split` navigation, since a stack of fully-overlapping children
+  has no inherent left/right/up/down axis.
 - **`tili-ax`** — the only crate allowed to touch the Accessibility API.
   Depends on `tili-tree` only for geometry types (`Rect`), never for the tree
   itself. `src/window.rs` owns the single private API call used anywhere in
@@ -146,6 +157,14 @@ the dependency direction is a hard boundary, not just organization:
   (real OS focus/raise); nothing calls it automatically on window creation,
   specifically to avoid focus-stealing every already-open window when the
   daemon starts up and gets seeded with the apps already running.
+  `focus`/`move_focused` go through `tili_tree::Tree::focus_in_direction`
+  (not plain `navigate`), and both now always call `relayout_active`
+  afterward (M7) — cycling an Accordion's active child changes what's
+  actually visible, so it's not just a focus-pointer update anymore the
+  way plain `Split` navigation is. `toggle_layout`/`set_layout` (M7) wrap
+  `Tree::toggle_layout` for `Command::LayoutToggle`/`LayoutSet`; `set_layout`
+  is a no-op if the container's already the requested kind, since there
+  are only two kinds and "set" is just "toggle away from the other one."
   `apply_config` updates `gaps`/`workspace_gaps` from a loaded or
   hot-reloaded `tili_config::Config`, creates any workspace it declares
   (without switching to it, so a reload never yanks focus off whatever's on
@@ -168,8 +187,9 @@ the dependency direction is a hard boundary, not just organization:
   sync with what `WmState` actually has bound.
 - **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
   `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
-  `move-to-workspace <name>`). The package is named `tili-cli` but the
-  binary itself is named `tili` (see the `[[bin]]` section in its
+  `move-to-workspace <name>`, `layout <toggle|tiles|accordion>`). The
+  package is named `tili-cli` but the binary itself is named `tili` (see
+  the `[[bin]]` section in its
   `Cargo.toml`). No business logic belongs here — if you're tempted to add
   logic to the CLI, it probably belongs in `tili-daemon` behind a `Command`
   instead. `print_response` needs an `ExpectedPayload` hint per subcommand

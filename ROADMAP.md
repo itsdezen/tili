@@ -15,7 +15,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ not started
 | M4 | Named workspaces + virtualization | ✅ | Off-screen parking confirmed via `tili list-windows --json` |
 | M5 | KDL config + hot-reload | ✅ | Editing `tili.kdl` and saving updates gaps live, no restart |
 | M6 | Built-in hotkey handling | ✅ | Rebinding a key in config works with no external hotkey daemon |
-| M7 | Accordion layout + toggle | ⬜ | `layout toggle` switches Tiles ↔ Accordion on a live workspace |
+| M7 | Accordion layout + toggle | ✅ | `layout toggle` switches Tiles ↔ Accordion on a live workspace |
 | M8 | Floating rules + auto-center | ⬜ | ~30 floating-app rules match and auto-center/size on window creation |
 | M9 | Multi-monitor support | ⬜ | Hot-plug/unplug reassigns workspaces without losing windows |
 | M10 | Daily-drivable MVP | ⬜ | Used as the only WM for one full workday, no manual intervention |

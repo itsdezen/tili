@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use tili_ipc::{Command, Direction, Response, WindowInfo, WorkspaceInfo};
+use tili_ipc::{Command, Direction, LayoutKind, Response, WindowInfo, WorkspaceInfo};
 
 #[derive(Parser)]
 #[command(name = "tili", about = "CLI for the tili tiling window manager daemon")]
@@ -30,6 +30,13 @@ impl From<DirArg> for Direction {
     }
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum LayoutArg {
+    Toggle,
+    Tiles,
+    Accordion,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Check whether the daemon is reachable.
@@ -46,6 +53,8 @@ enum Commands {
     Workspace { name: String },
     /// Move the focused window to another workspace without following it.
     MoveToWorkspace { name: String },
+    /// Toggle, or explicitly set, the focused window's container layout.
+    Layout { mode: LayoutArg },
 }
 
 /// What shape of payload to expect back, so the CLI doesn't have to guess
@@ -67,6 +76,14 @@ fn main() {
         Commands::Workspace { name } => (Command::WorkspaceSwitch(name), ExpectedPayload::None),
         Commands::MoveToWorkspace { name } => {
             (Command::MoveNodeToWorkspace(name), ExpectedPayload::None)
+        }
+        Commands::Layout { mode } => {
+            let command = match mode {
+                LayoutArg::Toggle => Command::LayoutToggle,
+                LayoutArg::Tiles => Command::LayoutSet(LayoutKind::Tiles),
+                LayoutArg::Accordion => Command::LayoutSet(LayoutKind::Accordion),
+            };
+            (command, ExpectedPayload::None)
         }
     };
 

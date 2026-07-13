@@ -247,14 +247,17 @@ impl WmState {
     /// Moves the focus pointer to the window adjacent to the current focus
     /// in `dir`, and raises/focuses it for real. Returns an error message
     /// (suitable for `Response::Err`) if there's nothing focused yet or
-    /// nothing in that direction.
+    /// nothing in that direction. Goes through `focus_in_direction`, not
+    /// plain `navigate`, so this also cycles an Accordion container's
+    /// active child when the focused window is one of its members (M7).
     pub fn focus(&mut self, dir: Direction) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
         let target = self
-            .active_tree()
-            .navigate(current, dir)
+            .active_tree_mut()
+            .focus_in_direction(current, dir)
             .ok_or("no window in that direction")?;
         self.set_focused_node(target);
+        self.relayout_active();
         self.raise_focused();
         Ok(())
     }
@@ -265,14 +268,47 @@ impl WmState {
     pub fn move_focused(&mut self, dir: Direction) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
         let target = self
-            .active_tree()
-            .navigate(current, dir)
+            .active_tree_mut()
+            .focus_in_direction(current, dir)
             .ok_or("no window in that direction")?;
         self.active_tree_mut().swap_windows(current, target);
         self.set_focused_node(target);
         self.relayout_active();
         self.raise_focused();
         Ok(())
+    }
+
+    /// Toggles the focused window's parent container between `Split`
+    /// (tiled) and `Accordion` (stacked, one visible at a time). Errors if
+    /// nothing's focused, or if the focused window is alone at the tree's
+    /// root with no container to toggle.
+    pub fn toggle_layout(&mut self) -> Result<(), String> {
+        let current = self.focused_node().ok_or("no window is focused")?;
+        if self.active_tree_mut().toggle_layout(current) {
+            self.relayout_active();
+            Ok(())
+        } else {
+            Err("nothing to toggle — only one window here".to_string())
+        }
+    }
+
+    /// Sets the focused window's parent container to a specific layout
+    /// kind — a no-op if it's already that kind, otherwise the same
+    /// toggle `toggle_layout` does (there are only two kinds, so "set" and
+    /// "toggle away from the other one" are the same operation).
+    pub fn set_layout(&mut self, kind: tili_ipc::LayoutKind) -> Result<(), String> {
+        let current = self.focused_node().ok_or("no window is focused")?;
+        let is_accordion = self.active_tree().is_accordion_container(current);
+        let want_accordion = matches!(kind, tili_ipc::LayoutKind::Accordion);
+        if is_accordion == want_accordion {
+            return Ok(());
+        }
+        if self.active_tree_mut().toggle_layout(current) {
+            self.relayout_active();
+            Ok(())
+        } else {
+            Err("nothing to set — only one window here".to_string())
+        }
     }
 
     /// Switches which workspace is active on the (single, until M9) monitor:

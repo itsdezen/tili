@@ -10,6 +10,26 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-13
+
+### Added
+
+- M7: Accordion layout + toggle. `tili-tree`'s `Tree` gains `toggle_layout`
+  (converts a window's parent container between `Split` and `Accordion` in
+  place — converting to `Accordion` keeps the previously-visible window
+  active rather than snapping to the first child), `is_accordion_container`,
+  and `focus_in_direction` — a new, Accordion-aware navigation entry point
+  that cycles (and wraps) an accordion's active child when the focused
+  window is one of its members, falling back to plain spatial `navigate`
+  otherwise. `WmState::focus`/`move_focused` now go through
+  `focus_in_direction`, and gained `toggle_layout`/`set_layout` wired to
+  `Command::LayoutToggle`/`LayoutSet`. `tili-cli` gains
+  `tili layout <toggle|tiles|accordion>` (already bindable via
+  `example/tili.kdl`'s existing `alt-slash` key from M6). Verified
+  end-to-end on real hardware: toggling a live tiled container to Accordion
+  stacks the windows (only one visible at a time), and focusing cycles
+  through them.
+
 ## [0.6.0] - 2026-07-13
 
 ### Added

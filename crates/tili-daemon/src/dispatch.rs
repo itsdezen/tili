@@ -31,6 +31,8 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
             state.exit_mode();
             Response::Ok
         }
+        Command::LayoutToggle => result_response(state.toggle_layout()),
+        Command::LayoutSet(kind) => result_response(state.set_layout(kind)),
         _ => Response::Err {
             message: "not implemented yet".to_string(),
         },
@@ -79,6 +81,19 @@ mod tests {
     fn focus_with_no_windows_is_an_error() {
         let mut state = WmState::default();
         let response = dispatch(&mut state, Command::Focus(tili_ipc::Direction::Left));
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn layout_toggle_with_no_windows_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::LayoutToggle);
+        assert!(matches!(response, Response::Err { .. }));
+
+        let response = dispatch(
+            &mut state,
+            Command::LayoutSet(tili_ipc::LayoutKind::Accordion),
+        );
         assert!(matches!(response, Response::Err { .. }));
     }
 

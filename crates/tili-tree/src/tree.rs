@@ -242,6 +242,89 @@ impl Tree {
         None
     }
 
+    /// The navigation entry point that's Accordion-aware: if `from`'s
+    /// immediate parent is an `Accordion`, `dir` cycles which child is
+    /// active (wrapping around at the ends — Right/Down go forward,
+    /// Left/Up go backward, uniformly regardless of the accordion's own
+    /// orientation, since a stack of fully-overlapping children has no
+    /// inherent spatial axis) and returns the newly-active child's leaf.
+    /// Otherwise falls back to the plain spatial `navigate`.
+    pub fn focus_in_direction(&mut self, from: NodeId, dir: Direction) -> Option<NodeId> {
+        if let Some(&parent) = self.parents.get(&from) {
+            let accordion = match self.nodes.get(parent) {
+                Some(Node::Accordion { children, active }) => Some((children.clone(), *active)),
+                _ => None,
+            };
+            if let Some((children, active)) = accordion {
+                let n = children.len();
+                if n == 0 {
+                    return None;
+                }
+                let forward = matches!(dir, Direction::Right | Direction::Down);
+                let new_active = if forward {
+                    (active + 1) % n
+                } else {
+                    (active + n - 1) % n
+                };
+                if let Some(Node::Accordion { active, .. }) = self.nodes.get_mut(parent) {
+                    *active = new_active;
+                }
+                return Some(children[new_active]);
+            }
+        }
+        self.navigate(from, dir)
+    }
+
+    /// Whether `from`'s immediate parent container is an `Accordion` (as
+    /// opposed to a `Split`, or `from` having no parent at all).
+    pub fn is_accordion_container(&self, from: NodeId) -> bool {
+        self.parents
+            .get(&from)
+            .and_then(|&p| self.nodes.get(p))
+            .is_some_and(|n| matches!(n, Node::Accordion { .. }))
+    }
+
+    /// Converts `from`'s immediate parent container between `Split` and
+    /// `Accordion` in place, preserving its children. Converting to
+    /// `Accordion` sets `active` to `from`'s own position, so the window
+    /// that was visible/focused stays visible. Converting to `Split`
+    /// defaults to `Horizontal` with equal ratios — a reasonable default,
+    /// not an attempt to remember whatever the container's orientation was
+    /// before it became an accordion (that history isn't tracked).
+    ///
+    /// Returns `false` (nothing changed) if `from` has no parent — a lone
+    /// root window has no container to toggle.
+    pub fn toggle_layout(&mut self, from: NodeId) -> bool {
+        let Some(&parent) = self.parents.get(&from) else {
+            return false;
+        };
+        let Some(node) = self.nodes.get(parent) else {
+            return false;
+        };
+        let replacement = match node {
+            Node::Split { children, .. } => {
+                let active = children.iter().position(|&c| c == from).unwrap_or(0);
+                Node::Accordion {
+                    children: children.clone(),
+                    active,
+                }
+            }
+            Node::Accordion { children, .. } => {
+                let n = children.len().max(1);
+                Node::Split {
+                    orientation: Orientation::Horizontal,
+                    ratios: vec![1.0 / n as f32; n],
+                    children: children.clone(),
+                }
+            }
+            Node::Window { .. } => return false,
+        };
+        if let Some(slot) = self.nodes.get_mut(parent) {
+            *slot = replacement;
+        }
+        true
+    }
+
     /// Swaps the windows held by two leaf nodes in place — used for `move`,
     /// which (in this simplified implementation) swaps the focused window
     /// with whatever's adjacent rather than re-parenting it into the
@@ -443,6 +526,62 @@ mod tests {
         let total_width: f64 = layout.iter().map(|(_, r)| r.width).sum();
         let padded_width = area().width - 40.0;
         assert!((total_width + gaps.inner - padded_width).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn toggle_layout_converts_split_to_accordion_and_back() {
+        let mut tree = Tree::new();
+        let a = tree.insert_window(1, None);
+        let b = tree.insert_window(2, Some(a));
+        assert!(!tree.is_accordion_container(a));
+
+        assert!(tree.toggle_layout(a));
+        assert!(tree.is_accordion_container(a));
+        assert!(tree.is_accordion_container(b));
+
+        // Only the active accordion child gets a frame from layout — the
+        // other is hidden behind it, not tiled.
+        let layout = tree.layout(area(), Gaps::default());
+        assert_eq!(layout.len(), 1);
+        assert_eq!(layout[0].0, 1); // window 1 (leaf `a`) was active on toggle
+
+        assert!(tree.toggle_layout(a));
+        assert!(!tree.is_accordion_container(a));
+        let layout = tree.layout(area(), Gaps::default());
+        assert_eq!(layout.len(), 2, "back to Split, both windows tile again");
+    }
+
+    #[test]
+    fn toggle_layout_on_lone_root_window_is_a_no_op() {
+        let mut tree = Tree::new();
+        let only = tree.insert_window(1, None);
+        assert!(!tree.toggle_layout(only));
+    }
+
+    #[test]
+    fn focus_in_direction_cycles_accordion_children_and_wraps() {
+        // `insert_window` always creates strictly binary splits (see its
+        // own doc comment), so a "flat" accordion via sequential inserts
+        // only ever has 2 children — enough to test cycling and wrapping.
+        let mut tree = Tree::new();
+        let a = tree.insert_window(1, None);
+        let b = tree.insert_window(2, Some(a));
+        tree.toggle_layout(a);
+
+        assert_eq!(tree.focus_in_direction(a, Direction::Right), Some(b));
+        assert_eq!(
+            tree.focus_in_direction(b, Direction::Right),
+            Some(a),
+            "wraps back to the start"
+        );
+        // Backward from `a` with only one sibling lands on that sibling too.
+        assert_eq!(tree.focus_in_direction(a, Direction::Left), Some(b));
+
+        // Only the active child is laid out.
+        let active_now = tree.focus_in_direction(a, Direction::Right).unwrap();
+        let layout = tree.layout(area(), Gaps::default());
+        assert_eq!(layout.len(), 1);
+        assert_eq!(layout[0].0, tree.window_at(active_now).unwrap());
     }
 
     #[test]
