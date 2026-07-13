@@ -122,11 +122,16 @@ Spaces, the same technique other public-API-only tools in this space use.
 
 ## Installation
 
-The Homebrew tap formula ([`Formula/tili.rb`](Formula/tili.rb)) and release
-packaging ([`xtask`](xtask), M11) are in place, but a self-signed signing
-certificate and a published `homebrew-tap` repository are still one-time
-setup steps (see [CONTRIBUTING.md](CONTRIBUTING.md#release-engineering)) —
-until those exist, `brew install tili/tap/tili` isn't live yet.
+```sh
+brew install itsdezen/tap/tili
+```
+
+via [itsdezen/homebrew-tap](https://github.com/itsdezen/homebrew-tap). The
+tap exists, but its formula's checksums won't resolve to a real release
+until the one-time self-signed certificate setup lands (see
+[CONTRIBUTING.md](CONTRIBUTING.md#release-engineering)) and a release is
+tagged against it — until then, builds installed straight from a GitHub
+release are unsigned and Gatekeeper will prompt on first launch.
 
 Until then, build from source:
 
