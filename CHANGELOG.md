@@ -10,6 +10,25 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-13
+
+### Added
+
+- M1: real window enumeration in `tili-ax` — finds on-screen windows' owner
+  PIDs via public `CGWindowListCopyWindowInfo`, then reads each process's
+  `AXWindows` through the public Accessibility API, resolving each window's
+  real `CGWindowID` via the one private `_AXUIElementGetWindow` call.
+  `tili-daemon` binds a real Unix socket and serves `Command::ListWindows`;
+  `tili list-windows` is a real socket client. Verified end-to-end on real
+  hardware: Accessibility permission granted, `tili list-windows` correctly
+  lists real open windows.
+
+### Notes
+
+- Building `tili-daemon` requires full Xcode (not just Command Line Tools)
+  — `axuielement`'s safe API links a Swift runtime bridge. See
+  CONTRIBUTING.md.
+
 ## [0.0.0] - 2026-07-13
 
 ### Added

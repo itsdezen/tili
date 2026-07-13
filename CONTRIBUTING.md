@@ -15,9 +15,29 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-`tili-ax` (and anything depending on it) only builds on macOS. `tili-tree`
-has no macOS dependencies and is the easiest crate to contribute to without
-a Mac.
+`tili-ax` (and anything depending on it, i.e. `tili-daemon`) needs **full
+Xcode installed, not just Command Line Tools** — `axuielement`'s safe API
+links against a Swift runtime bridge, and the Swift compatibility shims it
+needs (`swiftCompatibility56` etc.) only ship with Xcode.app. With CLT
+alone, `cargo build -p tili-daemon` fails at the final link step with
+undefined `__swift_FORCE_LOAD_*` symbols — everything up to and including
+`cargo clippy --workspace` still works without Xcode (linking a binary and
+type-checking one are different steps), so that failure specifically means
+"install Xcode," not "something's broken."
+
+If you've already installed full Xcode and still hit undefined
+`__swift_FORCE_LOAD_$_swiftCompatibility56` (etc.) symbols, rustc is likely
+falling back to a stale `/Library/Developer/CommandLineTools/.../swift-5.5/`
+search path instead of Xcode's own toolchain. Point the linker at the real
+one directly:
+
+```sh
+export RUSTFLAGS="-L $(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"
+cargo build -p tili-daemon
+```
+
+`tili-tree` has no macOS dependencies and is the easiest crate to
+contribute to without a Mac.
 
 ## Before opening a PR
 

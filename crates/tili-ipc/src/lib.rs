@@ -39,7 +39,32 @@ pub enum Response {
     Err { message: String },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RectInfo {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// A window as reported by `Command::ListWindows`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowInfo {
+    /// The real macOS `CGWindowID`.
+    pub id: u32,
+    pub pid: i32,
+    pub title: String,
+    pub frame: RectInfo,
+}
+
 /// Default location of the daemon's Unix socket.
+///
+/// Wire format over this socket (both directions): a 4-byte big-endian
+/// length prefix followed by that many bytes of JSON-encoded `Command` or
+/// `Response`. `tili-daemon` and `tili-cli` each implement this framing
+/// directly (one async via tokio, one sync via `std::io`) rather than
+/// sharing code here, since the contract is simpler than a shared
+/// sync/async abstraction would be.
 pub fn default_socket_path() -> std::path::PathBuf {
     dirs_socket_dir().join("tili.sock")
 }

@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-axuielement = { version = "0.9.1", features = ["async"] }
+# Pinned exactly: window.rs relies on AXUIElement's #[repr(transparent)]
+# layout (an internal implementation detail, not a public API guarantee) to
+# obtain a raw AXUIElementRef for the one private API call this project uses.
+# A version bump must be a deliberate, reviewed step, not an automatic one.
+axuielement = { version = "=0.9.1", features = ["async"] }
 core-foundation = "0.10.1"
 core-graphics = "0.25.0"
 tili-tree = { path = "../tili-tree" }
