@@ -133,6 +133,14 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+    # Job-level env, same reasoning as the `build` job's — lets the two
+    # steps below pick the right body/prerelease flag for whether this
+    # build was actually signed, instead of the "unsigned" warning staying
+    # hardcoded forever after signing went live (which is exactly what
+    # happened from v0.11.0 through v0.11.1 — this env + the two `if:`
+    # branches below fix that).
+    env:
+      TILI_SIGNING_CERTIFICATE_P12: ${{ secrets.TILI_SIGNING_CERTIFICATE_P12 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -141,11 +149,26 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # TODO: once TILI_SIGNING_CERTIFICATE_P12 is added as a repo secret
-      # (see CONTRIBUTING.md's Release Engineering section), update this
-      # body to drop the "unsigned" warning — `xtask package` will already
-      # be signing binaries at that point, this text just hasn't caught up.
-      - name: Create release
+      - name: Create release (signed)
+        if: ${{ env.TILI_SIGNING_CERTIFICATE_P12 != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: false
+          files: dist/*
+          body: |
+            Codesigned with tili's self-signed certificate (hardened
+            runtime) — see
+            [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering).
+            Not notarized yet, so Gatekeeper will still prompt on first
+            launch: right-click → Open, or
+            `xattr -d com.apple.quarantine tili.app`.
+
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
+            for what changed.
+
+      - name: Create release (unsigned)
+        if: ${{ env.TILI_SIGNING_CERTIFICATE_P12 == '' }}
         uses: softprops/action-gh-release@v2
         with:
           draft: true
