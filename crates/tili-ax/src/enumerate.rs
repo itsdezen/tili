@@ -18,7 +18,7 @@ use crate::window::AxWindow;
 /// available without Screen Recording permission; only window *names* read
 /// through this API would need that, so we deliberately don't read
 /// `kCGWindowName` here and get titles through the AX API instead.
-fn onscreen_owner_pids() -> BTreeSet<i32> {
+pub(crate) fn onscreen_owner_pids() -> BTreeSet<i32> {
     let mut pids = BTreeSet::new();
     let Some(windows) = copy_window_info(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
@@ -53,21 +53,24 @@ fn onscreen_owner_pids() -> BTreeSet<i32> {
 /// through the public Accessibility API. Windows the private
 /// `_AXUIElementGetWindow` call can't resolve an id for are skipped.
 pub fn list_windows() -> Vec<AxWindow> {
-    let mut windows = Vec::new();
+    onscreen_owner_pids()
+        .into_iter()
+        .flat_map(list_windows_for_pid)
+        .collect()
+}
 
-    for pid in onscreen_owner_pids() {
-        let Some(app) = AXUIElement::from_pid(pid) else {
-            continue;
-        };
-        let Ok(ax_windows) = app.element_array_attribute(kAXWindowsAttribute) else {
-            continue;
-        };
-        for element in ax_windows {
-            if let Some(window) = AxWindow::from_element(element, pid) {
-                windows.push(window);
-            }
-        }
-    }
-
-    windows
+/// Reads one process's windows through the public `AXWindows` attribute.
+/// Cheap enough to call in response to a single AX notification for that
+/// process, rather than re-running the full system-wide scan.
+pub fn list_windows_for_pid(pid: i32) -> Vec<AxWindow> {
+    let Some(app) = AXUIElement::from_pid(pid) else {
+        return Vec::new();
+    };
+    let Ok(ax_windows) = app.element_array_attribute(kAXWindowsAttribute) else {
+        return Vec::new();
+    };
+    ax_windows
+        .into_iter()
+        .filter_map(|element| AxWindow::from_element(element, pid))
+        .collect()
 }

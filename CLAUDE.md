@@ -52,21 +52,36 @@ the dependency direction is a hard boundary, not just organization:
   `WindowFrameSetter` trait — every place that moves/resizes a real window
   must go through `dyn WindowFrameSetter`, not call the AX API directly. v1
   only implements `InstantFrameSetter`; this trait is the seam a future
-  animated setter plugs into without touching layout code.
+  animated setter plugs into without touching layout code. `src/workspace.rs`
+  bridges `NSWorkspace` app-launch/quit notifications via `objc2`/
+  `objc2-app-kit` — note it spawns its own dedicated `CFRunLoop` thread,
+  since a process without `NSApplication` needs *some* thread pumping a run
+  loop to receive Cocoa notifications at all (same reason `axuielement`'s own
+  `AXNotificationStream` does the same for AX notifications). `src/watch.rs`
+  ties both together into `spawn_event_watcher()`, which subscribes each
+  running app to window lifecycle notifications and emits a single coarse
+  `WmEvent::WindowsChanged { pid }` per change — callers re-read that
+  process's windows via `list_windows_for_pid` rather than trying to
+  interpret individual notification payloads (this sidesteps having to
+  reason about whether a specific `AXUIElement` is still valid to query at
+  the exact moment its destroyed-notification fires).
 - **`tili-config`** — KDL parsing/validation into a `Config` struct, plus
   file-watch hot-reload. Schema types live in `src/lib.rs`.
 - **`tili-ipc`** — `Command`/`Response` types shared by the daemon and CLI,
   plus the socket path/framing convention. This is the only crate both
   `tili-daemon` and `tili-cli` depend on in common — protocol changes belong
   here, not duplicated in both binaries.
-- **`tili-daemon`** — the actual window manager process. `src/dispatch.rs`
-  holds `WmState` and the single `dispatch(&mut WmState, Command) -> Response`
-  function. Both the Unix-socket handler and the global-hotkey handler (a
-  `CGEventTap`, not yet implemented) must call this same function — never
-  give hotkeys a separate code path from CLI commands, or their behavior can
-  drift apart. The daemon is designed to stay single-threaded around
-  `WmState` (one `select!` loop merging socket/hotkey/AX-event/config-reload
-  sources) rather than using locks.
+- **`tili-daemon`** — the actual window manager process. `src/state.rs` holds
+  `WmState`, including the live window cache kept current by reacting to
+  `tili_ax::WmEvent`s rather than by re-scanning (see M2). `src/dispatch.rs`
+  has the single `dispatch(&mut WmState, Command) -> Response` function —
+  both the Unix-socket handler and the global-hotkey handler (a
+  `CGEventTap`, not yet implemented) must call this same function, never a
+  separate code path, or CLI-invoked and hotkey-invoked behavior can drift
+  apart. `src/main.rs` is one `tokio::select!` loop merging socket accepts
+  and `tili_ax::spawn_event_watcher()`'s channel (hotkeys/config-reload join
+  this same select in later milestones) — no locks around `WmState`, because
+  only one branch of the loop ever touches it at a time.
 - **`tili-cli`** — thin socket client only. The package is named `tili-cli`
   but the binary itself is named `tili` (see the `[[bin]]` section in its
   `Cargo.toml`). No business logic belongs here — if you're tempted to add
@@ -91,7 +106,8 @@ preference):
 - No private Accessibility/window APIs beyond the one documented
   `_AXUIElementGetWindow` call in `tili-ax/src/window.rs`.
 - No polling — the daemon reacts to AXObserver/NSWorkspace/display
-  notifications, it doesn't loop and check state.
+  notifications (`tili-ax`'s `watch.rs`/`workspace.rs`), it doesn't loop and
+  check state.
 - All real window-frame mutations go through `WindowFrameSetter`, never a
   direct AX API call from daemon/tree code.
 - Hotkey-triggered and socket-triggered commands both go through

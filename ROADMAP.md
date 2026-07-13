@@ -10,7 +10,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ not started
 |---|-----------|:---:|---|
 | M0 | Workspace scaffolding | ✅ | `cargo build --workspace` succeeds; daemon triggers the Accessibility permission dialog |
 | M1 | Read-only window listing | ✅ | `tili list-windows` over a real socket shows real running windows |
-| M2 | Event-driven updates | ⬜ | Window list stays live via AXObserver/NSWorkspace, no polling; near-zero idle CPU |
+| M2 | Event-driven updates | ✅ | Window list stays live via AXObserver/NSWorkspace, no polling; near-zero idle CPU |
 | M3 | Single-workspace Tiles layout | ⬜ | `tili focus/move <dir>` works with real BSP tiling on one monitor |
 | M4 | Named workspaces + virtualization | ⬜ | Off-screen parking confirmed via `tili list-windows --json` |
 | M5 | KDL config + hot-reload | ⬜ | Editing `tili.kdl` and saving updates gaps live, no restart |

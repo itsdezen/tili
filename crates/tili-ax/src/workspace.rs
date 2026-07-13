@@ -1,0 +1,92 @@
+use std::ptr::NonNull;
+use std::sync::mpsc::Sender;
+
+use block2::RcBlock;
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_foundation::{NSNotification, NSOperationQueue};
+
+unsafe extern "C" {
+    fn CFRunLoopGetCurrent() -> *mut std::ffi::c_void;
+    fn CFRunLoopRun();
+}
+
+/// A process launching or quitting, as reported by `NSWorkspace`.
+#[derive(Debug, Clone)]
+pub enum AppEvent {
+    Launched { pid: i32, bundle_id: Option<String> },
+    Terminated { pid: i32 },
+}
+
+/// Spawns a dedicated OS thread that registers for
+/// `NSWorkspaceDidLaunchApplicationNotification`/`DidTerminateApplication`
+/// and pumps a `CFRunLoop` on that thread for the lifetime of the process.
+///
+/// This mirrors exactly the pattern `axuielement`'s own `AXNotificationStream`
+/// uses for AX notifications: Cocoa/AX notification delivery for a
+/// non-`NSApplication` process needs *some* thread running an active
+/// `CFRunLoop` to receive the underlying system messages, regardless of
+/// which `NSOperationQueue` the resulting block is dispatched onto — so a
+/// dedicated thread is created and immediately parked in `CFRunLoopRun()`
+/// after registering the observer.
+pub fn spawn_workspace_watcher(tx: Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        // SAFETY: `sharedWorkspace`/`notificationCenter` are safe to call
+        // off the main thread (objc2-app-kit does not gate them behind
+        // `MainThreadMarker`); the block below only touches `Send` data
+        // (`Sender<AppEvent>`, primitives) and is itself `Send`.
+        unsafe {
+            let workspace = NSWorkspace::sharedWorkspace();
+            let center = workspace.notificationCenter();
+
+            let launched_tx = tx.clone();
+            let launched_block = RcBlock::new(move |note: NonNull<NSNotification>| {
+                if let Some((pid, bundle_id)) = running_app_from_notification(note) {
+                    let _ = launched_tx.send(AppEvent::Launched { pid, bundle_id });
+                }
+            });
+            center.addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWorkspaceDidLaunchApplicationNotification),
+                None,
+                None::<&NSOperationQueue>,
+                &launched_block,
+            );
+
+            let terminated_tx = tx.clone();
+            let terminated_block = RcBlock::new(move |note: NonNull<NSNotification>| {
+                if let Some((pid, _)) = running_app_from_notification(note) {
+                    let _ = terminated_tx.send(AppEvent::Terminated { pid });
+                }
+            });
+            center.addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWorkspaceDidTerminateApplicationNotification),
+                None,
+                None::<&NSOperationQueue>,
+                &terminated_block,
+            );
+
+            CFRunLoopGetCurrent();
+            CFRunLoopRun();
+        }
+    });
+}
+
+/// Extracts the launched/terminated app's pid and bundle id from a
+/// `NSWorkspaceDidLaunchApplicationNotification`/`DidTerminateApplication`'s
+/// `userInfo[NSWorkspaceApplicationKey]`.
+///
+/// SAFETY: `note` is a valid `NSNotification` for the lifetime of the call,
+/// as guaranteed by the Cocoa notification-center callback contract.
+unsafe fn running_app_from_notification(
+    note: NonNull<NSNotification>,
+) -> Option<(i32, Option<String>)> {
+    let note = unsafe { note.as_ref() };
+    let user_info = note.userInfo()?;
+    let key: &AnyObject = unsafe { objc2_app_kit::NSWorkspaceApplicationKey };
+    let app_obj = user_info.objectForKey(key)?;
+    let app: Retained<NSRunningApplication> = app_obj.downcast().ok()?;
+    let pid = app.processIdentifier();
+    let bundle_id = app.bundleIdentifier().map(|s| s.to_string());
+    Some((pid, bundle_id))
+}

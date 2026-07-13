@@ -11,4 +11,23 @@ edition.workspace = true
 axuielement = { version = "=0.9.1", features = ["async"] }
 core-foundation = "0.10.1"
 core-graphics = "0.25.0"
+# default-features disabled on the objc2-* crates: each Foundation/AppKit
+# class is behind its own feature flag, and the defaults pull in most of
+# AppKit (~300 features) — we only need NSWorkspace app-launch/quit
+# notifications, not the whole framework surface.
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSWorkspace",
+    "NSRunningApplication",
+    "libc",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSNotification",
+    "NSOperation",
+    "NSString",
+    "NSDictionary",
+    "block2",
+] }
+block2 = "0.6"
 tili-tree = { path = "../tili-tree" }
+tokio = { workspace = true }

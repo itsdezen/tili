@@ -39,7 +39,7 @@ pub enum Response {
     Err { message: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RectInfo {
     pub x: f64,
     pub y: f64,

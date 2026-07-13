@@ -10,6 +10,26 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-13
+
+### Added
+
+- M2: `tili-daemon` now keeps a live, event-driven window cache instead of
+  scanning on every `list-windows` request. `tili-ax` gains `workspace.rs`
+  (bridges `NSWorkspaceDidLaunchApplicationNotification`
+  /`DidTerminateApplication` via a dedicated `CFRunLoop` thread, since a
+  non-`NSApplication` process needs one to receive Cocoa notifications at
+  all) and `watch.rs` (subscribes each running app's `AXUIElement` to window
+  created/destroyed/moved/resized/title-changed notifications via
+  `axuielement`'s `AXNotificationStream`, coalesced into a single
+  `WmEvent::WindowsChanged { pid }` signal per app so the daemon re-reads
+  just that process's windows rather than diffing individual notification
+  payloads). The daemon's main loop is now a single `tokio::select!` between
+  socket connections and this event channel — no polling anywhere. Verified
+  end-to-end on real hardware: launching/quitting apps and
+  opening/closing/moving windows are reflected in `tili list-windows`
+  without restarting the daemon, and idle CPU stays near zero.
+
 ## [0.1.0] - 2026-07-13
 
 ### Added
