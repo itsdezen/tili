@@ -8,17 +8,17 @@
 class Tili < Formula
   desc "i3-like tiling window manager for macOS"
   homepage "https://github.com/itsdezen/tili"
-  version "0.11.0"
+  version "0.11.1"
   license "MIT"
 
   on_arm do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-aarch64-apple-darwin.tar.gz"
-    sha256 "1a1a5f3c18e355301e342f4db6a83db32420ce0c2d7177252fffefa19be181cb"
+    sha256 "56f5f7b47fcf48402d5c1aaf036bec7ba564fb2afdcdf55f528442bdf1fca8a6"
   end
 
   on_intel do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-x86_64-apple-darwin.tar.gz"
-    sha256 "c12dcf3df5a506f9828f0567524024cfc30486605326b6ce42f64a96753a76db"
+    sha256 "e66d668e319caed2c25ba9f88e55fc0568ac49b027657320578e4c4b65e13d8c"
   end
 
   def install
@@ -39,11 +39,11 @@ class Tili < Formula
       tili-daemon needs Accessibility permission to manage windows:
         System Settings > Privacy & Security > Accessibility > add tili-daemon
 
-      To start it automatically at login (opt-in, not done by this install):
-        tili daemon install
+      Try it out:
+        tili start
 
-      Otherwise, start it manually:
-        tili-daemon &
+      Start it automatically at login instead (opt-in, not done by this install):
+        tili daemon install
     EOS
   end
 
