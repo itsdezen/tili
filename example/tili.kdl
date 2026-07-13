@@ -24,6 +24,13 @@ settings {
     // KDL v2 booleans are `#true`/`#false` (note the `#` — bare `true`/
     // `false` is a parse error, unlike KDL v1 or most other config formats).
     auto-reload #true
+
+    // Warps the cursor to the newly-focused window (M10). Off by default.
+    mouse-follows-focus #false
+
+    // Moving the cursor onto a different monitor focuses it, same as the
+    // `focus-monitor` command (M10). Off by default.
+    focus-follows-monitor #false
 }
 
 // Global hotkeys — no external tool (skhd etc.) needed, tili captures these

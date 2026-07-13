@@ -10,6 +10,45 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-13
+
+### Added
+
+- M10: daily-drivable MVP polish — wires up the three `settings` that had
+  sat parsed-but-inert since M5. `mouse-follows-focus` warps the cursor
+  (`CGDisplay::warp_mouse_cursor_position`) to the center of the
+  newly-focused window inside `raise_focused`, so it applies uniformly to
+  `focus`/`move`/`workspace switch`'s focus restore without duplicating the
+  check at each call site. `focus-follows-monitor` adds `tili-ax`'s
+  `spawn_mouse_watcher` — a `CGEventTap` on `kCGEventMouseMoved`,
+  `ListenOnly` (never consumes/alters movement) and throttled to one
+  position report per 80ms via a thread-local `Cell<Instant>` (not a
+  shared `Mutex` — the callback only ever runs on its own dedicated
+  thread) so mouse activity can't flood the daemon's event loop; the
+  watcher runs unconditionally, same as the hotkey tap running regardless
+  of whether any keybindings are configured, and `WmState::on_mouse_moved`
+  is what actually gates on the setting, doing a cheap point-in-rect check
+  against the already-cached `self.monitors` (no AX/CG call per event).
+  `tili-cli` gains `tili daemon install`/`uninstall`, writing/removing a
+  `~/Library/LaunchAgents/com.tili.daemon.plist` and driving `launchctl
+  load|unload -w` — opt-in, never run automatically by `brew install`, so
+  a fresh install can't hit a permission-denied respawn loop before
+  Accessibility is granted; resolves the daemon binary relative to the
+  running `tili` binary's own directory rather than trusting `PATH`, since
+  a LaunchAgent's environment doesn't guarantee one. `tili-daemon` now
+  writes `example/tili.kdl` (embedded via `include_str!`) to
+  `~/.config/tili/tili.kdl` on first run if nothing's there yet, instead
+  of silently applying empty built-in defaults with nothing to edit —
+  best-effort; a write failure just falls back to defaults; the "config
+  migration" half of this milestone is intentionally scoped narrowly here,
+  since tili is pre-1.0 with no prior format to migrate *from*. Verified
+  end-to-end on real hardware: focusing a window with mouse-follows-focus
+  on visibly warps the cursor to it; moving the cursor onto a second
+  monitor with focus-follows-monitor on retargets subsequent
+  focus/move/workspace commands there; `tili daemon install` survives a
+  logout/login with tili-daemon already running and the Accessibility
+  grant intact.
+
 ## [0.9.0] - 2026-07-13
 
 ### Added

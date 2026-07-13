@@ -29,9 +29,11 @@ async fn main() -> std::io::Result<()> {
     let active_combos = Arc::new(Mutex::new(HashSet::new()));
     let mut hotkeys = spawn_hotkey_bridge(active_combos.clone());
     let mut displays_changed = spawn_display_watcher_bridge();
+    let mut mouse_moves = spawn_mouse_watcher_bridge();
     let mut state = WmState::default();
 
     let config_path = tili_config::default_config_path();
+    ensure_starter_config_exists(&config_path);
     match tili_config::load(&config_path) {
         Ok(config) => {
             println!("tili-daemon: loaded config from {}", config_path.display());
@@ -92,7 +94,42 @@ async fn main() -> std::io::Result<()> {
                 // callback doesn't say which, so just re-enumerate.
                 state.on_displays_changed();
             }
+            Some((x, y)) = mouse_moves.recv() => {
+                // Throttled cursor positions (M10, focus-follows-monitor) —
+                // a no-op inside `on_mouse_moved` unless that setting is on.
+                state.on_mouse_moved(x, y);
+            }
         }
+    }
+}
+
+/// M10: a brand-new install has no `~/.config/tili/tili.kdl` yet — without
+/// this, a first run silently applies `Config::default()` (no workspaces,
+/// no keybindings, nothing to edit) with no clue that a starter file
+/// exists to build from. Writes the same config shipped as
+/// `example/tili.kdl` so the daemon still starts fine even if this write
+/// fails for some reason (permissions, read-only home, etc.) — this is a
+/// convenience, not a requirement to run.
+fn ensure_starter_config_exists(path: &std::path::Path) {
+    if path.exists() {
+        return;
+    }
+    const STARTER_CONFIG: &str = include_str!("../../../example/tili.kdl");
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("tili-daemon: couldn't create {}: {e}", parent.display());
+        return;
+    }
+    match std::fs::write(path, STARTER_CONFIG) {
+        Ok(()) => println!(
+            "tili-daemon: no config found — wrote a starter config to {}",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "tili-daemon: couldn't write starter config to {}: {e} (using built-in defaults)",
+            path.display()
+        ),
     }
 }
 
@@ -157,6 +194,25 @@ fn spawn_display_watcher_bridge() -> tokio::sync::mpsc::UnboundedReceiver<()> {
     std::thread::spawn(move || {
         while let Ok(()) = sync_rx.recv() {
             if tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Bridges `tili_ax::spawn_mouse_watcher`'s plain-`std::sync::mpsc` channel
+/// into a tokio channel, same pattern as the other bridges (M10). Runs
+/// unconditionally regardless of `focus-follows-monitor`, same as the
+/// hotkey tap running regardless of whether any keybindings are
+/// configured — `WmState::on_mouse_moved` is what actually gates on the
+/// setting.
+fn spawn_mouse_watcher_bridge() -> tokio::sync::mpsc::UnboundedReceiver<(f64, f64)> {
+    let sync_rx = tili_ax::spawn_mouse_watcher();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(point) = sync_rx.recv() {
+            if tx.send(point).is_err() {
                 break;
             }
         }

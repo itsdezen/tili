@@ -129,7 +129,15 @@ the dependency direction is a hard boundary, not just organization:
   `.await` a round-trip to `tili-daemon`'s single owning loop to ask "is
   this bound?" This is the one place in the codebase with a shared `Mutex`
   instead of message-passing into one owner; see `tili-daemon`'s
-  `sync_active_combos` for how it's kept from drifting.
+  `sync_active_combos` for how it's kept from drifting. `src/mouse.rs`
+  (M10) has `warp_cursor_to` (`CGDisplay::warp_mouse_cursor_position`, for
+  `mouse-follows-focus`) and `spawn_mouse_watcher` — another
+  `CGEventTap`, this one `ListenOnly` on `kCGEventMouseMoved` for
+  `focus-follows-monitor`, throttled to one position report per 80ms via a
+  *thread-local* `Cell<Instant>` (not a shared `Mutex` — this callback
+  only ever runs on its own dedicated OS thread, so there's nothing to
+  synchronize) so mouse activity in general can't flood the daemon's
+  `select!` loop with one message per pixel of travel.
 - **`tili-config`** — KDL parsing/validation into a `Config` struct, plus
   file-watch hot-reload. `src/schema.rs` has the types and `parse()`,
   including `keybindings mode="..." { bind "key" "command" }` blocks (M6)
@@ -215,6 +223,20 @@ the dependency direction is a hard boundary, not just organization:
   parsed since M5) is intentionally still unwired — M9's bar is
   hot-plug/unplug safety, not that finer-grained UX.
 
+  **M10 — mouse-follows-focus / focus-follows-monitor.**
+  `mouse_follows_focus`/`focus_follows_monitor` are plain `bool`s set from
+  `config.settings` in `apply_config` (previously parsed but never read
+  anywhere, since M5). `raise_focused` is the single place that warps the
+  cursor when `mouse_follows_focus` is on — every focus-changing path
+  (`focus`, `move_focused`, `switch_workspace`'s restore step) already
+  funnels through it, so this didn't need duplicating per call site.
+  `on_mouse_moved(x, y)`, called from `main.rs` on every throttled
+  position report from `tili_ax::spawn_mouse_watcher`, is a no-op unless
+  `focus_follows_monitor` is on; when it is, a cheap point-in-rect check
+  against the already-cached `self.monitors` (no AX/CG call on the hot
+  path) updates `focused_monitor` if the cursor's now over a different
+  connected monitor — same effect as an explicit `Command::FocusMonitor`.
+
   `focus`/`move_focused` are the only places that call `AxWindow::focus()`
   (real OS focus/raise); nothing calls it automatically on window creation,
   specifically to avoid focus-stealing every already-open window when the
@@ -241,12 +263,17 @@ the dependency direction is a hard boundary, not just organization:
   same function, never a separate code path, or CLI-invoked and
   hotkey-invoked behavior can drift apart. `src/main.rs` is one
   `tokio::select!` loop merging socket accepts,
-  `tili_ax::spawn_event_watcher()`'s channel, the config-reload bridge, and
-  the hotkey-tap bridge — no locks around `WmState` itself, because only
-  one branch of the loop ever touches it at a time; `sync_active_combos` is
-  called after every branch that could change the active mode/bindings, to
-  keep the hotkey tap's `Mutex<HashSet<KeyCombo>>` from drifting out of
-  sync with what `WmState` actually has bound.
+  `tili_ax::spawn_event_watcher()`'s channel, the config-reload bridge, the
+  hotkey-tap bridge, the display-watcher bridge (M9), and the mouse-watcher
+  bridge (M10) — no locks around `WmState` itself, because only one branch
+  of the loop ever touches it at a time; `sync_active_combos` is called
+  after every branch that could change the active mode/bindings, to keep
+  the hotkey tap's `Mutex<HashSet<KeyCombo>>` from drifting out of sync
+  with what `WmState` actually has bound. `ensure_starter_config_exists`
+  (M10) writes `example/tili.kdl` (via `include_str!`) to
+  `~/.config/tili/tili.kdl` before the first `tili_config::load` if
+  nothing's there yet — best-effort, a write failure just falls back to
+  `Config::default()` like before M10.
 - **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
   `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
   `move-to-workspace <name>`, `layout <toggle|tiles|accordion>`,
@@ -258,7 +285,16 @@ the dependency direction is a hard boundary, not just organization:
   instead. `print_response` needs an `ExpectedPayload` hint per subcommand
   since `Response::OkWithPayload` carries an untyped `serde_json::Value` —
   add a new variant there (not JSON-shape sniffing) when a command gets a
-  new payload type.
+  new payload type. The one exception to "no business logic here": `tili
+  daemon install`/`uninstall` (M10) — these manage a LaunchAgent (write/
+  remove `~/Library/LaunchAgents/com.tili.daemon.plist`, drive `launchctl
+  load|unload -w`) entirely on the local filesystem, never touching the
+  daemon's socket at all, so routing them through `dispatch()` wouldn't
+  make sense; `main()` intercepts `Commands::Daemon` and returns before
+  the socket-connecting code path. `daemon_binary_path()` resolves
+  `tili-daemon` relative to the running `tili` binary's own directory
+  (`std::env::current_exe()`), not `PATH`, since a LaunchAgent's
+  environment doesn't guarantee one.
 - **`xtask`** — release/signing tooling (codesign, eventually notarize,
   Homebrew bottle packaging). Not implemented yet.
 

@@ -59,6 +59,20 @@ enum Commands {
     FocusMonitor,
     /// List connected monitors, marking which one is focused.
     ListMonitors,
+    /// Manage tili-daemon's LaunchAgent (auto-start at login).
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Install a LaunchAgent so tili-daemon starts automatically at login.
+    /// Opt-in — never run automatically by `brew install`.
+    Install,
+    /// Remove the LaunchAgent.
+    Uninstall,
 }
 
 /// What shape of payload to expect back, so the CLI doesn't have to guess
@@ -72,6 +86,17 @@ enum ExpectedPayload {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Doesn't talk to the daemon's socket at all — a local filesystem +
+    // launchctl operation, handled before the send()/dispatch() path below.
+    if let Commands::Daemon { action } = &cli.command {
+        match action {
+            DaemonAction::Install => install_launch_agent(),
+            DaemonAction::Uninstall => uninstall_launch_agent(),
+        }
+        return;
+    }
+
     let (command, expected) = match cli.command {
         Commands::Ping => (Command::Ping, ExpectedPayload::None),
         Commands::ListWindows => (Command::ListWindows, ExpectedPayload::Windows),
@@ -92,6 +117,7 @@ fn main() {
         }
         Commands::FocusMonitor => (Command::FocusMonitor, ExpectedPayload::None),
         Commands::ListMonitors => (Command::ListMonitors, ExpectedPayload::Monitors),
+        Commands::Daemon { .. } => unreachable!("handled above before the socket connection"),
     };
 
     match send(command) {
@@ -178,6 +204,113 @@ fn print_workspaces(payload: serde_json::Value) {
         }
         Err(_) => println!("(response payload not recognized)"),
     }
+}
+
+const LAUNCH_AGENT_LABEL: &str = "com.tili.daemon";
+
+fn launch_agent_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").expect("HOME must be set");
+    std::path::PathBuf::from(home)
+        .join("Library/LaunchAgents")
+        .join(format!("{LAUNCH_AGENT_LABEL}.plist"))
+}
+
+/// `tili-daemon` ships alongside `tili` itself (both land in the same bin
+/// directory, whether that's a Homebrew prefix or `cargo build`'s
+/// `target/debug`) — resolved relative to this running binary rather than
+/// relying on `tili-daemon` being on `PATH`, which a LaunchAgent's minimal
+/// environment doesn't guarantee.
+fn daemon_binary_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|dir| dir.join("tili-daemon")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("tili-daemon"))
+}
+
+fn install_launch_agent() {
+    let plist_path = launch_agent_path();
+    let Some(parent) = plist_path.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        eprintln!("tili: couldn't create {}: {e}", parent.display());
+        std::process::exit(1);
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let log_dir = format!("{home}/Library/Logs/tili");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let binary = daemon_binary_path();
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCH_AGENT_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{log_dir}/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>{log_dir}/daemon.err.log</string>
+</dict>
+</plist>
+"#,
+        binary.display()
+    );
+
+    if let Err(e) = std::fs::write(&plist_path, plist) {
+        eprintln!("tili: couldn't write {}: {e}", plist_path.display());
+        std::process::exit(1);
+    }
+
+    match std::process::Command::new("launchctl")
+        .args(["load", "-w"])
+        .arg(&plist_path)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            println!(
+                "tili: installed LaunchAgent at {} — tili-daemon will now start \
+                 automatically at login (and right now)",
+                plist_path.display()
+            );
+        }
+        Ok(status) => {
+            eprintln!("tili: `launchctl load` exited with {status}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("tili: couldn't run launchctl: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn uninstall_launch_agent() {
+    let plist_path = launch_agent_path();
+    if !plist_path.exists() {
+        println!("tili: no LaunchAgent installed");
+        return;
+    }
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w"])
+        .arg(&plist_path)
+        .status();
+    if let Err(e) = std::fs::remove_file(&plist_path) {
+        eprintln!("tili: couldn't remove {}: {e}", plist_path.display());
+        std::process::exit(1);
+    }
+    println!("tili: removed LaunchAgent at {}", plist_path.display());
 }
 
 fn print_monitors(payload: serde_json::Value) {

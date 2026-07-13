@@ -83,6 +83,12 @@ pub struct WmState {
     /// Matched in order — first match wins.
     floating_rules: Vec<CompiledFloatingRule>,
     floating_defaults: tili_config::FloatingDefaults,
+    /// M10: warp the cursor to the newly-focused window on every
+    /// focus-changing operation.
+    mouse_follows_focus: bool,
+    /// M10: moving the cursor onto a different monitor changes
+    /// `focused_monitor`, same as an explicit `FocusMonitor` command.
+    focus_follows_monitor: bool,
 }
 
 impl Default for WmState {
@@ -110,6 +116,8 @@ impl Default for WmState {
             mode_bindings: HashMap::new(),
             floating_rules: Vec::new(),
             floating_defaults: tili_config::FloatingDefaults::default(),
+            mouse_follows_focus: false,
+            focus_follows_monitor: false,
         }
     }
 }
@@ -305,6 +313,9 @@ impl WmState {
             })
             .collect();
         self.floating_defaults = config.floating_defaults;
+
+        self.mouse_follows_focus = config.settings.mouse_follows_focus;
+        self.focus_follows_monitor = config.settings.focus_follows_monitor;
 
         self.relayout_all_visible();
     }
@@ -710,6 +721,34 @@ impl WmState {
             && let Some(window) = self.windows.get(&id)
         {
             window.focus();
+            if self.mouse_follows_focus {
+                let frame = window.frame();
+                tili_ax::warp_cursor_to(frame.x + frame.width / 2.0, frame.y + frame.height / 2.0);
+            }
+        }
+    }
+
+    /// The cursor moved to `(x, y)` (M10, `focus-follows-monitor`) — if
+    /// that setting is on and the point now falls on a *different*
+    /// connected monitor than `focused_monitor`, that monitor becomes
+    /// focused, same as an explicit `Command::FocusMonitor`. A no-op
+    /// otherwise (including when the setting is off — the daemon still
+    /// receives these throttled position updates either way, but only
+    /// acts on them when configured to).
+    pub fn on_mouse_moved(&mut self, x: f64, y: f64) {
+        if !self.focus_follows_monitor {
+            return;
+        }
+        let under_cursor = self.monitors.iter().find(|m| {
+            x >= m.frame.x
+                && x < m.frame.x + m.frame.width
+                && y >= m.frame.y
+                && y < m.frame.y + m.frame.height
+        });
+        if let Some(monitor) = under_cursor
+            && monitor.id != self.focused_monitor
+        {
+            self.focused_monitor = monitor.id;
         }
     }
 
