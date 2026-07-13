@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Never publish a release that hasn't passed the same gate as a normal PR.
+  gate:
+    name: fmt, clippy, test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable && rustup default stable
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: gate
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable && rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stage="tili-${version}-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp target/${{ matrix.target }}/release/tili "$stage/"
+          cp target/${{ matrix.target }}/release/tili-daemon "$stage/"
+          cp README.md LICENSE CHANGELOG.md "$stage/"
+          tar -czf "${stage}.tar.gz" "$stage"
+          shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tili-${{ matrix.target }}
+          path: |
+            tili-*.tar.gz
+            tili-*.tar.gz.sha256
+
+  publish:
+    name: publish GitHub release
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: true
+          files: dist/*
+          body: |
+            ⚠️ **Unsigned development build.** tili does not codesign or
+            notarize release binaries yet (that lands in M11 — see
+            [ROADMAP.md](https://github.com/${{ github.repository }}/blob/main/ROADMAP.md)).
+            macOS Gatekeeper will block these on first launch; run
+            `xattr -d com.apple.quarantine <binary>` or right-click → Open to
+            proceed. Not recommended for daily use before v1.0.
+
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
+            for what changed.

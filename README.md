@@ -6,6 +6,7 @@
 
 i3-style workflow · public Accessibility API only · Rust · no SIP disable
 
+[![CI](https://github.com/itsdezen/tili/actions/workflows/ci.yml/badge.svg)](https://github.com/itsdezen/tili/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-early%20development-yellow.svg)](ROADMAP.md)
@@ -134,9 +135,17 @@ Check [ROADMAP.md](ROADMAP.md) for what's next — milestones are scoped to be
 independently pickup-able. Issues and PRs welcome.
 
 ```sh
-cargo build --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+Every PR runs this exact gate in CI before it can merge — see
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Tagged pushes
+(`vX.Y.Z`) run the same gate again before building release artifacts; see
+[`.github/workflows/release.yml`](.github/workflows/release.yml) and
+[CHANGELOG.md](CHANGELOG.md) for the release process and versioning
+convention.
 
 ## License
 

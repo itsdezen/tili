@@ -6,19 +6,10 @@ pub struct WorkspaceConfig {
     pub monitor: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Gaps {
     pub inner: u32,
     pub outer: (u32, u32, u32, u32),
-}
-
-impl Default for Gaps {
-    fn default() -> Self {
-        Self {
-            inner: 0,
-            outer: (0, 0, 0, 0),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

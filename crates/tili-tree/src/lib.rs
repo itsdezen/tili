@@ -1,4 +1,4 @@
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -44,7 +44,10 @@ pub enum Node {
     },
 }
 
+// Mutation methods land in M3 (single-workspace tiling); until then these
+// fields are intentionally write-only scaffolding.
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct Tree {
     nodes: SlotMap<NodeId, Node>,
     parents: std::collections::HashMap<NodeId, NodeId>,

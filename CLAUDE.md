@@ -13,6 +13,21 @@ cargo run --bin tili-daemon          # run the daemon directly (not via `cargo i
 cargo run --bin tili -- ping         # run the CLI directly
 ```
 
+Before committing, run the exact gate CI enforces (a red PR blocks merge, so
+run this locally first):
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+If `cargo fmt` reformats something, that's expected — just run `cargo fmt`
+(no `--check`) and re-stage. Clippy warnings are hard errors here (`-D
+warnings`); don't `#[allow]` one without a one-line comment explaining why
+(see the `#[allow(dead_code)]` on `Tree` in `tili-tree` for the pattern —
+intentional scaffolding pending a specific milestone, not a shrug).
+
 `tili-ax` (and anything depending on it) only builds on macOS — it links
 against `AXUIElement`/Core Graphics/Core Foundation. `tili-tree` has zero
 macOS dependencies by design; prefer adding logic there over `tili-ax` when
@@ -81,3 +96,17 @@ preference):
   direct AX API call from daemon/tree code.
 - Hotkey-triggered and socket-triggered commands both go through
   `dispatch()` — no parallel command-handling path.
+
+## Release process
+
+Every milestone that reaches a working, verifiable state (per its ROADMAP.md
+checkbox) is a release candidate — the project ships continuously rather
+than batching everything up for v1. To cut a release: update
+[CHANGELOG.md](CHANGELOG.md) (`Unreleased` → a dated version section), tag
+`vX.Y.Z` following the versioning convention documented there, and push the
+tag — `.github/workflows/release.yml` re-runs the full gate, builds
+aarch64/x86_64 binaries, and opens a **draft** GitHub release for manual
+review before publishing. Releases stay unsigned/prerelease until M11 lands
+proper codesigning; don't hand-sign or ad-hoc-sign a release binary outside
+that pipeline (see the Release Engineering section of the architecture
+notes for why ad-hoc signing is specifically disallowed).

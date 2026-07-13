@@ -1,6 +1,6 @@
 mod dispatch;
 
-use dispatch::{dispatch, WmState};
+use dispatch::{WmState, dispatch};
 use tili_ipc::Command;
 
 #[tokio::main]
