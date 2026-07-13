@@ -295,8 +295,26 @@ the dependency direction is a hard boundary, not just organization:
   `tili-daemon` relative to the running `tili` binary's own directory
   (`std::env::current_exe()`), not `PATH`, since a LaunchAgent's
   environment doesn't guarantee one.
-- **`xtask`** — release/signing tooling (codesign, eventually notarize,
-  Homebrew bottle packaging). Not implemented yet.
+- **`xtask`** — release/signing tooling (M11). `bundle` wraps
+  `tili-daemon`/`tili` in a minimal `tili.app` at
+  `target/<target>/release/tili.app` (bundle id `com.tili.daemon` — the
+  same id `tili-cli`'s LaunchAgent uses, M10). `codesign` signs it with
+  hardened runtime + `xtask/entitlements.plist` (a bare `<dict/>` —
+  **keep it free of XML comments**; `codesign`'s entitlements parser,
+  `AMFIUnserializeXML`, is much stricter than a normal XML parser and
+  rejects well-formed comments with an opaque "syntax error near line N").
+  `package` runs `bundle`, then `codesign` only if `TILI_SIGN_IDENTITY` is
+  set in the environment, then tars + sha256s — the single command
+  `release.yml`'s `build` job calls per target. Certificate generation
+  itself is deliberately *not* automated anywhere (see CONTRIBUTING.md's
+  "Release Engineering" section) — it's a one-time, human, Keychain
+  Access step, because the entire point of the self-signed-cert strategy
+  is that the identity never changes; automating its creation would make
+  it too easy to accidentally regenerate (which resets every user's
+  Accessibility grant). `Formula/tili.rb` here is a copy of the real
+  formula that lives in the separate `itsdezen/homebrew-tap` repo (not
+  auto-published — see that file's own header comment for the sync
+  process).
 
 ## Project status and milestones
 

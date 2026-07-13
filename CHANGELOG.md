@@ -10,6 +10,55 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-13
+
+### Added
+
+- M11: release engineering — the real self-signed-cert pipeline, not just
+  the tooling for one. `xtask` (`bundle`/`codesign`/`package`) wraps
+  `tili-daemon`/`tili` in a minimal `tili.app` (bundle id
+  `com.tili.daemon` — a stable, nameable target for Accessibility and
+  codesigning, instead of a bare Unix executable), signs it with hardened
+  runtime + a minimal entitlements file when `TILI_SIGN_IDENTITY` is set,
+  and packages a tarball + sha256 per target. `release.yml`'s `build` job
+  imports a certificate from `TILI_SIGNING_CERTIFICATE_P12`/
+  `_PASSWORD` repo secrets and calls `xtask package`, conditionally — no
+  secret, no signing, same as a local test build. The one-time certificate
+  (fixed Common Name "tili Self-Signed", long validity, generated once via
+  Keychain Access, never regenerated except on forced expiry — regenerating
+  it would reset every user's Accessibility grant) and the
+  `itsdezen/homebrew-tap` repository (hosting the real `Formula/tili.rb`,
+  mirrored from this repo's copy) are both real, published infrastructure
+  now, documented in CONTRIBUTING.md's new "Release Engineering" section.
+
+  Getting the pipeline actually green took three real bugs, each found by
+  reading the *actual* CI log (not guessed) after a same-shape failure hit
+  more than once: (1) `secrets.X` isn't a recognized named-value inside a
+  step's `if:` condition — has to go through a job-level `env:` var first;
+  (2) `security find-identity`'s output has the identity's quoted name on
+  a numbered line, not the first line — `head -1 | grep` grabbed
+  `"Policy: Code Signing"` (no match) instead; a self-signed cert also
+  correctly shows `CSSMERR_TP_NOT_TRUSTED` under "Matching identities" and
+  0 under "Valid identities only" (expected/harmless — `codesign` doesn't
+  require system trust, only `find-identity -v`'s own listing does); (3)
+  `codesign`'s entitlements parser (`AMFIUnserializeXML`) is far stricter
+  than a normal XML parser and rejects well-formed XML comments — the
+  explanatory comment that used to live in `xtask/entitlements.plist`
+  moved to a Rust doc comment on `xtask`'s `codesign()` instead, and the
+  plist is now a bare `<dict/>`.
+
+  Verified end-to-end on real hardware: `brew install itsdezen/tap/tili`
+  installs a real signed `tili.app` (`codesign -dv` confirms
+  `Authority=tili Self-Signed`, hardened runtime on), `tili --help`/`tili
+  daemon install`/`uninstall` all work against the installed binaries, and
+  the downloaded tarball's sha256 was independently recomputed and
+  matched the published `*.tar.gz.sha256` before being written into the
+  formula. `brew upgrade` preserving the Accessibility grant across two
+  releases specifically wasn't exercised yet (only one signed release
+  exists so far) — but it follows directly from the one thing this whole
+  milestone was designed to guarantee: the signing identity is fixed and
+  won't change between releases unless forced.
+
 ## [0.10.0] - 2026-07-13
 
 ### Added

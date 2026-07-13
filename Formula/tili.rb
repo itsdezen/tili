@@ -1,14 +1,10 @@
-# Template for the `itsdezen/homebrew-tap` repository (M11) — see
-# CONTRIBUTING.md's "Release Engineering" section. This file lives here so
-# it's versioned alongside the code it packages; publishing it means
-# copying the current version of this file into that separate tap repo's
-# `Formula/tili.rb` after each release (or, later, automating that copy in
-# release.yml's `publish` job).
-#
-# `sha256` values below MUST be replaced with the real values printed by
-# `xtask package` (or the matching `*.tar.gz.sha256` file attached to the
-# GitHub release) after each release — never left as placeholders in the
-# actual tap repo.
+# Kept in sync with the `itsdezen/homebrew-tap` repository's Formula/tili.rb
+# (the one `brew install itsdezen/tap/tili` actually reads — see
+# CONTRIBUTING.md's "Release Engineering" section) — this copy is versioned
+# alongside the code it packages so it's easy to diff against a release,
+# but publishing a change means copying it into that separate repo too
+# (manually today; automating that copy in release.yml's `publish` job is
+# a reasonable future improvement).
 class Tili < Formula
   desc "i3-like tiling window manager for macOS"
   homepage "https://github.com/itsdezen/tili"
@@ -17,12 +13,12 @@ class Tili < Formula
 
   on_arm do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-aarch64-apple-darwin.tar.gz"
-    sha256 "REPLACE_WITH_AARCH64_TARBALL_SHA256"
+    sha256 "1a1a5f3c18e355301e342f4db6a83db32420ce0c2d7177252fffefa19be181cb"
   end
 
   on_intel do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-x86_64-apple-darwin.tar.gz"
-    sha256 "REPLACE_WITH_X86_64_TARBALL_SHA256"
+    sha256 "c12dcf3df5a506f9828f0567524024cfc30486605326b6ce42f64a96753a76db"
   end
 
   def install

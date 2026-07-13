@@ -19,7 +19,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ not started
 | M8 | Floating rules + auto-center | ✅ | ~30 floating-app rules match and auto-center/size on window creation |
 | M9 | Multi-monitor support | ✅ | Hot-plug/unplug reassigns workspaces without losing windows |
 | M10 | Daily-drivable MVP | ✅ | Used as the only WM for one full workday, no manual intervention |
-| M11 | Release engineering | ⬜ | `brew install` → `brew upgrade` does **not** reset Accessibility permission |
+| M11 | Release engineering | ✅ | `brew install` → `brew upgrade` does **not** reset Accessibility permission |
 
 Post-v1 (deferred on purpose): animated window movement (`TweenedFrameSetter`),
 tabbed/stacked containers, `tili subscribe` event streaming for status-bar
