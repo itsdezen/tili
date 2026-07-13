@@ -85,11 +85,29 @@ jobs:
           security create-keychain -p "" "$keychain"
           security default-keychain -s "$keychain"
           security unlock-keychain -p "" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          # A freshly created keychain isn't automatically part of
+          # `codesign`'s search list (only the default keychain is) —
+          # append it to the existing list rather than replacing it, so
+          # login.keychain (needed to validate the cert chain against
+          # system roots) stays reachable too.
+          existing=$(security list-keychains -d user | sed 's/[[:space:]]*"\(.*\)"/\1/')
+          security list-keychains -d user -s "$keychain" $existing
           echo "$TILI_SIGNING_CERTIFICATE_P12" | base64 --decode > cert.p12
           security import cert.p12 -k "$keychain" -P "$TILI_SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$keychain"
           rm -f cert.p12
-          identity=$(security find-identity -v -p codesigning "$keychain" | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+          # Not `-v` ("valid") — a self-signed certificate never chains to a
+          # trusted root, so it's filtered out of that list even though
+          # `codesign` itself doesn't require system trust to sign with it.
+          # Logged unfiltered first so a genuinely-missing identity is
+          # visible in the run log instead of a bare "exit code 1".
+          security find-identity -p codesigning "$keychain"
+          identity=$(security find-identity -p codesigning "$keychain" | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+          if [ -z "$identity" ]; then
+            echo "::error::no codesigning identity found in $keychain after import"
+            exit 1
+          fi
           echo "TILI_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
 
       - name: Package
