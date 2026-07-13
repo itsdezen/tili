@@ -31,10 +31,33 @@ pub struct KeybindingMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FloatingRule {
     pub app_id: String,
+    /// Regex pattern matched against the window title, if present —
+    /// compiled by whoever consumes this (`tili-daemon`), not here, so
+    /// this crate doesn't need a regex dependency just to hold a string.
     pub title: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub center: Option<bool>,
+}
+
+/// Fallback centering/sizing for a floating window that matched a rule
+/// with no explicit `width`/`height`/`center` of its own.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FloatingDefaults {
+    pub center: bool,
+    /// Fraction of the monitor's usable width/height, e.g. `0.6` = 60%.
+    pub width_ratio: f32,
+    pub height_ratio: f32,
+}
+
+impl Default for FloatingDefaults {
+    fn default() -> Self {
+        Self {
+            center: true,
+            width_ratio: 0.6,
+            height_ratio: 0.6,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,10 +77,7 @@ impl Default for Settings {
     }
 }
 
-/// The parsed `tili.kdl` document. `floating_rules` is defined here (it's
-/// part of the target schema) but not yet populated from KDL — parsing it
-/// is M8's job; until then it stays empty, matching the "don't fill in code
-/// ahead of its milestone" scope discipline documented in CLAUDE.md.
+/// The parsed `tili.kdl` document.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub workspaces: Vec<WorkspaceConfig>,
@@ -68,7 +88,9 @@ pub struct Config {
     pub workspace_gaps: HashMap<String, Gaps>,
     pub settings: Settings,
     pub keybindings: Vec<KeybindingMode>,
+    /// Matched in order — first match wins.
     pub floating_rules: Vec<FloatingRule>,
+    pub floating_defaults: FloatingDefaults,
 }
 
 #[derive(Debug)]
@@ -105,19 +127,22 @@ pub fn load(path: &std::path::Path) -> Result<Config, ConfigError> {
 }
 
 /// Parses a KDL config document into a `Config`. Unrecognized top-level
-/// nodes (e.g. a `floating-rules` block, ahead of M8) are silently ignored
-/// rather than rejected — the schema is meant to grow across milestones
-/// without invalidating configs written against an earlier one.
+/// nodes are silently ignored rather than rejected — the schema is meant
+/// to grow across milestones without invalidating configs written against
+/// an earlier one.
 pub fn parse(source: &str) -> Result<Config, ConfigError> {
     let doc: KdlDocument = source
         .parse()
         .map_err(|e: kdl::KdlError| ConfigError::Parse(e.to_string()))?;
 
+    let (floating_rules, floating_defaults) = parse_floating_rules(&doc);
     let mut config = Config {
         workspaces: parse_workspaces(&doc),
         default_layout: parse_default_layout(&doc),
         settings: parse_settings(&doc),
         keybindings: parse_keybindings(&doc),
+        floating_rules,
+        floating_defaults,
         ..Config::default()
     };
     let (gaps, workspace_gaps) = parse_gaps(&doc);
@@ -228,6 +253,79 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
         };
     }
     gaps
+}
+
+/// `floating-rules { rule app-id="..." title="..." { width N; height N;
+/// center #bool } ... defaults { center #bool; width-ratio F; height-ratio
+/// F } }`. Rules are returned in document order — callers should match
+/// first-wins.
+fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaults) {
+    let Some(children) = doc.get("floating-rules").and_then(KdlNode::children) else {
+        return (Vec::new(), FloatingDefaults::default());
+    };
+
+    let rules = children
+        .nodes()
+        .iter()
+        .filter(|n| n.name().value() == "rule")
+        .filter_map(|n| {
+            let app_id = n.get("app-id")?.as_string()?.to_string();
+            let title = n
+                .get("title")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
+            let (width, height, center) = match n.children() {
+                Some(rule_children) => (
+                    rule_children
+                        .get_arg("width")
+                        .and_then(|v| v.as_integer())
+                        .and_then(|v| u32::try_from(v).ok()),
+                    rule_children
+                        .get_arg("height")
+                        .and_then(|v| v.as_integer())
+                        .and_then(|v| u32::try_from(v).ok()),
+                    rule_children.get_arg("center").and_then(|v| v.as_bool()),
+                ),
+                None => (None, None, None),
+            };
+            Some(FloatingRule {
+                app_id,
+                title,
+                width,
+                height,
+                center,
+            })
+        })
+        .collect();
+
+    let mut defaults = FloatingDefaults::default();
+    if let Some(defaults_children) = children.get("defaults").and_then(KdlNode::children) {
+        if let Some(v) = defaults_children
+            .get_arg("center")
+            .and_then(|v| v.as_bool())
+        {
+            defaults.center = v;
+        }
+        if let Some(v) = as_f32(defaults_children.get_arg("width-ratio")) {
+            defaults.width_ratio = v;
+        }
+        if let Some(v) = as_f32(defaults_children.get_arg("height-ratio")) {
+            defaults.height_ratio = v;
+        }
+    }
+
+    (rules, defaults)
+}
+
+/// KDL stores `0.6` and `1` as different internal number variants; a
+/// float-ratio setting should accept either rather than silently keeping
+/// its default just because someone wrote a whole number.
+fn as_f32(value: Option<&kdl::KdlValue>) -> Option<f32> {
+    value.and_then(|v| {
+        v.as_float()
+            .map(|f| f as f32)
+            .or_else(|| v.as_integer().map(|i| i as f32))
+    })
 }
 
 fn parse_gaps(doc: &KdlDocument) -> (Gaps, HashMap<String, Gaps>) {
@@ -341,8 +439,8 @@ mod tests {
     #[test]
     fn unrecognized_sections_are_ignored_not_rejected() {
         let source = r#"
-            floating-rules {
-                rule app-id="com.apple.finder"
+            experimental-future-section {
+                whatever "this-does-not-exist-yet"
             }
             workspaces {
                 workspace "work"
@@ -350,7 +448,53 @@ mod tests {
         "#;
         let config = parse(source).unwrap();
         assert_eq!(config.workspaces.len(), 1);
-        assert!(config.floating_rules.is_empty());
+    }
+
+    #[test]
+    fn parses_floating_rules_and_defaults() {
+        let source = r#"
+            floating-rules {
+                rule app-id="com.apple.finder"
+                rule app-id="com.apple.systempreferences" {
+                    width 900
+                    height 600
+                    center #true
+                }
+                rule app-id="com.apple.finder" title="^Copy$"
+
+                defaults {
+                    center #true
+                    width-ratio 0.6
+                    height-ratio 0.6
+                }
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.floating_rules.len(), 3);
+
+        let plain = &config.floating_rules[0];
+        assert_eq!(plain.app_id, "com.apple.finder");
+        assert_eq!(plain.width, None);
+
+        let sized = &config.floating_rules[1];
+        assert_eq!(sized.app_id, "com.apple.systempreferences");
+        assert_eq!(sized.width, Some(900));
+        assert_eq!(sized.height, Some(600));
+        assert_eq!(sized.center, Some(true));
+
+        let titled = &config.floating_rules[2];
+        assert_eq!(titled.title.as_deref(), Some("^Copy$"));
+
+        assert!(config.floating_defaults.center);
+        assert!((config.floating_defaults.width_ratio - 0.6).abs() < f32::EPSILON);
+        assert!((config.floating_defaults.height_ratio - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn floating_defaults_fall_back_when_block_is_absent() {
+        let config = parse("").unwrap();
+        assert!(config.floating_defaults.center);
+        assert!((config.floating_defaults.width_ratio - 0.6).abs() < f32::EPSILON);
     }
 
     #[test]

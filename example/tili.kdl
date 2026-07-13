@@ -1,8 +1,7 @@
 // Copy this to ~/.config/tili/tili.kdl and edit — the daemon watches the
 // file and hot-reloads on save (see ROADMAP.md M5). Only what's used by
-// milestones landed so far is documented below; sections that don't exist
-// yet in the parser (floating-rules, M8) are still safe to include —
-// unrecognized sections are ignored, not rejected.
+// milestones landed so far is documented below; unrecognized sections are
+// safe to include too — they're ignored, not rejected.
 
 workspaces {
     workspace "work"
@@ -59,4 +58,29 @@ keybindings mode="main" {
 keybindings mode="resize" {
     bind "escape" "mode main"
     bind "enter" "mode main"
+}
+
+// Windows matching one of these float instead of tiling, and are
+// auto-centered/sized on creation. Matched in order — first match wins.
+// `app-id` is the target app's bundle identifier (find one with
+// `osascript -e 'id of app "Finder"'` or `mdls -name kMDItemCFBundleIdentifier
+// /Applications/Finder.app`). `title` (optional) is a regex matched against
+// the window title, for narrowing a rule to specific dialogs of an app that
+// should otherwise tile normally.
+floating-rules {
+    rule app-id="com.apple.finder"
+    rule app-id="com.apple.systempreferences"
+    rule app-id="com.apple.ActivityMonitor"
+    rule app-id="com.apple.systempreferences" { width 900; height 600; center #true }
+
+    // Only Finder's "Copy"/"Connect to Server" style dialogs float — other
+    // Finder windows are already covered by the plain rule above, so this
+    // one only matters for apps you'd otherwise want tiled.
+    rule app-id="com.apple.finder" title="^(Copy|Connect to Server)$"
+
+    defaults {
+        center #true
+        width-ratio 0.6
+        height-ratio 0.6
+    }
 }

@@ -92,9 +92,13 @@ the dependency direction is a hard boundary, not just organization:
   `objc2-app-kit` — note it spawns its own dedicated `CFRunLoop` thread,
   since a process without `NSApplication` needs *some* thread pumping a run
   loop to receive Cocoa notifications at all (same reason `axuielement`'s own
-  `AXNotificationStream` does the same for AX notifications). `src/watch.rs`
-  ties both together into `spawn_event_watcher()`, which subscribes each
-  running app to window lifecycle notifications and emits a single coarse
+  `AXNotificationStream` does the same for AX notifications). It also has
+  `bundle_id_for_pid` (M8, via `NSRunningApplication`) — `enumerate.rs`
+  resolves this once per process and shares it across all of that process's
+  `AxWindow`s, rather than once per window, since it's used to match
+  floating rules. `src/watch.rs` ties both together into
+  `spawn_event_watcher()`, which subscribes each running app to window
+  lifecycle notifications and emits a single coarse
   `WmEvent::WindowsChanged { pid }` per change — callers re-read that
   process's windows via `list_windows_for_pid` rather than trying to
   interpret individual notification payloads (this sidesteps having to
@@ -115,12 +119,15 @@ the dependency direction is a hard boundary, not just organization:
   `sync_active_combos` for how it's kept from drifting.
 - **`tili-config`** — KDL parsing/validation into a `Config` struct, plus
   file-watch hot-reload. `src/schema.rs` has the types and `parse()`,
-  including `keybindings mode="..." { bind "key" "command" }` blocks (M6);
-  unrecognized top-level sections (e.g. `floating-rules` ahead of M8) are
-  silently ignored, not rejected, so a config can be written against the
-  full target schema before the parser catches up — see README.md's config
-  preview vs. `example/tili.kdl` for "aspirational full schema" vs. "what's
-  actually parsed today." **KDL v2 booleans are
+  including `keybindings mode="..." { bind "key" "command" }` blocks (M6)
+  and `floating-rules { rule app-id="..." title="regex"? { ... } ...
+  defaults { ... } }` (M8) — `title` stays a plain `String` here, not a
+  compiled `Regex`, so this crate doesn't need a regex dependency just to
+  hold a pattern; `tili-daemon` compiles it. Unrecognized top-level
+  sections are still silently ignored, not rejected, so a config can be
+  written against the full target schema before the parser catches up —
+  see README.md's config preview vs. `example/tili.kdl` for "aspirational
+  full schema" vs. "what's actually parsed today." **KDL v2 booleans are
   `#true`/`#false`** (a `#`-prefixed keyword, to disambiguate from bare
   identifiers) — bare `true`/`false` is a parse error, easy to get wrong
   when writing test fixtures or example configs; there's a test guarding
@@ -146,13 +153,27 @@ the dependency direction is a hard boundary, not just organization:
 - **`tili-daemon`** — the actual window manager process. `src/state.rs` holds
   `WmState`: the live `AxWindow` handles themselves (not just cached
   metadata — M3 needs the real `AXUIElement` to move/focus/park a window),
-  one `tili_tree::Tree` **per workspace** (M4), and a `workspace_focus`
-  map remembering each workspace's last-focused node so switching back
-  restores where you left off. Only the *active* workspace's tree ever gets
-  laid out on real screen coordinates (`relayout_active`); every other
-  workspace's windows sit wherever `switch_workspace` last parked them
-  (off-screen, since macOS has no public Spaces API to actually hide them).
-  New windows always join the active workspace next to the current focus.
+  one `tili_tree::Tree` **per workspace** (M4) for *tiled* windows, and a
+  `placements: HashMap<WindowId, Placement>` index (M8 — `Placement` is
+  just `{ workspace, floating }`) giving O(1) "which workspace owns this
+  window, and is it tiled or floating" instead of scanning every
+  workspace's tree (M4 through M7's approach). Floating windows (M8:
+  matched a `floating-rules` entry at creation time, via
+  `compute_floating_frame`, which checks `AxWindow::bundle_id()` against
+  each compiled rule in order and computes a centered/sized `Rect` from the
+  rule's or the config's `defaults`' width/height-ratio) live entirely
+  outside any `Tree` — `relayout_active` only ever touches tiled windows;
+  floating ones only get repositioned at creation and when their workspace
+  becomes active again (`reposition_floating_in_active_workspace`), not on
+  every layout-affecting event, so a user's manual drag of a floating
+  window isn't undone by, say, a gap change. `workspace_focus` remembers
+  each workspace's last-focused node so switching back restores where you
+  left off. Only the *active* workspace's tiled tree ever gets laid out on
+  real screen coordinates (`relayout_active`); every other workspace's
+  windows (tiled or floating) sit wherever `switch_workspace` last parked
+  them (off-screen, since macOS has no public Spaces API to actually hide
+  them). New windows always join the active workspace next to the current
+  focus (if tiled) or just get centered (if floating).
   `focus`/`move_focused` are the only places that call `AxWindow::focus()`
   (real OS focus/raise); nothing calls it automatically on window creation,
   specifically to avoid focus-stealing every already-open window when the

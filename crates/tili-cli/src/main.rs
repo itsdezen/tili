@@ -142,8 +142,9 @@ fn print_windows(payload: serde_json::Value) {
         Ok(windows) if windows.is_empty() => println!("no windows found"),
         Ok(windows) => {
             for w in windows {
+                let placement = if w.floating { "float" } else { "tile " };
                 println!(
-                    "{:>10}  pid={:<8} {:.0}x{:.0}+{:.0}+{:.0}  {}",
+                    "{:>10}  pid={:<8} {placement} {:.0}x{:.0}+{:.0}+{:.0}  {}",
                     w.id, w.pid, w.frame.width, w.frame.height, w.frame.x, w.frame.y, w.title
                 );
             }

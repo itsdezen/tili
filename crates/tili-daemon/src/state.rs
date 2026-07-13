@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+use regex::Regex;
 use tili_ax::{AxWindow, InstantFrameSetter, KeyCombo, WindowFrameSetter};
 use tili_ipc::{Command, RectInfo, WindowInfo, WorkspaceInfo};
-use tili_tree::{Direction, Gaps, NodeId, Tree, WindowId};
+use tili_tree::{Direction, Gaps, NodeId, Rect, Tree, WindowId};
 
 /// The workspace new windows land in, and the one active at daemon startup.
 /// Workspaces declared in config (M5) are created up front by `apply_config`;
@@ -25,6 +26,26 @@ const DEFAULT_MODE: &str = "main";
 const PARK_MARGIN: f64 = 10_000.0;
 const PARK_OFFSET_STEP: f64 = 50.0;
 
+/// Which workspace a window belongs to, and whether it's tiled (part of
+/// that workspace's `Tree`) or floating (positioned once, outside the
+/// tree). Indexed by `WindowId` in `WmState::placements` so "which
+/// workspace owns this window" is an O(1) lookup instead of scanning every
+/// workspace's tree (M4 through M7 did the latter).
+struct Placement {
+    workspace: String,
+    floating: bool,
+}
+
+/// A `tili_config::FloatingRule` with its title pattern pre-compiled —
+/// done once in `apply_config`, not on every window creation.
+struct CompiledFloatingRule {
+    app_id: String,
+    title: Option<Regex>,
+    width: Option<u32>,
+    height: Option<u32>,
+    center: Option<bool>,
+}
+
 /// Holds the daemon's entire mutable state. Both the socket handler and the
 /// (future, M6) global-hotkey handler call `dispatch` against the same
 /// `WmState`, so CLI-invoked and hotkey-invoked commands can never behave
@@ -32,12 +53,14 @@ const PARK_OFFSET_STEP: f64 = 50.0;
 ///
 /// `windows` holds the live `AxWindow` handles themselves (not just cached
 /// metadata) across *every* workspace — M3 needs the real `AXUIElement` to
-/// move/focus/park a window. Each workspace has its own `Tree`; a window
-/// belongs to exactly one workspace's tree at a time. `workspace_focus`
-/// remembers the last-focused node per workspace, so switching back to one
-/// restores where you left off rather than defaulting to the root every time.
+/// move/focus/park a window. Each workspace has its own `Tree` for its
+/// tiled windows; floating windows (M8) sit outside every `Tree`, tracked
+/// only via `placements`. `workspace_focus` remembers the last-focused
+/// node per workspace, so switching back to one restores where you left
+/// off rather than defaulting to the root every time.
 pub struct WmState {
     windows: HashMap<WindowId, AxWindow>,
+    placements: HashMap<WindowId, Placement>,
     workspaces: HashMap<String, Tree>,
     workspace_focus: HashMap<String, NodeId>,
     active_workspace: String,
@@ -48,6 +71,9 @@ pub struct WmState {
     /// mode name -> (key combo -> command), built fresh from config's
     /// `keybindings` on every `apply_config`.
     mode_bindings: HashMap<String, HashMap<KeyCombo, Command>>,
+    /// Matched in order — first match wins.
+    floating_rules: Vec<CompiledFloatingRule>,
+    floating_defaults: tili_config::FloatingDefaults,
 }
 
 impl Default for WmState {
@@ -56,6 +82,7 @@ impl Default for WmState {
         workspaces.insert(DEFAULT_WORKSPACE.to_string(), Tree::new());
         Self {
             windows: HashMap::new(),
+            placements: HashMap::new(),
             workspaces,
             workspace_focus: HashMap::new(),
             active_workspace: DEFAULT_WORKSPACE.to_string(),
@@ -64,6 +91,8 @@ impl Default for WmState {
             workspace_gaps: HashMap::new(),
             current_mode: DEFAULT_MODE.to_string(),
             mode_bindings: HashMap::new(),
+            floating_rules: Vec::new(),
+            floating_defaults: tili_config::FloatingDefaults::default(),
         }
     }
 }
@@ -71,10 +100,13 @@ impl Default for WmState {
 impl WmState {
     /// Replaces one process's windows with a freshly-scanned set, in
     /// response to a `WmEvent::WindowsChanged { pid }`: whatever isn't in
-    /// the fresh scan is gone (removed from whichever workspace it was in),
-    /// whatever's new is tiled into the *active* workspace next to the
-    /// current focus, whatever already existed just has its cached
-    /// handle/frame refreshed. Re-lays-out the active workspace afterward.
+    /// the fresh scan is gone (removed from whichever workspace/placement
+    /// it had), whatever's new either joins the *active* workspace's tiled
+    /// tree next to the current focus, or — if it matches a floating rule
+    /// (M8) — gets centered/sized once and left out of the tree entirely.
+    /// Whatever already existed just has its cached handle/frame
+    /// refreshed. Re-lays-out the active workspace's tiled windows
+    /// afterward.
     pub fn apply_windows_changed(&mut self, pid: i32, mut fresh: Vec<AxWindow>) {
         // Zero-size entries are usually menu-extra/phantom AX windows, not
         // real user-facing ones — skip them rather than giving them tiled
@@ -94,27 +126,56 @@ impl WmState {
             .collect();
         for id in stale_ids {
             self.windows.remove(&id);
-            self.remove_from_all_workspaces(id);
+            self.remove_placement(id);
         }
 
         for window in fresh {
             let id = window.id();
-            if self.find_workspace_of(id).is_none() {
+            let is_new = !self.placements.contains_key(&id);
+            let floating_frame = if is_new {
+                self.compute_floating_frame(&window)
+            } else {
+                None
+            };
+
+            self.windows.insert(id, window);
+
+            if !is_new {
+                continue;
+            }
+
+            if let Some(frame) = floating_frame {
+                self.placements.insert(
+                    id,
+                    Placement {
+                        workspace: self.active_workspace.clone(),
+                        floating: true,
+                    },
+                );
+                if let Some(w) = self.windows.get_mut(&id) {
+                    self.frame_setter.set_frame(w, frame);
+                }
+            } else {
                 let near = self.workspace_focus.get(&self.active_workspace).copied();
-                let tree = self.active_tree_mut();
-                let node = tree.insert_window(id, near);
+                let node = self.active_tree_mut().insert_window(id, near);
                 self.workspace_focus
                     .entry(self.active_workspace.clone())
                     .or_insert(node);
+                self.placements.insert(
+                    id,
+                    Placement {
+                        workspace: self.active_workspace.clone(),
+                        floating: false,
+                    },
+                );
             }
-            self.windows.insert(id, window);
         }
 
         self.relayout_active();
     }
 
     /// Drops every window belonging to a process that just terminated,
-    /// wherever (whichever workspace) it was.
+    /// wherever (whichever workspace, tiled or floating) it was.
     pub fn remove_app(&mut self, pid: i32) {
         let ids: Vec<WindowId> = self
             .windows
@@ -124,7 +185,7 @@ impl WmState {
             .collect();
         for id in ids {
             self.windows.remove(&id);
-            self.remove_from_all_workspaces(id);
+            self.remove_placement(id);
         }
         self.relayout_active();
     }
@@ -138,6 +199,7 @@ impl WmState {
                     id: w.id(),
                     pid: w.pid(),
                     title: w.title().to_string(),
+                    floating: self.placements.get(&w.id()).is_some_and(|p| p.floating),
                     frame: RectInfo {
                         x: frame.x,
                         y: frame.y,
@@ -151,11 +213,18 @@ impl WmState {
 
     /// Applies a freshly-loaded (or hot-reloaded) config: updates gaps
     /// (global + per-workspace overrides), rebuilds the keybinding table,
-    /// and ensures every workspace it declares exists (creating empty ones
-    /// as needed) — without switching to any of them, so a config edit
-    /// never yanks focus away from whatever workspace the user is actually
+    /// recompiles floating rules (M8 — an invalid title regex logs a
+    /// warning and drops just that rule, not the whole config), and
+    /// ensures every workspace it declares exists (creating empty ones as
+    /// needed) — without switching to any of them, so a config edit never
+    /// yanks focus away from whatever workspace the user is actually
     /// looking at. Re-lays-out the active workspace afterward so a gap
     /// change is visible immediately.
+    ///
+    /// Floating rules only apply to windows created *after* this call —
+    /// an already-tiled window that a newly-added rule would now match
+    /// stays tiled until it's recreated (matches the M8 acceptance bar:
+    /// "auto-center/size on window creation").
     pub fn apply_config(&mut self, config: &tili_config::Config) {
         self.gaps = to_tree_gaps(config.gaps);
         self.workspace_gaps = config
@@ -190,6 +259,34 @@ impl WmState {
         {
             self.current_mode = DEFAULT_MODE.to_string();
         }
+
+        self.floating_rules = config
+            .floating_rules
+            .iter()
+            .filter_map(|rule| {
+                let title = match &rule.title {
+                    Some(pattern) => match Regex::new(pattern) {
+                        Ok(re) => Some(re),
+                        Err(e) => {
+                            eprintln!(
+                                "tili-daemon: skipping floating rule for '{}' — invalid title regex '{pattern}': {e}",
+                                rule.app_id
+                            );
+                            return None;
+                        }
+                    },
+                    None => None,
+                };
+                Some(CompiledFloatingRule {
+                    app_id: rule.app_id.clone(),
+                    title,
+                    width: rule.width,
+                    height: rule.height,
+                    center: rule.center,
+                })
+            })
+            .collect();
+        self.floating_defaults = config.floating_defaults;
 
         self.relayout_active();
     }
@@ -312,17 +409,23 @@ impl WmState {
     }
 
     /// Switches which workspace is active on the (single, until M9) monitor:
-    /// parks every window in the outgoing workspace off-screen, lays out
-    /// the incoming one for real, and restores its remembered focus.
-    /// Creates the target workspace (empty) if it doesn't exist yet.
-    /// A no-op if `name` is already active.
+    /// parks every window in the outgoing workspace off-screen (tiled and
+    /// floating alike), lays out the incoming one's tiled tree for real and
+    /// re-centers its floating windows, and restores its remembered focus.
+    /// Creates the target workspace (empty) if it doesn't exist yet. A
+    /// no-op if `name` is already active.
     pub fn switch_workspace(&mut self, name: &str) {
         if name == self.active_workspace {
             return;
         }
 
-        let outgoing_ids = self.active_tree().window_ids();
-        for (i, id) in outgoing_ids.into_iter().enumerate() {
+        let outgoing: Vec<WindowId> = self
+            .active_tree()
+            .window_ids()
+            .into_iter()
+            .chain(self.floating_windows_in(&self.active_workspace))
+            .collect();
+        for (i, id) in outgoing.into_iter().enumerate() {
             self.park(id, i);
         }
 
@@ -330,6 +433,7 @@ impl WmState {
         self.workspaces.entry(name.to_string()).or_default();
 
         self.relayout_active();
+        self.reposition_floating_in_active_workspace();
 
         let restore = self
             .workspace_focus
@@ -372,6 +476,13 @@ impl WmState {
         let new_node = target_tree.insert_window(id, target_focus_hint);
         self.workspace_focus
             .insert(target_name.to_string(), new_node);
+        self.placements.insert(
+            id,
+            Placement {
+                workspace: target_name.to_string(),
+                floating: false,
+            },
+        );
 
         self.park(id, 0);
         self.relayout_active();
@@ -392,29 +503,38 @@ impl WmState {
             .or_default()
     }
 
-    fn find_workspace_of(&self, id: WindowId) -> Option<&str> {
-        self.workspaces
+    fn floating_windows_in(&self, workspace: &str) -> Vec<WindowId> {
+        self.placements
             .iter()
-            .find(|(_, tree)| tree.find_node(id).is_some())
-            .map(|(name, _)| name.as_str())
+            .filter(|(_, p)| p.floating && p.workspace == workspace)
+            .map(|(&id, _)| id)
+            .collect()
     }
 
-    fn remove_from_all_workspaces(&mut self, id: WindowId) {
-        let Some(name) = self.find_workspace_of(id).map(str::to_string) else {
+    /// Drops a window's placement entirely — from its workspace's `Tree`
+    /// if it was tiled, or just from `placements` if it was floating
+    /// (floating windows were never in a `Tree` to begin with).
+    fn remove_placement(&mut self, id: WindowId) {
+        let Some(placement) = self.placements.remove(&id) else {
             return;
         };
-        let Some(tree) = self.workspaces.get_mut(&name) else {
+        if placement.floating {
+            return;
+        }
+        let Some(tree) = self.workspaces.get_mut(&placement.workspace) else {
             return;
         };
         let removed_leaf = tree.find_node(id);
         let suggested = tree.remove_window(id);
-        if removed_leaf.is_some() && self.workspace_focus.get(&name) == removed_leaf.as_ref() {
+        if removed_leaf.is_some()
+            && self.workspace_focus.get(&placement.workspace) == removed_leaf.as_ref()
+        {
             match suggested {
                 Some(n) => {
-                    self.workspace_focus.insert(name, n);
+                    self.workspace_focus.insert(placement.workspace, n);
                 }
                 None => {
-                    self.workspace_focus.remove(&name);
+                    self.workspace_focus.remove(&placement.workspace);
                 }
             }
         }
@@ -453,7 +573,10 @@ impl WmState {
     /// Recomputes every window's frame in the *active* workspace and
     /// applies it via the `WindowFrameSetter` seam — never a direct AX call
     /// from here. Windows in other workspaces are left exactly where they
-    /// are (parked), since they're not visible right now.
+    /// are (parked), since they're not visible right now. Only touches
+    /// *tiled* windows — floating windows keep whatever position they were
+    /// last centered/parked at (see `reposition_floating_in_active_workspace`
+    /// for when floating windows do get repositioned).
     fn relayout_active(&mut self) {
         let area = tili_ax::main_display_frame();
         let gaps = self
@@ -467,6 +590,65 @@ impl WmState {
                 self.frame_setter.set_frame(window, rect);
             }
         }
+    }
+
+    /// Re-centers/sizes every floating window belonging to the active
+    /// workspace — called when a workspace becomes active again after
+    /// being parked, so floating windows land back where they should
+    /// rather than staying at their off-screen parked coordinates.
+    fn reposition_floating_in_active_workspace(&mut self) {
+        let ids = self.floating_windows_in(&self.active_workspace);
+        for id in ids {
+            let frame = self
+                .windows
+                .get(&id)
+                .and_then(|w| self.compute_floating_frame(w));
+            if let Some(frame) = frame
+                && let Some(window) = self.windows.get_mut(&id)
+            {
+                self.frame_setter.set_frame(window, frame);
+            }
+        }
+    }
+
+    /// Returns the frame a floating window should be placed at if `window`
+    /// matches a floating rule (first match wins), or `None` if it doesn't
+    /// match any — meaning it should be tiled instead.
+    fn compute_floating_frame(&self, window: &AxWindow) -> Option<Rect> {
+        let bundle_id = window.bundle_id()?;
+        let rule = self.floating_rules.iter().find(|rule| {
+            rule.app_id == bundle_id
+                && rule
+                    .title
+                    .as_ref()
+                    .is_none_or(|re| re.is_match(window.title()))
+        })?;
+
+        let area = tili_ax::main_display_frame();
+        let width = rule
+            .width
+            .map(f64::from)
+            .unwrap_or(area.width * f64::from(self.floating_defaults.width_ratio));
+        let height = rule
+            .height
+            .map(f64::from)
+            .unwrap_or(area.height * f64::from(self.floating_defaults.height_ratio));
+        let center = rule.center.unwrap_or(self.floating_defaults.center);
+        let (x, y) = if center {
+            (
+                area.x + (area.width - width) / 2.0,
+                area.y + (area.height - height) / 2.0,
+            )
+        } else {
+            (area.x, area.y)
+        };
+
+        Some(Rect {
+            x,
+            y,
+            width,
+            height,
+        })
     }
 }
 

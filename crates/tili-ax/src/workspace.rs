@@ -72,6 +72,16 @@ pub fn spawn_workspace_watcher(tx: Sender<AppEvent>) {
     });
 }
 
+/// Resolves a running process's bundle identifier (e.g.
+/// `"com.apple.finder"`) from its pid — used to match a newly-created
+/// window's owning app against `floating-rules` (M8). `None` for
+/// processes with no bundle id (most background/helper processes; regular
+/// GUI apps always have one).
+pub fn bundle_id_for_pid(pid: i32) -> Option<String> {
+    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    app.bundleIdentifier().map(|s| s.to_string())
+}
+
 /// Extracts the launched/terminated app's pid and bundle id from a
 /// `NSWorkspaceDidLaunchApplicationNotification`/`DidTerminateApplication`'s
 /// `userInfo[NSWorkspaceApplicationKey]`.

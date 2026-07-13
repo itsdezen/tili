@@ -58,6 +58,10 @@ pub struct WindowInfo {
     pub id: u32,
     pub pid: i32,
     pub title: String,
+    /// Whether a floating rule matched this window (M8) — floating
+    /// windows are excluded from tiling and only positioned once, on
+    /// creation (or when their workspace becomes active again).
+    pub floating: bool,
     pub frame: RectInfo,
 }
 

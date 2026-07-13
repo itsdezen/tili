@@ -10,6 +10,32 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-13
+
+### Added
+
+- M8: floating rules + auto-center/size on creation. `tili-config` parses
+  `floating-rules { rule app-id="..." title="regex"? { width; height;
+  center } ... defaults { center; width-ratio; height-ratio } }`.
+  `tili-ax` gains `bundle_id_for_pid` (via `NSRunningApplication`,
+  resolved once per process and shared across its windows, not once per
+  window) and `AxWindow` now carries a `bundle_id`. `tili-daemon`'s
+  `WmState` gains a `placements: HashMap<WindowId, Placement>` index
+  (workspace + tiled-vs-floating) replacing the linear tree scan M4–M7
+  used to find a window's workspace; floating windows are matched at
+  creation time (first rule wins, title is an optional regex compiled
+  once in `apply_config` — an invalid pattern logs a warning and drops
+  just that rule, not the whole config) and centered/sized via the same
+  `WindowFrameSetter` seam as tiling, entirely outside any workspace's
+  `Tree`. Floating windows park and get re-centered alongside tiled ones
+  on workspace switch. `tili list-windows` now shows `tile`/`float` per
+  window. `example/tili.kdl` gains a real floating-rules block. Floating
+  rules only apply at window-creation time, not retroactively to configs
+  reloaded after a window already exists (matches the milestone's literal
+  "on window creation" scope). Verified end-to-end on real hardware:
+  windows matching a floating rule auto-center at the configured size
+  instead of tiling, and stay excluded from the tiled layout.
+
 ## [0.7.0] - 2026-07-13
 
 ### Added

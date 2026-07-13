@@ -12,7 +12,7 @@ pub use frame_setter::{InstantFrameSetter, WindowFrameSetter};
 pub use hotkey::{KeyCombo, parse_key_combo, spawn_hotkey_tap};
 pub use watch::{WmEvent, spawn_event_watcher};
 pub use window::AxWindow;
-pub use workspace::{AppEvent, spawn_workspace_watcher};
+pub use workspace::{AppEvent, bundle_id_for_pid, spawn_workspace_watcher};
 
 /// Checks Accessibility permission, prompting the user via the system
 /// dialog if it hasn't been granted yet. Every AX call in this crate will

@@ -21,6 +21,7 @@ unsafe extern "C" {
 pub struct AxWindow {
     id: WindowId,
     pid: i32,
+    bundle_id: Option<String>,
     title: String,
     frame: Rect,
     element: AXUIElement,
@@ -54,8 +55,12 @@ impl AxWindow {
 
     /// Builds an `AxWindow` from an `AXUIElement` known to be a window
     /// (typically an entry from an application's `AXWindows` attribute).
-    /// Returns `None` if the private call can't resolve a window id.
-    pub fn from_element(element: AXUIElement, pid: i32) -> Option<Self> {
+    /// `bundle_id` is resolved once per process by the caller (see
+    /// `enumerate::list_windows_for_pid`) rather than once per window, to
+    /// avoid redundant `NSRunningApplication` lookups for apps with
+    /// multiple windows. Returns `None` if the private call can't resolve
+    /// a window id.
+    pub fn from_element(element: AXUIElement, pid: i32, bundle_id: Option<String>) -> Option<Self> {
         let id = Self::resolve_window_id(&element)?;
         let title = element
             .string_attribute(kAXTitleAttribute)
@@ -82,6 +87,7 @@ impl AxWindow {
         Some(Self {
             id,
             pid,
+            bundle_id,
             title,
             frame,
             element,
@@ -94,6 +100,10 @@ impl AxWindow {
 
     pub fn pid(&self) -> i32 {
         self.pid
+    }
+
+    pub fn bundle_id(&self) -> Option<&str> {
+        self.bundle_id.as_deref()
     }
 
     pub fn title(&self) -> &str {

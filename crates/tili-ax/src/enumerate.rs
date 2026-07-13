@@ -69,8 +69,12 @@ pub fn list_windows_for_pid(pid: i32) -> Vec<AxWindow> {
     let Ok(ax_windows) = app.element_array_attribute(kAXWindowsAttribute) else {
         return Vec::new();
     };
+    // Resolved once per process, not once per window — floating-rule
+    // matching (M8) needs it on every `AxWindow`, but a `NSRunningApplication`
+    // lookup per window would be redundant work for multi-window apps.
+    let bundle_id = crate::workspace::bundle_id_for_pid(pid);
     ax_windows
         .into_iter()
-        .filter_map(|element| AxWindow::from_element(element, pid))
+        .filter_map(|element| AxWindow::from_element(element, pid, bundle_id.clone()))
         .collect()
 }
