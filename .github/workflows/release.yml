@@ -41,6 +41,13 @@ jobs:
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    # Job-level env so the "Import signing certificate" step's `if:` can
+    # check `env.TILI_SIGNING_CERTIFICATE_P12` — `secrets.*` isn't a
+    # recognized named-value inside step `if:` expressions (a real GitHub
+    # Actions restriction, not a typo), so it has to be routed through env
+    # first.
+    env:
+      TILI_SIGNING_CERTIFICATE_P12: ${{ secrets.TILI_SIGNING_CERTIFICATE_P12 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -69,9 +76,8 @@ jobs:
       # set, and `xtask package` below ships unsigned, same as a local/test
       # build.
       - name: Import signing certificate
-        if: ${{ secrets.TILI_SIGNING_CERTIFICATE_P12 != '' }}
+        if: ${{ env.TILI_SIGNING_CERTIFICATE_P12 != '' }}
         env:
-          TILI_SIGNING_CERTIFICATE_P12: ${{ secrets.TILI_SIGNING_CERTIFICATE_P12 }}
           TILI_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.TILI_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
