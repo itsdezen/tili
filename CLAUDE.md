@@ -290,25 +290,25 @@ the dependency direction is a hard boundary, not just organization:
   instead. `print_response` needs an `ExpectedPayload` hint per subcommand
   since `Response::OkWithPayload` carries an untyped `serde_json::Value` —
   add a new variant there (not JSON-shape sniffing) when a command gets a
-  new payload type. Three exceptions to "no business logic here," all
+  new payload type. Two exceptions to "no business logic here," both
   intercepted in `main()` before the socket-connecting code path (each
-  `return`s or diverges instead of falling through to the generic
-  `send()`/`print_response` path):
-  - `tili start` — `daemon_binary_path()` resolves `tili-daemon` relative
-    to the running `tili` binary's own directory (`std::env::current_exe()`),
-    not `PATH` (a LaunchAgent's environment doesn't guarantee one), then
-    `exec`s straight into it (`std::os::unix::process::CommandExt::exec`,
-    replacing this process rather than spawning a child) — `start_daemon()`
-    returns `!` and only returns control to Rust at all if `exec` itself
-    failed.
-  - `tili daemon install`/`uninstall` (M10) — manage a LaunchAgent (write/
-    remove `~/Library/LaunchAgents/com.tili.daemon.plist`, drive `launchctl
-    load|unload -w`) entirely on the local filesystem, never touching the
-    daemon's socket.
-  - `tili stop`/`status` *do* talk to the socket (via `Command::Shutdown`/
-    `Ping`) but get their own wording instead of the generic "couldn't
-    reach daemon" error path — a daemon that's already stopped is an
-    expected, calmly-reported outcome for `stop`, not a failure.
+  `return`s instead of falling through to the generic `send()`/
+  `print_response` path):
+  - `tili start`/`stop` manage tili-daemon's LaunchAgent entirely on the
+    local filesystem, never touching the daemon's socket. `start_daemon()`
+    resolves `tili-daemon` relative to the running `tili` binary's own
+    directory (`daemon_binary_path()`, via `std::env::current_exe()`, not
+    `PATH` — a LaunchAgent's environment doesn't guarantee one), writes
+    `~/Library/LaunchAgents/com.tili.daemon.plist` (`RunAtLoad` +
+    `KeepAlive` both `true`), and `launchctl load -w`s it — this is the
+    *only* way to run tili-daemon; there's no separate foreground mode.
+    `stop_daemon()` is the reverse: `launchctl unload -w` then remove the
+    plist. Unloading (not just killing the process) is load-bearing —
+    `KeepAlive` only respawns the job while it stays loaded, so `tili stop`
+    has to unload before the daemon can actually stay down.
+  - `tili status` *does* talk to the socket (via `Command::Ping`) but gets
+    its own wording instead of the generic "couldn't reach daemon" error
+    path.
 - **`xtask`** — release/signing tooling (M11). `bundle` wraps
   `tili-daemon`/`tili` in a minimal `tili.app` at
   `target/<target>/release/tili.app` (bundle id `com.tili.daemon` — the

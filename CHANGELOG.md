@@ -10,6 +10,18 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+### Changed
+
+- `tili start`/`stop` now manage tili-daemon's LaunchAgent directly,
+  folding in what used to be the separate `tili daemon install`/
+  `uninstall` subcommand: `tili start` writes and `launchctl load`s the
+  `KeepAlive` LaunchAgent (no more foreground/Ctrl-C mode), and `tili stop`
+  `launchctl unload`s and removes it. Fixes `tili stop` not actually
+  stopping anything when the daemon was LaunchAgent-managed — it only sent
+  a graceful shutdown over the socket, and launchd's `KeepAlive` would
+  immediately respawn the process (and its global hotkey tap) the instant
+  it exited.
+
 ## [0.11.1] - 2026-07-13
 
 ### Added

@@ -39,12 +39,12 @@ enum LayoutArg {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start tili-daemon in the foreground (Ctrl-C to stop). For an
-    /// always-running background daemon that survives logout/reboot, use
-    /// `tili daemon install` instead.
+    /// Install and start tili-daemon as a LaunchAgent — it keeps running in
+    /// the background, restarts if it crashes, and starts automatically at
+    /// login.
     Start,
-    /// Gracefully stop a running daemon (started via `tili start` or
-    /// `tili daemon install`).
+    /// Stop tili-daemon and remove its LaunchAgent, so it doesn't come back
+    /// until `tili start` is run again.
     Stop,
     /// Report whether the daemon is running and reachable.
     Status,
@@ -68,20 +68,6 @@ enum Commands {
     FocusMonitor,
     /// List connected monitors, marking which one is focused.
     ListMonitors,
-    /// Manage tili-daemon's LaunchAgent (auto-start at login).
-    Daemon {
-        #[command(subcommand)]
-        action: DaemonAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum DaemonAction {
-    /// Install a LaunchAgent so tili-daemon starts automatically at login.
-    /// Opt-in — never run automatically by `brew install`.
-    Install,
-    /// Remove the LaunchAgent.
-    Uninstall,
 }
 
 /// What shape of payload to expect back, so the CLI doesn't have to guess
@@ -97,25 +83,22 @@ fn main() {
     let cli = Cli::parse();
 
     // None of these three go through the generic send()/print_response
-    // path below: Start never talks to the socket at all, and Stop/Status
-    // want their own wording instead of the generic "couldn't reach
-    // daemon" error (which is a hard failure for every other command, but
-    // an expected, calmly-reported outcome for these two).
+    // path below: Start/Stop never talk to the socket at all (they manage
+    // the LaunchAgent directly), and Status wants its own wording instead
+    // of the generic "couldn't reach daemon" error (which is a hard
+    // failure for every other command, but an expected, calmly-reported
+    // outcome here).
     match &cli.command {
-        Commands::Start => start_daemon(),
+        Commands::Start => {
+            start_daemon();
+            return;
+        }
         Commands::Stop => {
             stop_daemon();
             return;
         }
         Commands::Status => {
             print_status();
-            return;
-        }
-        Commands::Daemon { action } => {
-            match action {
-                DaemonAction::Install => install_launch_agent(),
-                DaemonAction::Uninstall => uninstall_launch_agent(),
-            }
             return;
         }
         _ => {}
@@ -144,7 +127,6 @@ fn main() {
         Commands::Start => unreachable!("handled above before the socket connection"),
         Commands::Stop => unreachable!("handled above before the socket connection"),
         Commands::Status => unreachable!("handled above before the socket connection"),
-        Commands::Daemon { .. } => unreachable!("handled above before the socket connection"),
     };
 
     match send(command) {
@@ -255,34 +237,6 @@ fn daemon_binary_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("tili-daemon"))
 }
 
-/// `tili start` — the common-case entry point for trying tili out: `exec`s
-/// straight into `tili-daemon` (replacing this process, not spawning a
-/// child) so Ctrl-C/signals reach the daemon directly and there's no
-/// wrapper process left behind. Never returns on success — see
-/// `std::os::unix::process::CommandExt::exec`'s docs. For a daemon that
-/// keeps running across logout/reboot, use `tili daemon install` instead.
-fn start_daemon() -> ! {
-    use std::os::unix::process::CommandExt;
-
-    let binary = daemon_binary_path();
-    let err = std::process::Command::new(&binary).exec();
-    eprintln!("tili: couldn't start {}: {err}", binary.display());
-    std::process::exit(1);
-}
-
-/// `tili stop` — sends `Command::Shutdown`, which the daemon handles
-/// directly in its main loop (not through `dispatch()`) since it's process
-/// lifecycle, not a `WmState` mutation. A daemon that's already not
-/// running is reported calmly, not as an error — stopping something
-/// that's already stopped isn't a failure.
-fn stop_daemon() {
-    match send(Command::Shutdown) {
-        Ok(Response::Ok) => println!("tili: daemon stopped"),
-        Ok(other) => println!("tili: daemon responded unexpectedly to stop: {other:?}"),
-        Err(_) => println!("tili: daemon is not running"),
-    }
-}
-
 /// `tili status` — same underlying check as `tili ping`, worded for a
 /// human glancing at it rather than for scripting.
 fn print_status() {
@@ -295,7 +249,11 @@ fn print_status() {
     }
 }
 
-fn install_launch_agent() {
+/// `tili start` — writes a LaunchAgent plist and `launchctl load`s it, so
+/// `launchd` (not this short-lived CLI process) owns tili-daemon from here
+/// on: it starts it right now, restarts it if it crashes (`KeepAlive`),
+/// and starts it again at every login (`RunAtLoad`).
+fn start_daemon() {
     let plist_path = launch_agent_path();
     let Some(parent) = plist_path.parent() else {
         return;
@@ -347,8 +305,7 @@ fn install_launch_agent() {
     {
         Ok(status) if status.success() => {
             println!(
-                "tili: installed LaunchAgent at {} — tili-daemon will now start \
-                 automatically at login (and right now)",
+                "tili: daemon started (LaunchAgent installed at {})",
                 plist_path.display()
             );
         }
@@ -363,10 +320,14 @@ fn install_launch_agent() {
     }
 }
 
-fn uninstall_launch_agent() {
+/// `tili stop` — `launchctl unload`s and removes the LaunchAgent plist, so
+/// `launchd` won't respawn tili-daemon (its `KeepAlive` only applies while
+/// the job stays loaded). A daemon that's already not running (no plist)
+/// is reported calmly, not as an error.
+fn stop_daemon() {
     let plist_path = launch_agent_path();
     if !plist_path.exists() {
-        println!("tili: no LaunchAgent installed");
+        println!("tili: daemon is not running");
         return;
     }
     let _ = std::process::Command::new("launchctl")
@@ -377,7 +338,7 @@ fn uninstall_launch_agent() {
         eprintln!("tili: couldn't remove {}: {e}", plist_path.display());
         std::process::exit(1);
     }
-    println!("tili: removed LaunchAgent at {}", plist_path.display());
+    println!("tili: daemon stopped");
 }
 
 fn print_monitors(payload: serde_json::Value) {

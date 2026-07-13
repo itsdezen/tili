@@ -63,10 +63,9 @@ brew install itsdezen/tap/tili
 tili start
 ```
 
-That's it to try it out — `tili start` *is* the daemon (no separate
-`tili-daemon` command to remember), running in the foreground until you
-Ctrl-C it (or run `tili stop`/`tili status` from another terminal). First
-run:
+That's it — `tili start` installs and starts tili-daemon as a background
+LaunchAgent: it starts running immediately, restarts itself if it ever
+crashes, and starts automatically at every future login too. First run:
 - Triggers the **Accessibility permission** prompt (add `tili-daemon`
   manually in *System Settings → Privacy & Security → Accessibility* if
   you miss it).
@@ -75,14 +74,9 @@ run:
   [`example/tili.kdl`](example/tili.kdl) for the full commented version.
 
 Use the keybindings from your config (or the `tili` CLI directly — see
-[Commands](#commands) below) to focus/move/tile windows.
-
-Once you're happy with it, make it start automatically at every login
-instead of running `tili start` by hand each time:
-
-```sh
-tili daemon install
-```
+[Commands](#commands) below) to focus/move/tile windows. Run `tili stop`
+to stop it and remove the LaunchAgent (so it stays stopped until you run
+`tili start` again), and `tili status` to check whether it's running.
 
 ## Other ways to install
 
@@ -148,18 +142,16 @@ floating-rules {
 
 ## Commands
 
-`tili start`/`stop`/`status` and `tili daemon install`/`uninstall` manage
-the daemon itself; everything else below is a client command sent over a
-Unix socket to a daemon that's already running — the same commands are
-also what keybindings in your config resolve to (e.g. `bind "alt-h" "focus
-left"`).
+`tili start`/`stop`/`status` manage the daemon's LaunchAgent itself;
+everything else below is a client command sent over a Unix socket to a
+daemon that's already running — the same commands are also what
+keybindings in your config resolve to (e.g. `bind "alt-h" "focus left"`).
 
 | Command | What it does |
 |---|---|
-| `tili start` | Run the daemon in the foreground (Ctrl-C to stop) |
-| `tili stop` | Gracefully stop a running daemon |
+| `tili start` | Install and start tili-daemon as a background LaunchAgent (auto-restart, auto-start at login) |
+| `tili stop` | Stop tili-daemon and remove its LaunchAgent |
 | `tili status` | Report whether the daemon is running |
-| `tili daemon install` / `uninstall` | Manage the auto-start-at-login LaunchAgent |
 | `tili focus <left\|right\|up\|down>` | Move focus to the window in that direction |
 | `tili move <left\|right\|up\|down>` | Swap the focused window with its neighbor |
 | `tili layout <toggle\|tiles\|accordion>` | Toggle or set the focused container's layout |
