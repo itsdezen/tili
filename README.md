@@ -9,9 +9,9 @@ i3-style workflow · public Accessibility API only · Rust · no SIP disable
 [![CI](https://github.com/itsdezen/tili/actions/workflows/ci.yml/badge.svg)](https://github.com/itsdezen/tili/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
-[![Status](https://img.shields.io/badge/status-early%20development-yellow.svg)](ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-v0.11.0-brightgreen.svg)](ROADMAP.md)
 
-[Roadmap](ROADMAP.md) · [Contributing](#contributing) · [Architecture](#architecture)
+[Getting started](#getting-started) · [Commands](#commands) · [Roadmap](ROADMAP.md) · [Contributing](#contributing) · [Architecture](#architecture)
 
 </div>
 
@@ -46,37 +46,82 @@ shortcut.
 
 ## Status
 
-tili is in **early development** (see [ROADMAP.md](ROADMAP.md) for the full
-milestone breakdown). It is not yet daily-drivable. Star/watch the repo if
-you want to follow along — contributions and design feedback are welcome
-well before v1.
+All 11 milestones in [ROADMAP.md](ROADMAP.md) are done as of `v0.11.0` —
+tiling, workspaces, hot-reloaded config, built-in hotkeys, floating rules,
+multi-monitor, mouse/focus-follows-monitor, LaunchAgent auto-start, and a
+real signed release pipeline. tili is daily-drivable. Pre-1.0 still means
+config schema and CLI surface can change between releases — check
+[CHANGELOG.md](CHANGELOG.md) when upgrading.
+
+## Getting started
+
+```sh
+brew install itsdezen/tap/tili
+```
+
+1. **Grant Accessibility permission** — the first time `tili-daemon` runs
+   it triggers the system prompt; you can also add it manually in
+   *System Settings → Privacy & Security → Accessibility*.
+2. **Write a config** — copy [`example/tili.kdl`](example/tili.kdl) to
+   `~/.config/tili/tili.kdl` and edit (or just run `tili-daemon` once —
+   it writes a starter config there automatically if none exists yet).
+   The daemon hot-reloads on save, no restart needed.
+3. **Start the daemon.** Either run it once to try it out:
+   ```sh
+   tili-daemon &
+   ```
+   or install it as a LaunchAgent so it starts automatically at every
+   login (opt-in, not done by `brew install`):
+   ```sh
+   tili daemon install
+   ```
+4. **Use the keybindings from your config** (or the `tili` CLI directly —
+   see [Commands](#commands) below) to focus/move/tile windows.
+
+## Other ways to install
+
+`brew install itsdezen/tap/tili` above is the recommended path — it
+installs a real, signed `tili.app` via
+[itsdezen/homebrew-tap](https://github.com/itsdezen/homebrew-tap).
+
+Building from source instead:
+
+```sh
+git clone https://github.com/itsdezen/tili
+cd tili
+cargo build --release --workspace
+```
+
+Or grab a prebuilt `tili.app` directly from a
+[GitHub release](https://github.com/itsdezen/tili/releases) without
+Homebrew. Releases are codesigned (see
+[CONTRIBUTING.md](CONTRIBUTING.md#release-engineering)) but not notarized
+yet, so Gatekeeper will still prompt on first launch — right-click → Open,
+or `xattr -d com.apple.quarantine tili.app`.
 
 ## Preview: config
 
 Configuration is [KDL](https://kdl.dev), read from `~/.config/tili/tili.kdl`
-and hot-reloaded on save — no restart needed. `workspaces`, `gaps` (global
-and per-workspace), `settings.auto-reload`, and `keybindings` (global
-hotkeys, captured by tili itself — no skhd or similar needed) are parsed
-and applied today; `floating-rules` is part of the target schema shown
-below but not parsed yet (M8) — unrecognized sections are ignored rather
-than rejected, so it's safe to write the full schema ahead of time. See
-[`example/tili.kdl`](example/tili.kdl) for a copy-pasteable starting point
-that reflects what's actually functional right now.
-
-This is a trimmed example of what a full, eventual setup looks like:
+and hot-reloaded on save. This is a trimmed example — see
+[`example/tili.kdl`](example/tili.kdl) for the full, commented,
+copy-pasteable version:
 
 ```kdl
 workspaces {
-    workspace "work" monitor="main"
-    workspace "entertain" monitor="main"
+    workspace "work"
+    workspace "entertain"
     workspace "random"
 }
-
-default-layout "tiles"
 
 gaps {
     inner 4
     outer 8 8 8 8
+}
+
+settings {
+    auto-reload #true
+    mouse-follows-focus #false
+    focus-follows-monitor #false
 }
 
 keybindings mode="main" {
@@ -84,6 +129,7 @@ keybindings mode="main" {
     bind "alt-shift-h" "move left"
     bind "alt-w" "workspace work"
     bind "alt-slash" "layout toggle"
+    bind "alt-m" "focus-monitor"
 }
 
 floating-rules {
@@ -93,6 +139,26 @@ floating-rules {
     defaults { center #true; width-ratio 0.6; height-ratio 0.6 }
 }
 ```
+
+## Commands
+
+`tili <command>` talks to the running daemon over a Unix socket — the same
+commands are also what keybindings in your config resolve to (e.g. `bind
+"alt-h" "focus left"`).
+
+| Command | What it does |
+|---|---|
+| `tili focus <left\|right\|up\|down>` | Move focus to the window in that direction |
+| `tili move <left\|right\|up\|down>` | Swap the focused window with its neighbor |
+| `tili layout <toggle\|tiles\|accordion>` | Toggle or set the focused container's layout |
+| `tili workspace <name>` | Switch the active workspace (created if new) |
+| `tili move-to-workspace <name>` | Move the focused window to another workspace |
+| `tili list-workspaces` | List workspaces, with active/monitor markers |
+| `tili focus-monitor` | Cycle which connected monitor commands target |
+| `tili list-monitors` | List connected monitors |
+| `tili list-windows` | List known windows (tiled/floating, frame, pid) |
+| `tili daemon install` / `uninstall` | Manage the auto-start-at-login LaunchAgent |
+| `tili ping` | Check the daemon is reachable |
 
 ## Architecture
 
@@ -119,32 +185,6 @@ locks, no drift between "what the hotkey does" and "what the CLI does."
 Workspaces are virtual — macOS exposes no public API to control Spaces, so
 inactive-workspace windows are parked off-screen rather than relying on real
 Spaces, the same technique other public-API-only tools in this space use.
-
-## Installation
-
-```sh
-brew install itsdezen/tap/tili
-```
-
-via [itsdezen/homebrew-tap](https://github.com/itsdezen/homebrew-tap). The
-tap exists, but its formula's checksums won't resolve to a real release
-until the one-time self-signed certificate setup lands (see
-[CONTRIBUTING.md](CONTRIBUTING.md#release-engineering)) and a release is
-tagged against it — until then, builds installed straight from a GitHub
-release are unsigned and Gatekeeper will prompt on first launch.
-
-Until then, build from source:
-
-```sh
-git clone https://github.com/itsdezen/tili
-cd tili
-cargo build --release --workspace
-```
-
-Or grab a prebuilt (currently **unsigned**) `tili.app` from a
-[GitHub release](https://github.com/itsdezen/tili/releases) — Gatekeeper
-will block it on first launch; run `xattr -d com.apple.quarantine tili.app`
-or right-click → Open to proceed.
 
 ## Contributing
 
