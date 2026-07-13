@@ -10,6 +10,27 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-13
+
+### Added
+
+- M4: named workspaces + off-screen virtualization, on the single monitor
+  supported until M9. `WmState` now holds one `Tree` per workspace plus a
+  `workspace_focus` map remembering each workspace's last focus, rather
+  than one global tree. `switch_workspace` parks every window in the
+  outgoing workspace (moves it off-screen via the new
+  `AxWindow::set_position`, which — unlike `set_frame` — only touches
+  position so parked windows aren't needlessly resized) and lays out the
+  incoming one for real; `move_focused_to_workspace` moves the focused
+  window into another workspace's tree and parks it immediately. New
+  `Command::ListWorkspaces`/`WorkspaceSwitch`/`MoveNodeToWorkspace` handlers
+  and matching `tili list-workspaces`/`workspace <name>`/
+  `move-to-workspace <name>` CLI subcommands. Workspaces are created lazily
+  on first switch (named workspaces from KDL config land in M5). Verified
+  end-to-end on real hardware: switching away from a workspace with real
+  windows visibly parks them off-screen, switching back restores them at
+  their tiled positions.
+
 ## [0.3.0] - 2026-07-13
 
 ### Added

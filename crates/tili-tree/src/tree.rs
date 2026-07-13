@@ -73,6 +73,13 @@ impl Tree {
         self.root.is_none()
     }
 
+    /// A reasonable node to focus when this tree becomes the active
+    /// workspace and nothing better (a remembered previous focus) is
+    /// available — the root's first leaf, or `None` if the tree is empty.
+    pub fn default_focus(&self) -> Option<NodeId> {
+        self.root.map(|root| self.first_leaf(root))
+    }
+
     pub fn window_at(&self, node: NodeId) -> Option<WindowId> {
         match self.nodes.get(node)? {
             Node::Window { window } => Some(*window),

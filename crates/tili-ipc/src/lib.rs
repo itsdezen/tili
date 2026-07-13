@@ -57,6 +57,14 @@ pub struct WindowInfo {
     pub frame: RectInfo,
 }
 
+/// A workspace as reported by `Command::ListWorkspaces`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub name: String,
+    pub active: bool,
+    pub window_count: usize,
+}
+
 /// Default location of the daemon's Unix socket.
 ///
 /// Wire format over this socket (both directions): a 4-byte big-endian

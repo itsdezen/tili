@@ -55,11 +55,16 @@ the dependency direction is a hard boundary, not just organization:
   the codebase (`_AXUIElementGetWindow`, to resolve a window's real
   `CGWindowID`) — keep that call isolated there; don't add other private API
   usage without a strong reason, since staying public-API-only is what lets
-  tili run without disabling SIP. `AxWindow::set_frame`/`focus` (also in
-  `window.rs`) are the only place real windows get moved/resized/raised —
-  position is set before size (some apps clamp size based on current
-  position) and both are best-effort (`let _ =` on the AX result; a window
-  that refuses a write is left alone, matching every other AX-based WM).
+  tili run without disabling SIP. `AxWindow::set_frame`/`set_position`/
+  `focus` (also in `window.rs`) are the only place real windows get
+  moved/resized/raised — `set_frame` sets position before size (some apps
+  clamp size based on current position), `set_position` only moves (used to
+  park a window off-screen without needlessly resizing it, M4), and both
+  writes are best-effort (`let _ =` on the AX result; a window that refuses
+  a write is left alone, matching every other AX-based WM). Both also update
+  the cached `frame` field to match what was just written, so
+  `WmState::list_windows` reflects reality without a wasted AX read-back —
+  this is why `WindowFrameSetter::set_frame` takes `&mut AxWindow`.
   `src/frame_setter.rs` defines the `WindowFrameSetter` trait — every place
   that moves/resizes a real window must go through `dyn WindowFrameSetter`,
   not call `AxWindow::set_frame` directly. v1 only implements
@@ -89,29 +94,37 @@ the dependency direction is a hard boundary, not just organization:
   here, not duplicated in both binaries.
 - **`tili-daemon`** — the actual window manager process. `src/state.rs` holds
   `WmState`: the live `AxWindow` handles themselves (not just cached
-  metadata — M3 needs the real `AXUIElement` to move/focus a window), a
-  `tili_tree::Tree`, and a `focused: Option<NodeId>` pointer. New windows
-  are inserted next to the current focus; a process's windows are wholesale
-  replaced (removed-then-reinserted) in the tree whenever a
-  `WmEvent::WindowsChanged` fires for it — see M2. `focus`/`move_focused`
-  are the only places that call `AxWindow::focus()` (real OS focus/raise);
-  nothing calls it automatically on window creation, specifically to avoid
-  focus-stealing every already-open window when the daemon starts up and
-  gets seeded with the apps already running. `src/dispatch.rs` has the
-  single `dispatch(&mut WmState, Command) -> Response` function — both the
-  Unix-socket handler and the global-hotkey handler (a `CGEventTap`, not yet
-  implemented) must call this same function, never a separate code path, or
-  CLI-invoked and hotkey-invoked behavior can drift apart. `src/main.rs` is
-  one `tokio::select!` loop merging socket accepts and
-  `tili_ax::spawn_event_watcher()`'s channel (hotkeys/config-reload join
-  this same select in later milestones) — no locks around `WmState`, because
-  only one branch of the loop ever touches it at a time.
+  metadata — M3 needs the real `AXUIElement` to move/focus/park a window),
+  one `tili_tree::Tree` **per workspace** (M4), and a `workspace_focus`
+  map remembering each workspace's last-focused node so switching back
+  restores where you left off. Only the *active* workspace's tree ever gets
+  laid out on real screen coordinates (`relayout_active`); every other
+  workspace's windows sit wherever `switch_workspace` last parked them
+  (off-screen, since macOS has no public Spaces API to actually hide them).
+  New windows always join the active workspace next to the current focus.
+  `focus`/`move_focused` are the only places that call `AxWindow::focus()`
+  (real OS focus/raise); nothing calls it automatically on window creation,
+  specifically to avoid focus-stealing every already-open window when the
+  daemon starts up and gets seeded with the apps already running.
+  `src/dispatch.rs` has the single `dispatch(&mut WmState, Command) ->
+  Response` function — both the Unix-socket handler and the global-hotkey
+  handler (a `CGEventTap`, not yet implemented) must call this same
+  function, never a separate code path, or CLI-invoked and hotkey-invoked
+  behavior can drift apart. `src/main.rs` is one `tokio::select!` loop
+  merging socket accepts and `tili_ax::spawn_event_watcher()`'s channel
+  (hotkeys/config-reload join this same select in later milestones) — no
+  locks around `WmState`, because only one branch of the loop ever touches
+  it at a time.
 - **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
-  `focus <dir>`, `move <dir>`). The package is named `tili-cli` but the
+  `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
+  `move-to-workspace <name>`). The package is named `tili-cli` but the
   binary itself is named `tili` (see the `[[bin]]` section in its
   `Cargo.toml`). No business logic belongs here — if you're tempted to add
   logic to the CLI, it probably belongs in `tili-daemon` behind a `Command`
-  instead.
+  instead. `print_response` needs an `ExpectedPayload` hint per subcommand
+  since `Response::OkWithPayload` carries an untyped `serde_json::Value` —
+  add a new variant there (not JSON-shape sniffing) when a command gets a
+  new payload type.
 - **`xtask`** — release/signing tooling (codesign, eventually notarize,
   Homebrew bottle packaging). Not implemented yet.
 

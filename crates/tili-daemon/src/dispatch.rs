@@ -13,6 +13,19 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
         },
         Command::Focus(dir) => result_response(state.focus(to_tree_direction(dir))),
         Command::Move(dir) => result_response(state.move_focused(to_tree_direction(dir))),
+        Command::ListWorkspaces => match serde_json::to_value(state.list_workspaces()) {
+            Ok(payload) => Response::OkWithPayload(payload),
+            Err(e) => Response::Err {
+                message: e.to_string(),
+            },
+        },
+        Command::WorkspaceSwitch(name) => {
+            state.switch_workspace(&name);
+            Response::Ok
+        }
+        Command::MoveNodeToWorkspace(name) => {
+            result_response(state.move_focused_to_workspace(&name))
+        }
         _ => Response::Err {
             message: "not implemented yet".to_string(),
         },
@@ -62,5 +75,38 @@ mod tests {
         let mut state = WmState::default();
         let response = dispatch(&mut state, Command::Focus(tili_ipc::Direction::Left));
         assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn list_workspaces_starts_with_one_active_default() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::ListWorkspaces);
+        let Response::OkWithPayload(payload) = response else {
+            panic!("expected OkWithPayload");
+        };
+        let workspaces: Vec<tili_ipc::WorkspaceInfo> = serde_json::from_value(payload).unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert!(workspaces[0].active);
+        assert_eq!(workspaces[0].window_count, 0);
+    }
+
+    #[test]
+    fn switching_to_a_new_workspace_creates_it() {
+        let mut state = WmState::default();
+        let response = dispatch(
+            &mut state,
+            Command::WorkspaceSwitch("entertain".to_string()),
+        );
+        assert!(matches!(response, Response::Ok));
+
+        let response = dispatch(&mut state, Command::ListWorkspaces);
+        let Response::OkWithPayload(payload) = response else {
+            panic!("expected OkWithPayload");
+        };
+        let workspaces: Vec<tili_ipc::WorkspaceInfo> = serde_json::from_value(payload).unwrap();
+        assert_eq!(workspaces.len(), 2);
+        let active: Vec<_> = workspaces.iter().filter(|w| w.active).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name, "entertain");
     }
 }

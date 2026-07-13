@@ -108,14 +108,20 @@ impl AxWindow {
         &self.element
     }
 
-    /// Sets the window's position + size via `AXUIElementSetAttributeValue`.
+    /// Sets the window's position + size via `AXUIElementSetAttributeValue`,
+    /// then updates the cached frame to match so callers reading `frame()`
+    /// (e.g. `WmState::list_windows`) see the new position immediately
+    /// rather than a stale pre-write value — this matters for M4's parked
+    /// windows, which are never re-scanned via AX just to confirm where
+    /// they ended up.
+    ///
     /// Position is set before size: some apps clamp/reflow size based on
     /// their current position (e.g. keeping a fixed distance from a screen
     /// edge), so moving first makes the subsequent resize land correctly.
     /// Best-effort: a window that refuses a resize (fixed-size dialogs,
     /// apps that don't honor AX writes) is left wherever it ends up — tili
     /// has no way to force it, matching every other AX-based WM.
-    pub fn set_frame(&self, target: Rect) {
+    pub fn set_frame(&mut self, target: Rect) {
         let _ = self.element.set_point_attribute(
             kAXPositionAttribute,
             AXPoint {
@@ -130,6 +136,18 @@ impl AxWindow {
                 height: target.height,
             },
         );
+        self.frame = target;
+    }
+
+    /// Moves the window without touching its size — used to park a window
+    /// off-screen (M4), where resizing would be pointless and needlessly
+    /// invasive to apps that dislike being resized.
+    pub fn set_position(&mut self, x: f64, y: f64) {
+        let _ = self
+            .element
+            .set_point_attribute(kAXPositionAttribute, AXPoint { x, y });
+        self.frame.x = x;
+        self.frame.y = y;
     }
 
     /// Raises and focuses this window — used when tiling changes which

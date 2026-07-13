@@ -12,7 +12,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ not started
 | M1 | Read-only window listing | ✅ | `tili list-windows` over a real socket shows real running windows |
 | M2 | Event-driven updates | ✅ | Window list stays live via AXObserver/NSWorkspace, no polling; near-zero idle CPU |
 | M3 | Single-workspace Tiles layout | ✅ | `tili focus/move <dir>` works with real BSP tiling on one monitor |
-| M4 | Named workspaces + virtualization | ⬜ | Off-screen parking confirmed via `tili list-windows --json` |
+| M4 | Named workspaces + virtualization | ✅ | Off-screen parking confirmed via `tili list-windows --json` |
 | M5 | KDL config + hot-reload | ⬜ | Editing `tili.kdl` and saving updates gaps live, no restart |
 | M6 | Built-in hotkey handling | ⬜ | Rebinding a key in config works with no external hotkey daemon |
 | M7 | Accordion layout + toggle | ⬜ | `layout toggle` switches Tiles ↔ Accordion on a live workspace |
