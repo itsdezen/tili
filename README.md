@@ -53,8 +53,16 @@ well before v1.
 
 ## Preview: config
 
-Configuration is [KDL](https://kdl.dev). This is a trimmed example of what a
-real setup looks like:
+Configuration is [KDL](https://kdl.dev), read from `~/.config/tili/tili.kdl`
+and hot-reloaded on save — no restart needed. `workspaces`, `gaps` (global
+and per-workspace), and `settings.auto-reload` are parsed and applied today;
+`keybindings`/`floating-rules` are part of the target schema shown below but
+not parsed yet (M6/M8) — unrecognized sections are ignored rather than
+rejected, so it's safe to write the full schema ahead of time. See
+[`example/tili.kdl`](example/tili.kdl) for a copy-pasteable starting point
+that reflects what's actually functional right now.
+
+This is a trimmed example of what a full, eventual setup looks like:
 
 ```kdl
 workspaces {
@@ -79,9 +87,9 @@ keybindings mode="main" {
 
 floating-rules {
     rule app-id="com.apple.finder"
-    rule app-id="com.apple.systempreferences" { width 900; height 600; center true }
+    rule app-id="com.apple.systempreferences" { width 900; height 600; center #true }
 
-    defaults { center true; width-ratio 0.6; height-ratio 0.6 }
+    defaults { center #true; width-ratio 0.6; height-ratio 0.6 }
 }
 ```
 

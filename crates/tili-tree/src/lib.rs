@@ -1,3 +1,3 @@
 mod tree;
 
-pub use tree::{Direction, Node, NodeId, Orientation, Rect, Tree, WindowId};
+pub use tree::{Direction, Gaps, Node, NodeId, Orientation, Rect, Tree, WindowId};

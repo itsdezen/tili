@@ -28,6 +28,14 @@ pub enum Direction {
     Down,
 }
 
+/// Spacing applied during layout — config-driven from M5 on. `outer` is
+/// CSS-shorthand ordered: (top, right, bottom, left).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Gaps {
+    pub inner: f64,
+    pub outer: (f64, f64, f64, f64),
+}
+
 new_key_type! { pub struct NodeId; }
 
 /// A single window's identity, matching the real macOS `CGWindowID`.
@@ -254,16 +262,30 @@ impl Tree {
     }
 
     /// Computes each window's frame within `area` by recursively dividing
-    /// it per the tree's splits.
-    pub fn layout(&self, area: Rect) -> Vec<(WindowId, Rect)> {
+    /// it per the tree's splits, applying `gaps` (outer padding around the
+    /// whole area, inner spacing between siblings).
+    pub fn layout(&self, area: Rect, gaps: Gaps) -> Vec<(WindowId, Rect)> {
         let mut out = Vec::new();
         if let Some(root) = self.root {
-            self.layout_node(root, area, &mut out);
+            let (top, right, bottom, left) = gaps.outer;
+            let padded = Rect {
+                x: area.x + left,
+                y: area.y + top,
+                width: (area.width - left - right).max(0.0),
+                height: (area.height - top - bottom).max(0.0),
+            };
+            self.layout_node(root, padded, gaps.inner, &mut out);
         }
         out
     }
 
-    fn layout_node(&self, node: NodeId, area: Rect, out: &mut Vec<(WindowId, Rect)>) {
+    fn layout_node(
+        &self,
+        node: NodeId,
+        area: Rect,
+        inner_gap: f64,
+        out: &mut Vec<(WindowId, Rect)>,
+    ) {
         match self.nodes.get(node) {
             Some(Node::Window { window }) => out.push((*window, area)),
             Some(Node::Split {
@@ -281,36 +303,40 @@ impl Tree {
                     vec![1.0 / n as f32; n]
                 };
                 let total: f32 = effective_ratios.iter().sum();
+                let total_gap = inner_gap * (n.saturating_sub(1)) as f64;
+                let divisible = match orientation {
+                    Orientation::Horizontal => (area.width - total_gap).max(0.0),
+                    Orientation::Vertical => (area.height - total_gap).max(0.0),
+                };
                 let mut offset = 0.0_f64;
                 for (i, &child) in children.iter().enumerate() {
                     let fraction = f64::from(effective_ratios[i] / total);
+                    let child_size = divisible * fraction;
                     let child_area = match orientation {
                         Orientation::Horizontal => Rect {
                             x: area.x + offset,
                             y: area.y,
-                            width: area.width * fraction,
+                            width: child_size,
                             height: area.height,
                         },
                         Orientation::Vertical => Rect {
                             x: area.x,
                             y: area.y + offset,
                             width: area.width,
-                            height: area.height * fraction,
+                            height: child_size,
                         },
                     };
-                    offset += match orientation {
-                        Orientation::Horizontal => child_area.width,
-                        Orientation::Vertical => child_area.height,
-                    };
-                    self.layout_node(child, child_area, out);
+                    offset += child_size + inner_gap;
+                    self.layout_node(child, child_area, inner_gap, out);
                 }
             }
             // Accordion layout algorithm proper lands in M7; until then,
             // just show whichever child is marked active so an Accordion
-            // node in the tree doesn't break layout.
+            // node in the tree doesn't break layout. No inner gap applies
+            // (only one child is ever visible at a time).
             Some(Node::Accordion { children, active }) => {
                 if let Some(&active_child) = children.get(*active) {
-                    self.layout_node(active_child, area, out);
+                    self.layout_node(active_child, area, inner_gap, out);
                 }
             }
             None => {}
@@ -359,7 +385,7 @@ mod tests {
         let tree = Tree::new();
         assert_eq!(tree.root(), None);
         assert!(tree.is_empty());
-        assert!(tree.layout(area()).is_empty());
+        assert!(tree.layout(area(), Gaps::default()).is_empty());
     }
 
     #[test]
@@ -369,7 +395,7 @@ mod tests {
         assert_eq!(tree.root(), Some(leaf));
         assert_eq!(tree.window_at(leaf), Some(1));
 
-        let layout = tree.layout(area());
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout, vec![(1, area())]);
     }
 
@@ -379,7 +405,7 @@ mod tests {
         let first = tree.insert_window(1, None);
         tree.insert_window(2, Some(first));
 
-        let layout = tree.layout(area());
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout.len(), 2);
 
         let total_width: f64 = layout.iter().map(|(_, r)| r.width).sum();
@@ -388,6 +414,35 @@ mod tests {
             assert_eq!(rect.height, area().height);
             assert_eq!(rect.y, 0.0);
         }
+    }
+
+    #[test]
+    fn gaps_shrink_outer_area_and_separate_siblings() {
+        let mut tree = Tree::new();
+        let first = tree.insert_window(1, None);
+        tree.insert_window(2, Some(first));
+
+        let gaps = Gaps {
+            inner: 10.0,
+            outer: (20.0, 20.0, 20.0, 20.0),
+        };
+        let layout = tree.layout(area(), gaps);
+        assert_eq!(layout.len(), 2);
+
+        // Outer padding on every side.
+        let leftmost = layout
+            .iter()
+            .min_by(|a, b| a.1.x.total_cmp(&b.1.x))
+            .unwrap();
+        assert_eq!(leftmost.1.x, 20.0);
+        assert_eq!(leftmost.1.y, 20.0);
+        assert_eq!(leftmost.1.height, area().height - 40.0);
+
+        // The two windows plus the inner gap between them should exactly
+        // fill the padded width — no overlap, no leftover slack.
+        let total_width: f64 = layout.iter().map(|(_, r)| r.width).sum();
+        let padded_width = area().width - 40.0;
+        assert!((total_width + gaps.inner - padded_width).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -429,7 +484,7 @@ mod tests {
         // dangling single-child split.
         assert_eq!(tree.window_at(tree.root().unwrap()), Some(2));
 
-        let layout = tree.layout(area());
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout, vec![(2, area())]);
     }
 

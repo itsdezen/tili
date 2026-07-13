@@ -48,7 +48,10 @@ the dependency direction is a hard boundary, not just organization:
   always wraps the target leaf in a fresh 2-child `Split` rather than
   flattening into an existing same-orientation split — a deliberate M3
   simplification (still a valid, correctly-tiling tree; just not the
-  shallowest possible one).
+  shallowest possible one). `layout(area, gaps)` takes a `Gaps` (outer
+  padding around the whole area, inner spacing between siblings, both
+  `f64` — `tili-config`'s parsed `u32` gaps get converted at the
+  `tili-daemon` boundary since this crate can't depend on `tili-config`).
 - **`tili-ax`** — the only crate allowed to touch the Accessibility API.
   Depends on `tili-tree` only for geometry types (`Rect`), never for the tree
   itself. `src/window.rs` owns the single private API call used anywhere in
@@ -87,7 +90,24 @@ the dependency direction is a hard boundary, not just organization:
   reason about whether a specific `AXUIElement` is still valid to query at
   the exact moment its destroyed-notification fires).
 - **`tili-config`** — KDL parsing/validation into a `Config` struct, plus
-  file-watch hot-reload. Schema types live in `src/lib.rs`.
+  file-watch hot-reload. `src/schema.rs` has the types and `parse()`;
+  unrecognized top-level sections (e.g. `keybindings`/`floating-rules` ahead
+  of M6/M8) are silently ignored, not rejected, so a config can be written
+  against the full target schema before the parser catches up — see
+  README.md's config preview vs. `example/tili.kdl` for "aspirational
+  full schema" vs. "what's actually parsed today." **KDL v2 booleans are
+  `#true`/`#false`** (a `#`-prefixed keyword, to disambiguate from bare
+  identifiers) — bare `true`/`false` is a parse error, easy to get wrong
+  when writing test fixtures or example configs; there's a test guarding
+  against forgetting this (`parses_settings_and_default_layout`).
+  `src/watch.rs`'s `spawn_config_watcher` is deliberately synchronous
+  (`std::sync::mpsc`, not tokio) so this crate stays runtime-agnostic —
+  `tili-daemon` bridges it into its `tokio::select!` loop itself, the same
+  pattern used for `tili-ax`'s NSWorkspace/AX event sources. It watches the
+  config file's *containing directory*, not the file itself, since editors
+  that save via temp-file-then-rename can otherwise orphan the watch on the
+  old inode. A parse error during a reload is logged and dropped — the
+  caller's previous `Config` keeps applying.
 - **`tili-ipc`** — `Command`/`Response` types shared by the daemon and CLI,
   plus the socket path/framing convention. This is the only crate both
   `tili-daemon` and `tili-cli` depend on in common — protocol changes belong
@@ -106,15 +126,18 @@ the dependency direction is a hard boundary, not just organization:
   (real OS focus/raise); nothing calls it automatically on window creation,
   specifically to avoid focus-stealing every already-open window when the
   daemon starts up and gets seeded with the apps already running.
-  `src/dispatch.rs` has the single `dispatch(&mut WmState, Command) ->
-  Response` function — both the Unix-socket handler and the global-hotkey
-  handler (a `CGEventTap`, not yet implemented) must call this same
-  function, never a separate code path, or CLI-invoked and hotkey-invoked
-  behavior can drift apart. `src/main.rs` is one `tokio::select!` loop
-  merging socket accepts and `tili_ax::spawn_event_watcher()`'s channel
-  (hotkeys/config-reload join this same select in later milestones) — no
-  locks around `WmState`, because only one branch of the loop ever touches
-  it at a time.
+  `apply_config` (M5) updates `gaps`/`workspace_gaps` from a loaded or
+  hot-reloaded `tili_config::Config` and creates any workspace it declares
+  — without switching to it, so a reload never yanks focus off whatever's
+  on screen. `src/dispatch.rs` has the single `dispatch(&mut WmState,
+  Command) -> Response` function — both the Unix-socket handler and the
+  global-hotkey handler (a `CGEventTap`, not yet implemented) must call
+  this same function, never a separate code path, or CLI-invoked and
+  hotkey-invoked behavior can drift apart. `src/main.rs` is one
+  `tokio::select!` loop merging socket accepts,
+  `tili_ax::spawn_event_watcher()`'s channel, and the config-reload bridge
+  (hotkeys join this same select in a later milestone) — no locks around
+  `WmState`, because only one branch of the loop ever touches it at a time.
 - **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
   `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
   `move-to-workspace <name>`). The package is named `tili-cli` but the

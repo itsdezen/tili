@@ -22,11 +22,24 @@ async fn main() -> std::io::Result<()> {
     );
 
     let mut events = tili_ax::spawn_event_watcher();
+    let mut config_updates = spawn_config_reload_bridge();
     let mut state = WmState::default();
 
-    // Single loop, no locks: every source of change (client connections now,
-    // hotkeys/config-reload in later milestones) is a branch of this same
-    // select!, so WmState only ever mutates from one place at a time.
+    let config_path = tili_config::default_config_path();
+    match tili_config::load(&config_path) {
+        Ok(config) => {
+            println!("tili-daemon: loaded config from {}", config_path.display());
+            state.apply_config(&config);
+        }
+        Err(e) => eprintln!(
+            "tili-daemon: failed to load {}: {e} (using defaults)",
+            config_path.display()
+        ),
+    }
+
+    // Single loop, no locks: every source of change (client connections,
+    // config reloads now, hotkeys in a later milestone) is a branch of this
+    // same select!, so WmState only ever mutates from one place at a time.
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -47,6 +60,10 @@ async fn main() -> std::io::Result<()> {
                     None => eprintln!("tili-daemon: event watcher channel closed unexpectedly"),
                 }
             }
+            Some(config) = config_updates.recv() => {
+                println!("tili-daemon: config reloaded from {}", config_path.display());
+                state.apply_config(&config);
+            }
         }
     }
 }
@@ -63,4 +80,20 @@ fn handle_event(state: &mut WmState, event: WmEvent) {
             // for the same pid once it has windows to report.
         }
     }
+}
+
+/// Bridges `tili_config`'s plain-`std::sync::mpsc` file-watcher (see its
+/// module docs for why it isn't async itself) into a tokio channel this
+/// daemon's `select!` loop can read from directly.
+fn spawn_config_reload_bridge() -> tokio::sync::mpsc::UnboundedReceiver<tili_config::Config> {
+    let sync_rx = tili_config::spawn_config_watcher(tili_config::default_config_path());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(config) = sync_rx.recv() {
+            if tx.send(config).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }

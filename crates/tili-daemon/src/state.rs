@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use tili_ax::{AxWindow, InstantFrameSetter, WindowFrameSetter};
 use tili_ipc::{RectInfo, WindowInfo, WorkspaceInfo};
-use tili_tree::{Direction, NodeId, Tree, WindowId};
+use tili_tree::{Direction, Gaps, NodeId, Tree, WindowId};
 
 /// The workspace new windows land in, and the one active at daemon startup.
-/// Real named workspaces come from config in M5 — until then this is the
-/// only one that exists until the user (or a test) switches to another,
-/// which creates it on the fly.
+/// Workspaces declared in config (M5) are created up front by `apply_config`;
+/// this is just the one that's active before any config or explicit switch
+/// says otherwise, and the fallback if config declares none.
 const DEFAULT_WORKSPACE: &str = "main";
 
 /// macOS has no public API to enumerate/control Spaces, so workspaces are
@@ -36,6 +36,8 @@ pub struct WmState {
     workspace_focus: HashMap<String, NodeId>,
     active_workspace: String,
     frame_setter: Box<dyn WindowFrameSetter>,
+    gaps: Gaps,
+    workspace_gaps: HashMap<String, Gaps>,
 }
 
 impl Default for WmState {
@@ -48,6 +50,8 @@ impl Default for WmState {
             workspace_focus: HashMap::new(),
             active_workspace: DEFAULT_WORKSPACE.to_string(),
             frame_setter: Box::new(InstantFrameSetter),
+            gaps: Gaps::default(),
+            workspace_gaps: HashMap::new(),
         }
     }
 }
@@ -131,6 +135,27 @@ impl WmState {
                 }
             })
             .collect()
+    }
+
+    /// Applies a freshly-loaded (or hot-reloaded) config: updates gaps
+    /// (global + per-workspace overrides) and ensures every workspace it
+    /// declares exists (creating empty ones as needed) — without switching
+    /// to any of them, so a config edit never yanks focus away from
+    /// whatever workspace the user is actually looking at. Re-lays-out the
+    /// active workspace afterward so a gap change is visible immediately.
+    pub fn apply_config(&mut self, config: &tili_config::Config) {
+        self.gaps = to_tree_gaps(config.gaps);
+        self.workspace_gaps = config
+            .workspace_gaps
+            .iter()
+            .map(|(name, gaps)| (name.clone(), to_tree_gaps(*gaps)))
+            .collect();
+
+        for workspace in &config.workspaces {
+            self.workspaces.entry(workspace.name.clone()).or_default();
+        }
+
+        self.relayout_active();
     }
 
     pub fn list_workspaces(&self) -> Vec<WorkspaceInfo> {
@@ -323,11 +348,29 @@ impl WmState {
     /// are (parked), since they're not visible right now.
     fn relayout_active(&mut self) {
         let area = tili_ax::main_display_frame();
-        let placements = self.active_tree().layout(area);
+        let gaps = self
+            .workspace_gaps
+            .get(&self.active_workspace)
+            .copied()
+            .unwrap_or(self.gaps);
+        let placements = self.active_tree().layout(area, gaps);
         for (id, rect) in placements {
             if let Some(window) = self.windows.get_mut(&id) {
                 self.frame_setter.set_frame(window, rect);
             }
         }
+    }
+}
+
+fn to_tree_gaps(gaps: tili_config::Gaps) -> Gaps {
+    let (top, right, bottom, left) = gaps.outer;
+    Gaps {
+        inner: f64::from(gaps.inner),
+        outer: (
+            f64::from(top),
+            f64::from(right),
+            f64::from(bottom),
+            f64::from(left),
+        ),
     }
 }

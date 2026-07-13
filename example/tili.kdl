@@ -1,0 +1,28 @@
+// Copy this to ~/.config/tili/tili.kdl and edit — the daemon watches the
+// file and hot-reloads on save (see ROADMAP.md M5). Only what's used by
+// milestones landed so far is documented below; sections that don't exist
+// yet in the parser (keybindings, floating-rules) are still safe to
+// include — unrecognized sections are ignored, not rejected.
+
+workspaces {
+    workspace "work"
+    workspace "entertain"
+    workspace "random"
+}
+
+gaps {
+    inner 4
+    outer 8 8 8 8
+
+    // Per-workspace override — anything not listed here uses the gaps above.
+    workspace "entertain" {
+        inner 0
+        outer 0
+    }
+}
+
+settings {
+    // KDL v2 booleans are `#true`/`#false` (note the `#` — bare `true`/
+    // `false` is a parse error, unlike KDL v1 or most other config formats).
+    auto-reload #true
+}

@@ -10,6 +10,32 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-13
+
+### Added
+
+- M5: real KDL config parsing + hot-reload. `tili-config`'s `schema.rs`
+  parses `workspaces`, `gaps` (global + per-workspace overrides),
+  `default-layout`, and `settings` from `~/.config/tili/tili.kdl` via the
+  `kdl` crate; unrecognized sections (`keybindings`, `floating-rules` —
+  M6/M8 territory) are ignored rather than rejected, so a config can be
+  written ahead of the parser catching up. New `watch.rs` uses `notify` to
+  watch the config file's containing directory (not the file handle itself
+  — covers editors that save via temp-file-then-rename) and re-parses on
+  change; a parse error is logged and the previous config keeps applying,
+  so a typo can't take down or silently misconfigure a running daemon.
+  `tili-tree`'s `Tree::layout` now takes a `Gaps` (outer padding + inner
+  spacing between siblings) instead of assuming zero. `tili-daemon` loads
+  config at startup and bridges the (deliberately synchronous,
+  runtime-agnostic) file watcher into its `tokio::select!` loop; new
+  `WmState::apply_config` updates gaps and creates any workspaces the
+  config declares (without switching to them, so a reload never yanks
+  focus away from what's on screen). Added `example/tili.kdl` as a
+  copy-pasteable starting config reflecting what's actually parsed today.
+  Verified end-to-end on real hardware: editing gaps in `tili.kdl` and
+  saving visibly changes spacing between real tiled windows with no
+  daemon restart.
+
 ## [0.4.0] - 2026-07-13
 
 ### Added
