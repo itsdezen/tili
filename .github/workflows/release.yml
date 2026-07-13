@@ -63,17 +63,33 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release --target ${{ matrix.target }}
 
-      - name: Package tarball
+      # Only meaningful once TILI_SIGNING_CERTIFICATE_P12 is added as a repo
+      # secret (see CONTRIBUTING.md's Release Engineering section) — until
+      # then this step is skipped entirely, `TILI_SIGN_IDENTITY` is never
+      # set, and `xtask package` below ships unsigned, same as a local/test
+      # build.
+      - name: Import signing certificate
+        if: ${{ secrets.TILI_SIGNING_CERTIFICATE_P12 != '' }}
+        env:
+          TILI_SIGNING_CERTIFICATE_P12: ${{ secrets.TILI_SIGNING_CERTIFICATE_P12 }}
+          TILI_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.TILI_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
+          keychain="runner.keychain-db"
+          security create-keychain -p "" "$keychain"
+          security default-keychain -s "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          echo "$TILI_SIGNING_CERTIFICATE_P12" | base64 --decode > cert.p12
+          security import cert.p12 -k "$keychain" -P "$TILI_SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$keychain"
+          rm -f cert.p12
+          identity=$(security find-identity -v -p codesigning "$keychain" | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+          echo "TILI_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Package
+        run: |
           version="${GITHUB_REF_NAME#v}"
-          stage="tili-${version}-${{ matrix.target }}"
-          mkdir -p "$stage"
-          cp target/${{ matrix.target }}/release/tili "$stage/"
-          cp target/${{ matrix.target }}/release/tili-daemon "$stage/"
-          cp README.md LICENSE CHANGELOG.md "$stage/"
-          tar -czf "${stage}.tar.gz" "$stage"
-          shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
+          cargo run -p xtask -- package --target ${{ matrix.target }} --version "$version"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -96,6 +112,10 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # TODO: once TILI_SIGNING_CERTIFICATE_P12 is added as a repo secret
+      # (see CONTRIBUTING.md's Release Engineering section), update this
+      # body to drop the "unsigned" warning — `xtask package` will already
+      # be signing binaries at that point, this text just hasn't caught up.
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -104,11 +124,13 @@ jobs:
           files: dist/*
           body: |
             ⚠️ **Unsigned development build.** tili does not codesign or
-            notarize release binaries yet (that lands in M11 — see
-            [ROADMAP.md](https://github.com/${{ github.repository }}/blob/main/ROADMAP.md)).
-            macOS Gatekeeper will block these on first launch; run
-            `xattr -d com.apple.quarantine <binary>` or right-click → Open to
-            proceed. Not recommended for daily use before v1.0.
+            notarize release binaries yet — the self-signed certificate this
+            project's release strategy depends on
+            (see [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering))
+            hasn't been generated. macOS Gatekeeper will block these on
+            first launch; run `xattr -d com.apple.quarantine tili.app` or
+            right-click → Open to proceed. Not recommended for daily use
+            before v1.0.
 
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
             for what changed.

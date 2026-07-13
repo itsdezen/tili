@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      tili is not sandboxed (it needs the Accessibility API and a Unix
+      socket outside any container) and needs no special entitlements
+      beyond what hardened runtime requires by default. This file exists
+      only so `codesign --options runtime` has something to point at —
+      Accessibility itself is a TCC grant tied to the app's bundle
+      identifier + signing identity, not a codesign entitlement.
+    -->
+</dict>
+</plist>

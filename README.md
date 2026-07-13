@@ -122,12 +122,11 @@ Spaces, the same technique other public-API-only tools in this space use.
 
 ## Installation
 
-Not yet published. Once M11 (release engineering) lands, installation will
-be:
-
-```sh
-brew install tili/tap/tili
-```
+The Homebrew tap formula ([`Formula/tili.rb`](Formula/tili.rb)) and release
+packaging ([`xtask`](xtask), M11) are in place, but a self-signed signing
+certificate and a published `homebrew-tap` repository are still one-time
+setup steps (see [CONTRIBUTING.md](CONTRIBUTING.md#release-engineering)) —
+until those exist, `brew install tili/tap/tili` isn't live yet.
 
 Until then, build from source:
 
@@ -136,6 +135,11 @@ git clone https://github.com/itsdezen/tili
 cd tili
 cargo build --release --workspace
 ```
+
+Or grab a prebuilt (currently **unsigned**) `tili.app` from a
+[GitHub release](https://github.com/itsdezen/tili/releases) — Gatekeeper
+will block it on first launch; run `xattr -d com.apple.quarantine tili.app`
+or right-click → Open to proceed.
 
 ## Contributing
 

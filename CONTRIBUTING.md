@@ -86,3 +86,86 @@ first if you think a milestone should be reordered.
 Commit messages use an emoji prefix indicating the kind of change:
 🚀 feature · 🐞 fix · 🔧 tooling/config · ♻️ refactor · 📝 docs · 🗑️ removal ·
 ⬆️ dependency bump.
+
+## Release engineering
+
+tili starts with a **self-signed certificate** rather than a paid Apple
+Developer ID ($99/yr), to keep pre-v1.0 costs at zero. This works, but has
+one sharp edge worth understanding before touching any of this: **TCC (the
+Accessibility permission system) grants permission per signing identity.**
+Regenerate the certificate — even for a legitimate reason like expiry — and
+every user's Accessibility grant resets, forcing them to re-approve tili
+after an update that otherwise changed nothing. This is *the* failure mode
+this whole setup exists to avoid, and it's the reason a couple of things
+below are phrased as "never" rather than "avoid."
+
+**Never use ad-hoc signing (`codesign -s -`) for release artifacts.** It's
+free too, but generates a new identity with no stable Team ID on *every*
+build — meaning every single release would reset TCC permissions, which is
+strictly worse than the self-signed-cert tradeoff below.
+
+### One-time setup (a human does this, not CI, not an agent)
+
+1. Generate one self-signed code-signing certificate with a fixed Common
+   Name and the longest validity period `certtool`/Keychain Access allows
+   (aim for 10+ years). Something like:
+   ```sh
+   security create-keychain -p "" tili-signing.keychain
+   # Keychain Access.app > Certificate Assistant > Create a Certificate:
+   #   Name: a fixed, memorable CN (e.g. "tili Self-Signed")
+   #   Identity Type: Self Signed Root
+   #   Certificate Type: Code Signing
+   ```
+2. Export it as a `.p12` (with a password) and store that file + password
+   somewhere durable outside CI (password manager, encrypted backup) —
+   this is the one artifact that must never be lost or regenerated except
+   on forced expiry.
+3. Base64-encode the `.p12` and add two **repository secrets** (Settings >
+   Secrets and variables > Actions):
+   - `TILI_SIGNING_CERTIFICATE_P12` — `base64 -i tili-signing.p12 | pbcopy`
+   - `TILI_SIGNING_CERTIFICATE_PASSWORD` — the export password
+4. That's it — `.github/workflows/release.yml`'s `build` job already checks
+   for `TILI_SIGNING_CERTIFICATE_P12` and imports/signs automatically once
+   it exists; no workflow changes needed. Until these secrets are added,
+   releases ship unsigned (Gatekeeper-blocked, `xattr -d
+   com.apple.quarantine tili.app` or right-click → Open to run) — see the
+   warning in each draft release's notes.
+
+### What CI actually does (once the secrets above exist)
+
+`xtask` (`xtask/src/main.rs`) is the single place this logic lives —
+release.yml just calls `cargo run -p xtask -- package --target <triple>
+--version <ver>` per target:
+1. `bundle` — wraps `tili-daemon`/`tili` in a minimal `tili.app` (gives
+   Accessibility permission and codesigning a stable, nameable bundle
+   identifier — `com.tili.daemon` — instead of a bare Unix executable).
+2. `codesign` — hardened runtime + `xtask/entitlements.plist` (minimal;
+   tili isn't sandboxed and needs no special entitlements), only if
+   `TILI_SIGN_IDENTITY` is set in the environment.
+3. tarball + sha256, matching what the Homebrew formula template
+   (`Formula/tili.rb`) expects.
+
+**Notarization is deliberately skipped for now** — accept first-launch
+Gatekeeper friction rather than the added cost/complexity, and revisit once
+a trigger condition is hit (see below).
+
+**Triggers to upgrade to a paid Apple Developer ID + notarization later** —
+worth it once *any* of:
+- Gatekeeper friction is generating real "app won't open" reports from new
+  users at meaningful install volume.
+- The project wants `homebrew-core` listing (expects more verifiable
+  signing than a self-signed cert).
+- The self-signed certificate is nearing its expiry anyway — a natural
+  moment to switch outright instead of minting another self-signed one.
+
+### Homebrew tap
+
+`Formula/tili.rb` in this repo is a **template** — Homebrew taps live in a
+separate `<owner>/homebrew-tap` repository by convention, so publishing a
+release means copying this file's current contents into that repo's
+`Formula/tili.rb` with the real `sha256` values from the just-built
+tarballs (printed by `xtask package`, or read from the `*.tar.gz.sha256`
+files attached to the GitHub release) substituted in. That repository
+doesn't exist as part of this codebase and isn't created automatically by
+any tili tooling — creating it (and deciding whether to automate the copy
+step above) is a separate, deliberate step outside this repo's scope.
