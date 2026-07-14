@@ -9,11 +9,25 @@ pub struct WorkspaceConfig {
     pub monitor: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Gaps {
     pub inner: u32,
     /// CSS-shorthand ordered: (top, right, bottom, left).
     pub outer: (u32, u32, u32, u32),
+    /// How many points of a non-visible `Accordion` sibling peek out from
+    /// behind the active one, on the side(s) where a sibling exists — `0`
+    /// collapses every child to the exact same full frame.
+    pub accordion: u32,
+}
+
+impl Default for Gaps {
+    fn default() -> Self {
+        Self {
+            inner: 0,
+            outer: (0, 0, 0, 0),
+            accordion: 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +40,11 @@ pub struct Keybinding {
 pub struct KeybindingMode {
     pub name: String,
     pub bindings: Vec<Keybinding>,
+    /// Whether dispatching any command bound in this mode automatically
+    /// returns to the default mode afterward — a one-shot mode, as opposed
+    /// to a sticky one like `resize` that stays active until an explicit
+    /// `mode main`/`mode exit`. Defaults to `#false` when omitted.
+    pub auto_exit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,11 +90,6 @@ pub struct Settings {
     /// workspace; resolving that fallback is `tili-daemon`'s job (a
     /// startup-sequencing concern), not this crate's.
     pub default_workspace: Option<String>,
-    /// How many points of a non-visible `Accordion` sibling peek out from
-    /// behind the active one, on the side(s) where a sibling exists — `0`
-    /// collapses every child to the exact same full frame. Matches
-    /// AeroSpace's accordion padding.
-    pub accordion_padding: u32,
     /// Orientation a workspace's root container gets when it's created for
     /// its second window (the point a lone-window root actually becomes a
     /// container) — `"horizontal"`, `"vertical"`, or `"auto"` (pick from
@@ -92,7 +106,6 @@ impl Default for Settings {
             focus_follows_monitor: false,
             auto_reload: true,
             default_workspace: None,
-            accordion_padding: 30,
             default_root_orientation: "auto".to_string(),
         }
     }
@@ -208,6 +221,10 @@ fn parse_keybindings(doc: &KdlDocument) -> Vec<KeybindingMode> {
         .filter(|n| n.name().value() == "keybindings")
         .filter_map(|n| {
             let mode_name = n.get("mode").and_then(|v| v.as_string())?.to_string();
+            let auto_exit = n
+                .get("auto-exit")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let children = n.children()?;
             let bindings = children
                 .nodes()
@@ -222,6 +239,7 @@ fn parse_keybindings(doc: &KdlDocument) -> Vec<KeybindingMode> {
             Some(KeybindingMode {
                 name: mode_name,
                 bindings,
+                auto_exit,
             })
         })
         .collect()
@@ -254,13 +272,6 @@ fn parse_settings(doc: &KdlDocument) -> Settings {
         settings.default_workspace = Some(v.to_string());
     }
     if let Some(v) = children
-        .get_arg("accordion-padding")
-        .and_then(|v| v.as_integer())
-        .and_then(|v| u32::try_from(v).ok())
-    {
-        settings.accordion_padding = v;
-    }
-    if let Some(v) = children
         .get_arg("default-root-orientation")
         .and_then(|v| v.as_string())
     {
@@ -291,6 +302,13 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
             [top, right, bottom, left] => (*top, *right, *bottom, *left),
             _ => gaps.outer,
         };
+    }
+    if let Some(v) = children
+        .get_arg("accordion")
+        .and_then(|v| v.as_integer())
+        .and_then(|v| u32::try_from(v).ok())
+    {
+        gaps.accordion = v;
     }
     gaps
 }
@@ -479,23 +497,42 @@ mod tests {
     }
 
     #[test]
-    fn parses_accordion_padding_and_root_orientation() {
+    fn parses_root_orientation() {
         let source = r#"
             settings {
-                accordion-padding 40
                 default-root-orientation "vertical"
             }
         "#;
         let config = parse(source).unwrap();
-        assert_eq!(config.settings.accordion_padding, 40);
         assert_eq!(config.settings.default_root_orientation, "vertical");
     }
 
     #[test]
-    fn accordion_padding_and_root_orientation_default_when_unset() {
+    fn root_orientation_defaults_when_unset() {
         let config = parse("").unwrap();
-        assert_eq!(config.settings.accordion_padding, 30);
         assert_eq!(config.settings.default_root_orientation, "auto");
+    }
+
+    #[test]
+    fn parses_accordion_gap_top_level_and_per_workspace() {
+        let source = r#"
+            gaps {
+                accordion 40
+
+                workspace "random" {
+                    accordion 0
+                }
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.gaps.accordion, 40);
+        assert_eq!(config.workspace_gaps["random"].accordion, 0);
+    }
+
+    #[test]
+    fn accordion_gap_defaults_to_thirty_when_unset() {
+        let config = parse("").unwrap();
+        assert_eq!(config.gaps.accordion, 30);
     }
 
     #[test]
@@ -591,6 +628,33 @@ mod tests {
         assert_eq!(resize.bindings.len(), 2);
         assert_eq!(resize.bindings[1].key, "escape");
         assert_eq!(resize.bindings[1].command, "mode main");
+    }
+
+    #[test]
+    fn keybinding_mode_auto_exit_defaults_false_and_parses_true() {
+        let source = r#"
+            keybindings mode="main" {
+                bind "alt-h" "focus left"
+            }
+            keybindings mode="manage" auto-exit=#true {
+                bind "escape" "reload-config"
+            }
+        "#;
+        let config = parse(source).unwrap();
+
+        let main = config
+            .keybindings
+            .iter()
+            .find(|m| m.name == "main")
+            .unwrap();
+        assert!(!main.auto_exit);
+
+        let manage = config
+            .keybindings
+            .iter()
+            .find(|m| m.name == "manage")
+            .unwrap();
+        assert!(manage.auto_exit);
     }
 
     #[test]

@@ -152,16 +152,26 @@ keybindings in your config resolve to (e.g. `bind "alt-h" "focus left"`).
 | `tili start` | Install and start tili-daemon as a background LaunchAgent (auto-restart, auto-start at login) |
 | `tili stop` | Stop tili-daemon and remove its LaunchAgent |
 | `tili status` | Report whether the daemon is running |
+| `tili ping` | Check the daemon is reachable (scripting-friendly; see `status`) |
 | `tili focus <left\|right\|up\|down>` | Move focus to the window in that direction |
-| `tili move <left\|right\|up\|down>` | Swap the focused window with its neighbor |
-| `tili layout <toggle\|tiles\|accordion>` | Toggle or set the focused container's layout |
+| `tili move <left\|right\|up\|down>` | Move the focused window one step in that direction, re-parenting it through the tree |
+| `tili join <left\|right\|up\|down>` | Wrap the focused window and its neighbor into a new, perpendicular container |
+| `tili resize <amount>` | Grow (positive) or shrink (negative) the focused window's share of its nearest tiled container |
+| `tili balance [--root]` | Reset child weights of the focused container (or workspace root) evenly |
+| `tili layout <toggle\|tiles\|accordion\|horizontal\|vertical\|toggle-orientation> [--root]` | Toggle or set the focused container's layout/orientation |
+| `tili flatten` | Re-normalize the tree (no-op today — normalization already runs after every mutation) |
+| `tili fullscreen [--native]` | Toggle the focused window fullscreen (tiled, or `--native` for a separate Space) |
+| `tili close` | Close the focused window (best-effort) |
+| `tili summon <query>` | Focus (and raise) the first known window whose title or bundle id matches `query` |
+| `tili set-floating <on\|off>` | Toggle the focused window between tiled and floating at runtime |
 | `tili workspace <name>` | Switch the active workspace (created if new) |
+| `tili workspace-back` | Switch back to whichever workspace was active before this one |
 | `tili move-to-workspace <name>` | Move the focused window to another workspace |
+| `tili move-workspace-to-monitor <target> [--workspace <name>]` | Move a workspace to a different monitor without switching focus; defaults to the workspace currently active on the focused monitor |
 | `tili list-workspaces` | List workspaces, with active/monitor markers |
 | `tili focus-monitor` | Cycle which connected monitor commands target |
 | `tili list-monitors` | List connected monitors |
 | `tili list-windows` | List known windows (tiled/floating, frame, pid) |
-| `tili ping` | Check the daemon is reachable (scripting-friendly; see `status`) |
 
 ## Architecture
 

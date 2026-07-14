@@ -12,8 +12,8 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ### Changed
 
-- `tili-tree`'s container model rewritten from a binary tree to an
-  AeroSpace-style n-ary tree (`Node::Container { layout, orientation,
+- `tili-tree`'s container model rewritten from a binary tree to a flat
+  n-ary tree (`Node::Container { layout, orientation,
   children, weights, mru }`), with `insert_window` joining a flat sibling
   list next to the focused window instead of always wrapping it in a fresh
   2-child split. A window's `NodeId` is now stable for its whole lifetime in
@@ -26,23 +26,22 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
   landing on a container's first child.
 - Accordion containers now have their own orientation and render every
   child (not just the active one) with a configurable peek padding on the
-  side(s) where a sibling exists (`settings.accordion-padding`, default 30,
-  `0` collapses back to full-frame-per-child) — matches AeroSpace's
-  accordion rendering. `layout toggle`/`layout accordion` no longer rebuild
-  the container; they flip a `layout` field in place, so orientation,
-  weights, and MRU carry over untouched.
+  side(s) where a sibling exists (`gaps.accordion`, default 30, `0`
+  collapses back to full-frame-per-child). `layout toggle`/`layout
+  accordion` no longer rebuild the container; they flip a `layout` field in
+  place, so orientation, weights, and MRU carry over untouched.
 
 ### Added
 
 - `join <left|right|up|down>` — wraps the focused window and its neighbor
-  into a new, perpendicular container (AeroSpace's `join-with`).
+  into a new, perpendicular container.
 - `layout horizontal`/`layout vertical` (optionally `--root`) — sets a
   container's split axis directly, independent of `layout toggle`'s
   tiles/accordion switch.
 - `resize <amount>` is now wired up (`tili resize <amount>`): grows or
   shrinks the focused window's share of its nearest tiled container,
   proportionally taken from its siblings.
-- `settings.accordion-padding` and `settings.default-root-orientation`
+- `gaps.accordion` and `settings.default-root-orientation`
   (`"auto"`, `"horizontal"`, or `"vertical"`) config settings.
 
 ### Fixed
