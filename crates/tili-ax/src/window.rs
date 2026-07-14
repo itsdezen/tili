@@ -277,7 +277,11 @@ impl AxWindow {
 
     /// Raises and focuses this window — used when tiling changes which
     /// window should be frontmost (e.g. after `focus`/`move`).
+    /// `kAXRaiseAction`/`kAXFocusedAttribute` alone only raise the window
+    /// within its own app's window stack; `activate_app` is what actually
+    /// brings a *different* app frontmost, which a plain AX raise can't do.
     pub fn focus(&self) {
+        crate::workspace::activate_app(self.pid);
         let _ = self.element.set_bool_attribute(kAXFocusedAttribute, true);
         let _ = self.element.perform_action(kAXRaiseAction);
     }

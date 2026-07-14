@@ -4,7 +4,7 @@ use std::sync::mpsc::Sender;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 use objc2_foundation::{NSNotification, NSOperationQueue};
 
 unsafe extern "C" {
@@ -80,6 +80,21 @@ pub fn spawn_workspace_watcher(tx: Sender<AppEvent>) {
 pub fn bundle_id_for_pid(pid: i32) -> Option<String> {
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     app.bundleIdentifier().map(|s| s.to_string())
+}
+
+/// Brings a process's application frontmost, activating it — best-effort,
+/// same as every other AX/`NSRunningApplication` write in this crate.
+/// `AXUIElement`'s own `kAXRaiseAction`/`kAXFocusedAttribute` (used by
+/// `AxWindow::focus`) only raises a window within its own app's window
+/// stack; if a *different* app is currently frontmost, the target window
+/// never actually becomes interactive/visibly focused without also
+/// activating its owning app — this is what makes cross-app `focus`
+/// switches take visible effect, not just same-app ones (which already
+/// looked like they worked, since the frontmost app didn't need to change).
+pub fn activate_app(pid: i32) {
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        app.activateWithOptions(NSApplicationActivationOptions::empty());
+    }
 }
 
 /// Whether a process's app is currently hidden (Cmd-H / "Hide app-name"),
