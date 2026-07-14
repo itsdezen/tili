@@ -26,6 +26,20 @@ const DEFAULT_MODE: &str = "main";
 const PARK_MARGIN: f64 = 10_000.0;
 const PARK_OFFSET_STEP: f64 = 50.0;
 
+/// How close two frames need to be to count as "the same" when deciding
+/// whether a `Floating` window's live frame has drifted from what tili
+/// itself last set it to (see `maybe_capture_manual_geometry`) — matches
+/// `tili-ax`'s own `AxWindow::set_frame` epsilon, since drift detection is
+/// only meaningful at that same granularity.
+const FLOAT_DRIFT_EPSILON: f64 = 0.5;
+
+fn frames_match(a: Rect, b: Rect) -> bool {
+    (a.x - b.x).abs() < FLOAT_DRIFT_EPSILON
+        && (a.y - b.y).abs() < FLOAT_DRIFT_EPSILON
+        && (a.width - b.width).abs() < FLOAT_DRIFT_EPSILON
+        && (a.height - b.height).abs() < FLOAT_DRIFT_EPSILON
+}
+
 /// Which workspace a window belongs to, and its current placement state.
 /// Indexed by `WindowId` in `WmState::placements` so "which workspace owns
 /// this window" is an O(1) lookup instead of scanning every workspace's
@@ -51,12 +65,9 @@ enum PlacementKind {
     Tiled,
     Floating {
         /// The user's own drag/resize, captured proportionally the first
-        /// time a live frame diverges from what tili last set — `None`
-        /// until then, meaning "recompute from the floating rule every
-        /// time." Not yet read anywhere: capture/restore lands in the
-        /// very next phase of this same refactor, which is why this
-        /// isn't a bare `Floating` variant already.
-        #[allow(dead_code)]
+        /// time a live frame diverges from what tili last set (see
+        /// `maybe_capture_manual_geometry`) — `None` until then, meaning
+        /// "recompute from the floating rule every time."
         manual: Option<FloatGeometry>,
     },
     NativeFullscreen(Restore),
@@ -86,11 +97,67 @@ enum SpecialKind {
     NativeFullscreen,
 }
 
-/// A captured proportional floating geometry — see `PlacementKind::Floating`
-/// and Phase 3's `restore_floating_frame`. A unit struct for now (Phase 1
-/// only introduces the placement *shape*); Phase 3 gives it real fields.
+/// A window's floating position/size as a proportion of the monitor area it
+/// was captured against, rather than absolute pixels — so restoring it
+/// against a differently-sized monitor (or the same monitor at a different
+/// resolution) scales sensibly instead of potentially landing off-screen.
+/// See `capture_float_geometry`/`restore_floating_frame`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct FloatGeometry;
+struct FloatGeometry {
+    rel_x: f64,
+    rel_y: f64,
+    rel_w: f64,
+    rel_h: f64,
+}
+
+/// Captures `frame`'s position/size as a proportion of `area` — the
+/// inverse of `restore_floating_frame`. Used both when a user's manual
+/// drag/resize is first observed (`maybe_capture_manual_geometry`) and
+/// right before `park` moves a floating window off-screen
+/// (`capture_manual_geometry_before_park`), since that's the last moment a
+/// live, meaningful frame is available to capture from.
+fn capture_float_geometry(frame: Rect, area: Rect) -> FloatGeometry {
+    FloatGeometry {
+        rel_x: if area.width > 0.0 {
+            (frame.x - area.x) / area.width
+        } else {
+            0.0
+        },
+        rel_y: if area.height > 0.0 {
+            (frame.y - area.y) / area.height
+        } else {
+            0.0
+        },
+        rel_w: if area.width > 0.0 {
+            frame.width / area.width
+        } else {
+            0.0
+        },
+        rel_h: if area.height > 0.0 {
+            frame.height / area.height
+        } else {
+            0.0
+        },
+    }
+}
+
+/// Maps a captured `FloatGeometry` back onto a (possibly different) `area`,
+/// clamping so the result never hangs off-screen even if `area` shrank
+/// since capture (e.g. swapping to a smaller monitor). Width/height are
+/// clamped first so the subsequent position clamp always has a valid
+/// (non-inverted) range to clamp into.
+fn restore_floating_frame(geometry: FloatGeometry, area: Rect) -> Rect {
+    let width = (geometry.rel_w * area.width).clamp(0.0, area.width);
+    let height = (geometry.rel_h * area.height).clamp(0.0, area.height);
+    let x = (area.x + geometry.rel_x * area.width).clamp(area.x, area.x + area.width - width);
+    let y = (area.y + geometry.rel_y * area.height).clamp(area.y, area.y + area.height - height);
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
 
 /// Which special state (if any) a window's live AX/process flags put it in
 /// right now, checked in priority order: an app being hidden outranks the
@@ -342,6 +409,12 @@ impl WmState {
             let kind = window.kind();
             let minimized = window.minimized();
             let fullscreen = window.fullscreen();
+            let live_frame = window.frame();
+            let old_frame = if is_new {
+                None
+            } else {
+                self.windows.get(&id).map(AxWindow::frame)
+            };
             let floating_frame = if is_new {
                 self.compute_floating_frame(&window)
             } else {
@@ -351,6 +424,9 @@ impl WmState {
             self.windows.insert(id, window);
 
             if !is_new {
+                if let Some(old_frame) = old_frame {
+                    self.maybe_capture_manual_geometry(id, old_frame, live_frame);
+                }
                 self.reconcile_existing_placement(id, app_hidden, minimized, fullscreen);
                 continue;
             }
@@ -524,6 +600,82 @@ impl WmState {
                 }
             }
         }
+    }
+
+    /// If `id` is a `Floating` window with no manual geometry captured yet,
+    /// and its live frame has drifted from what tili itself last set
+    /// (beyond `FLOAT_DRIFT_EPSILON`) — the only way that can happen is a
+    /// user's own drag/resize, since every write tili makes updates the
+    /// cached frame to match — captures its current position/size
+    /// proportionally against whichever monitor its workspace is showing
+    /// on, so future recentering (`reposition_floating_for_monitor`)
+    /// restores the user's placement instead of overwriting it with the
+    /// floating rule's.
+    fn maybe_capture_manual_geometry(&mut self, id: WindowId, old_frame: Rect, live_frame: Rect) {
+        if frames_match(old_frame, live_frame) {
+            return;
+        }
+        let Some(placement) = self.placements.get(&id) else {
+            return;
+        };
+        if !matches!(placement.kind, PlacementKind::Floating { manual: None }) {
+            return;
+        }
+        let workspace = placement.workspace.clone();
+        let area = self
+            .active_workspace
+            .iter()
+            .find(|(_, w)| **w == workspace)
+            .and_then(|(&mid, _)| self.monitor_frame(mid))
+            .or_else(|| self.monitor_frame(self.focused_monitor))
+            .unwrap_or(live_frame);
+        let geometry = capture_float_geometry(live_frame, area);
+        self.placements.insert(
+            id,
+            Placement {
+                workspace,
+                kind: PlacementKind::Floating {
+                    manual: Some(geometry),
+                },
+            },
+        );
+    }
+
+    /// Captures a `Floating` window's current on-screen position/size
+    /// proportionally right before `park` moves it off-screen — otherwise,
+    /// once parked, there's no meaningful live frame left to observe a
+    /// manual drag/resize from, and reactivating its workspace would fall
+    /// back to recomputing a fresh rule-based frame instead of restoring
+    /// where the user actually left it. A no-op for anything already
+    /// captured, or not `Floating`.
+    fn capture_manual_geometry_before_park(&mut self, id: WindowId) {
+        let Some(placement) = self.placements.get(&id) else {
+            return;
+        };
+        if !matches!(placement.kind, PlacementKind::Floating { manual: None }) {
+            return;
+        }
+        let Some(frame) = self.windows.get(&id).map(AxWindow::frame) else {
+            return;
+        };
+        let workspace = placement.workspace.clone();
+        let area = self
+            .active_workspace
+            .iter()
+            .find(|(_, w)| **w == workspace)
+            .and_then(|(&mid, _)| self.monitor_frame(mid))
+            .or_else(|| self.monitor_frame(self.focused_monitor))
+            .unwrap_or(frame);
+        let geometry = capture_float_geometry(frame, area);
+        self.placements.insert(
+            id,
+            Placement {
+                workspace,
+                kind: PlacementKind::Floating {
+                    manual: Some(geometry),
+                },
+            },
+        );
     }
 
     /// Drops every window belonging to a process that just terminated,
@@ -1247,6 +1399,7 @@ impl WmState {
     /// parked windows apart so they don't all land on the exact same
     /// off-screen coordinate.
     fn park(&mut self, id: WindowId, offset_index: usize) {
+        self.capture_manual_geometry_before_park(id);
         let (origin_x, origin_y) = self.parking_origin;
         let x = origin_x + (offset_index as f64 * PARK_OFFSET_STEP);
         let y = origin_y;
@@ -1316,6 +1469,13 @@ impl WmState {
         self.reposition_floating_for_monitor(self.focused_monitor);
     }
 
+    /// Re-centers/sizes every floating window belonging to whatever
+    /// workspace is active on `monitor_id`. A window with captured manual
+    /// geometry (Phase 3 — the user dragged/resized it at some point) is
+    /// restored proportionally via `restore_floating_frame` instead of
+    /// being recomputed fresh from its floating rule, so a reactivated
+    /// workspace or a monitor swap doesn't silently discard the user's own
+    /// placement.
     fn reposition_floating_for_monitor(&mut self, monitor_id: u32) {
         let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
             return;
@@ -1325,10 +1485,17 @@ impl WmState {
         };
         let ids = self.floating_windows_in(&name);
         for id in ids {
-            let frame = self
-                .windows
-                .get(&id)
-                .and_then(|w| self.compute_floating_frame_in(w, area));
+            let manual = self.placements.get(&id).and_then(|p| match &p.kind {
+                PlacementKind::Floating { manual } => *manual,
+                _ => None,
+            });
+            let frame = match manual {
+                Some(geometry) => Some(restore_floating_frame(geometry, area)),
+                None => self
+                    .windows
+                    .get(&id)
+                    .and_then(|w| self.initial_floating_frame_in(w, area)),
+            };
             if let Some(frame) = frame
                 && let Some(window) = self.windows.get_mut(&id)
             {
@@ -1341,7 +1508,9 @@ impl WmState {
     /// matches a floating rule (first match wins), or `None` if it doesn't
     /// match any — meaning it should be tiled instead. Sized/centered
     /// against `focused_monitor`'s frame, since new windows always land on
-    /// the focused monitor's active workspace.
+    /// the focused monitor's active workspace. Rule-based, so only used at
+    /// *creation* (and reattachment from a special state) — once a window
+    /// has captured manual geometry, `restore_floating_frame` takes over.
     fn compute_floating_frame(&self, window: &AxWindow) -> Option<Rect> {
         let area = self.monitor_frame(self.focused_monitor).unwrap_or(Rect {
             x: 0.0,
@@ -1349,10 +1518,10 @@ impl WmState {
             width: 1440.0,
             height: 900.0,
         });
-        self.compute_floating_frame_in(window, area)
+        self.initial_floating_frame_in(window, area)
     }
 
-    fn compute_floating_frame_in(&self, window: &AxWindow, area: Rect) -> Option<Rect> {
+    fn initial_floating_frame_in(&self, window: &AxWindow, area: Rect) -> Option<Rect> {
         let bundle_id = window.bundle_id()?;
         let rule = self.floating_rules.iter().find(|rule| {
             rule.app_id == bundle_id
@@ -1680,5 +1849,236 @@ mod tests {
                 .find_node(id)
                 .is_some()
         );
+    }
+
+    // `WmState`'s `Default` derives its fields (monitors, workspaces, etc.)
+    // from real state (`tili_ax::list_monitors()`) rather than being a
+    // simple zero-value default, so overwriting a couple of fields
+    // afterward for a deterministic test fixture is clearer here than
+    // spelling out every other field via `..Default::default()`.
+    #[allow(clippy::field_reassign_with_default)]
+    fn floating_test_state() -> WmState {
+        let mut state = WmState::default();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            },
+            is_main: true,
+        }];
+        state.active_workspace.clear();
+        state
+            .active_workspace
+            .insert(1, DEFAULT_WORKSPACE.to_string());
+        state.focused_monitor = 1;
+        state
+    }
+
+    #[test]
+    fn capture_and_restore_round_trip_within_the_same_area() {
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let frame = Rect {
+            x: 200.0,
+            y: 150.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let geometry = capture_float_geometry(frame, area);
+        let restored = restore_floating_frame(geometry, area);
+        assert!((restored.x - frame.x).abs() < 0.01);
+        assert!((restored.y - frame.y).abs() < 0.01);
+        assert!((restored.width - frame.width).abs() < 0.01);
+        assert!((restored.height - frame.height).abs() < 0.01);
+    }
+
+    #[test]
+    fn restore_floating_frame_scales_proportionally_to_a_different_area() {
+        let original_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        // Bottom-right quadrant of the original area.
+        let frame = Rect {
+            x: 960.0,
+            y: 540.0,
+            width: 960.0,
+            height: 540.0,
+        };
+        let geometry = capture_float_geometry(frame, original_area);
+
+        let new_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 3840.0,
+            height: 2160.0,
+        };
+        let restored = restore_floating_frame(geometry, new_area);
+        assert!((restored.x - 1920.0).abs() < 0.01);
+        assert!((restored.y - 1080.0).abs() < 0.01);
+        assert!((restored.width - 1920.0).abs() < 0.01);
+        assert!((restored.height - 1080.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn restore_floating_frame_clamps_when_the_captured_size_no_longer_fits() {
+        let original_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let frame = Rect {
+            x: 100.0,
+            y: 100.0,
+            width: 1800.0,
+            height: 1000.0,
+        };
+        let geometry = capture_float_geometry(frame, original_area);
+
+        let smaller_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        let restored = restore_floating_frame(geometry, smaller_area);
+        assert!(restored.width <= smaller_area.width);
+        assert!(restored.height <= smaller_area.height);
+        assert!(restored.x >= smaller_area.x);
+        assert!(restored.y >= smaller_area.y);
+        assert!(restored.x + restored.width <= smaller_area.x + smaller_area.width + 0.01);
+        assert!(restored.y + restored.height <= smaller_area.y + smaller_area.height + 0.01);
+    }
+
+    #[test]
+    fn frames_match_within_epsilon_but_not_beyond() {
+        let a = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let close = Rect {
+            x: 0.2,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let far = Rect {
+            x: 5.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        assert!(frames_match(a, close));
+        assert!(!frames_match(a, far));
+    }
+
+    #[test]
+    fn maybe_capture_manual_geometry_ignores_an_unchanged_frame() {
+        let mut state = floating_test_state();
+        let id: WindowId = 1;
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+
+        let frame = Rect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        state.maybe_capture_manual_geometry(id, frame, frame);
+
+        assert!(matches!(
+            state.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Floating { manual: None })
+        ));
+    }
+
+    #[test]
+    fn maybe_capture_manual_geometry_captures_on_drift() {
+        let mut state = floating_test_state();
+        let id: WindowId = 1;
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+
+        let old_frame = Rect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let dragged_frame = Rect {
+            x: 500.0,
+            y: 500.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        state.maybe_capture_manual_geometry(id, old_frame, dragged_frame);
+
+        assert!(matches!(
+            state.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Floating { manual: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn maybe_capture_manual_geometry_is_idempotent_once_captured() {
+        let mut state = floating_test_state();
+        let id: WindowId = 1;
+        let captured = FloatGeometry {
+            rel_x: 0.1,
+            rel_y: 0.1,
+            rel_w: 0.2,
+            rel_h: 0.2,
+        };
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating {
+                    manual: Some(captured),
+                },
+            },
+        );
+
+        let old_frame = Rect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let dragged_frame = Rect {
+            x: 999.0,
+            y: 999.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        state.maybe_capture_manual_geometry(id, old_frame, dragged_frame);
+
+        assert!(matches!(
+            state.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Floating { manual: Some(g) }) if *g == captured
+        ));
     }
 }
