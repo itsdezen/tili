@@ -33,6 +33,17 @@ async fn main() -> std::io::Result<()> {
     let mut mouse_events = spawn_mouse_watcher_bridge();
     let mut state = WmState::default();
 
+    // Debounces `WmEvent::WindowsChanged`: a pid lands here instead of
+    // being rescanned immediately, and every pid queued gets exactly one
+    // rescan per `maintenance_tick`, using whichever state is current at
+    // that moment — a pid re-signaled before its tick naturally coalesces
+    // into that one pass rather than triggering a second rescan.
+    let mut pending_pids: HashSet<i32> = HashSet::new();
+    // Drains `pending_pids` and rechecks Phase 5's `pending_removal` grace
+    // period — one combined periodic-maintenance branch rather than two,
+    // since both are just "a little time has passed, go recheck something."
+    let mut maintenance_tick = tokio::time::interval(std::time::Duration::from_millis(30));
+
     let config_path = tili_config::default_config_path();
     ensure_starter_config_exists(&config_path);
     match tili_config::load(&config_path) {
@@ -82,9 +93,16 @@ async fn main() -> std::io::Result<()> {
             }
             event = events.recv() => {
                 match event {
-                    Some(event) => handle_event(&mut state, event),
+                    Some(event) => handle_event(&mut state, &mut pending_pids, event),
                     None => eprintln!("tili-daemon: event watcher channel closed unexpectedly"),
                 }
+            }
+            _ = maintenance_tick.tick() => {
+                for pid in pending_pids.drain() {
+                    let windows = tili_ax::list_windows_for_pid(pid);
+                    state.apply_windows_changed(pid, windows);
+                }
+                state.finalize_expired_removals();
             }
             Some(config) = config_updates.recv() => {
                 println!("tili-daemon: config reloaded from {}", config_path.display());
@@ -163,13 +181,21 @@ fn ensure_starter_config_exists(path: &std::path::Path) {
     }
 }
 
-fn handle_event(state: &mut WmState, event: WmEvent) {
+fn handle_event(state: &mut WmState, pending_pids: &mut HashSet<i32>, event: WmEvent) {
     match event {
+        // Debounced (M-Phase 6): queued for `maintenance_tick` rather than
+        // rescanned right here — a burst of notifications for the same pid
+        // (common during a window's open/resize/move sequence) coalesces
+        // into a single rescan instead of one per notification.
         WmEvent::WindowsChanged { pid } => {
-            let windows = tili_ax::list_windows_for_pid(pid);
-            state.apply_windows_changed(pid, windows);
+            pending_pids.insert(pid);
         }
-        WmEvent::AppTerminated { pid } => state.remove_app(pid),
+        WmEvent::AppTerminated { pid } => {
+            // The process is gone — no point rescanning a pid that was
+            // merely queued for one.
+            pending_pids.remove(&pid);
+            state.remove_app(pid);
+        }
         WmEvent::AppLaunched { .. } => {
             // No-op: the watcher always follows this with a WindowsChanged
             // for the same pid once it has windows to report.
