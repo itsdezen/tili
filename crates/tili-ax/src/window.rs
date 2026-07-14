@@ -4,12 +4,12 @@ use axuielement::ax_attribute::subroles::{
     AX_DIALOG_SUBROLE, AX_STANDARD_WINDOW_SUBROLE, AX_SYSTEM_DIALOG_SUBROLE,
 };
 use axuielement::ax_attribute::{
-    AX_FULL_SCREEN_BUTTON_ATTRIBUTE, AX_MINIMIZED_ATTRIBUTE, AX_ROLE_ATTRIBUTE,
-    AX_SUBROLE_ATTRIBUTE,
+    AX_CLOSE_BUTTON_ATTRIBUTE, AX_FULL_SCREEN_BUTTON_ATTRIBUTE, AX_MINIMIZED_ATTRIBUTE,
+    AX_ROLE_ATTRIBUTE, AX_SUBROLE_ATTRIBUTE,
 };
 use axuielement::ffi::{
-    AXUIElementRef, kAXFocusedAttribute, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
-    kAXTitleAttribute,
+    AXUIElementRef, kAXFocusedAttribute, kAXPositionAttribute, kAXPressAction, kAXRaiseAction,
+    kAXSizeAttribute, kAXTitleAttribute,
 };
 use axuielement::{AXPoint, AXSize};
 use tili_tree::{Rect, WindowId};
@@ -281,6 +281,30 @@ impl AxWindow {
     pub fn focus(&self) {
         let _ = self.element.set_bool_attribute(kAXFocusedAttribute, true);
         let _ = self.element.perform_action(kAXRaiseAction);
+    }
+
+    /// Closes the window by pressing its `AXCloseButton`, best-effort — a
+    /// window with no close button (or that refuses the press) is left
+    /// alone, same as every other AX write in this module. Never assumes
+    /// the window is actually gone afterward: the caller relies on the
+    /// normal destroy-notification path (`WmState::apply_windows_changed`,
+    /// with its grace period) to reconcile that once macOS actually reports
+    /// it, rather than removing it from any tracking immediately.
+    pub fn close(&self) {
+        if let Ok(Some(button)) = self.element.element_attribute(AX_CLOSE_BUTTON_ATTRIBUTE) {
+            let _ = button.perform_action(kAXPressAction);
+        }
+    }
+
+    /// Sets macOS's own native fullscreen (a separate Space) via the
+    /// `AXFullScreen` boolean attribute — best-effort, and updates the
+    /// cached `fullscreen` flag to match immediately, same reasoning as
+    /// `set_frame`'s cached-frame update.
+    pub fn set_native_fullscreen(&mut self, fullscreen: bool) {
+        let _ = self
+            .element
+            .set_bool_attribute(AX_FULL_SCREEN_ATTRIBUTE, fullscreen);
+        self.fullscreen = fullscreen;
     }
 }
 

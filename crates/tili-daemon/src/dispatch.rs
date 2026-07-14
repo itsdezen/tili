@@ -45,6 +45,21 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
                 message: e.to_string(),
             },
         },
+        Command::BalanceSizes { root } => result_response(state.balance_sizes(root)),
+        // A distinct `flatten` has no additional effect to implement:
+        // `Tree::normalize` already runs after every mutation and already
+        // collapses one-child containers — see the refactor plan's own
+        // rationale for why this stays a thin no-op rather than exposing a
+        // second, redundant normalization entry point.
+        Command::Flatten => Response::Ok,
+        Command::FullscreenToggle { native } => result_response(state.toggle_fullscreen(native)),
+        Command::Close => result_response(state.close_focused()),
+        Command::Summon(query) => result_response(state.summon(&query)),
+        Command::MoveWorkspaceToMonitor { workspace, target } => {
+            result_response(state.move_workspace_to_monitor(&workspace, target))
+        }
+        Command::WorkspaceBack => result_response(state.switch_to_previous_workspace()),
+        Command::SetFloating(floating) => result_response(state.set_floating(floating)),
         _ => Response::Err {
             message: "not implemented yet".to_string(),
         },
@@ -239,5 +254,67 @@ mod tests {
         let exit_resize = tili_ax::parse_key_combo("escape").unwrap();
         assert!(state.active_key_combos().contains(&exit_resize));
         assert!(!state.active_key_combos().contains(&enter_resize));
+    }
+
+    #[test]
+    fn flatten_is_always_ok() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::Flatten);
+        assert!(matches!(response, Response::Ok));
+    }
+
+    #[test]
+    fn balance_sizes_with_no_windows_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::BalanceSizes { root: false });
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn fullscreen_toggle_with_no_windows_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::FullscreenToggle { native: false });
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn close_with_no_windows_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::Close);
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn summon_with_no_matching_window_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::Summon("nonexistent".to_string()));
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn workspace_back_with_no_previous_workspace_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::WorkspaceBack);
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn set_floating_with_no_windows_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::SetFloating(true));
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn move_workspace_to_monitor_for_undeclared_workspace_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(
+            &mut state,
+            Command::MoveWorkspaceToMonitor {
+                workspace: "nope".to_string(),
+                target: tili_ipc::MonitorTarget::Main,
+            },
+        );
+        assert!(matches!(response, Response::Err { .. }));
     }
 }
