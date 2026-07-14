@@ -287,11 +287,14 @@ fn handle_event(state: &mut WmState, pending_pids: &mut HashSet<i32>, event: WmE
             // for the same pid once it has windows to report.
         }
         WmEvent::WindowFocused { .. } => {
-            // No-op for now: nothing about the window set changed, so no
-            // rescan/relayout is needed. `WmState`'s own focus tracking is
-            // driven entirely by explicit focus/move commands, not synced
-            // from real OS focus changes — this is exposed for a future
-            // "follow the user's manual clicks" feature, not acted on yet.
+            // No-op: `WmState`'s own focus tracking is instead resolved
+            // synchronously at the top of every `dispatch()` call (see
+            // `WmState::sync_focus_from_frontmost`) — confirmed on real
+            // hardware that resyncing reactively, whenever this event
+            // happens to arrive, has an unavoidable race against the next
+            // hotkey press, since there's no ordering guarantee between the
+            // two. Reacting to this event too would be redundant with that
+            // synchronous resync, not a fallback for it.
         }
     }
 }

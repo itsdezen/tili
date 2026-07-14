@@ -105,6 +105,47 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
   launch/terminate event (2s quiet period), capped at a 20s maximum, so a
   burst of real activity doesn't also pay for a redundant blind sweep on
   top of it.
+- Opening a new window in an app whose launch notification got missed
+  (a real, occasional gap — see `watch.rs`'s own docs) used to sit untiled
+  for up to ~10-20s: the cheap resync tick attached a watcher for the
+  newly-discovered pid promptly, but never signaled `WindowsChanged` for
+  it, so nothing re-read its windows until the next rare full sweep.
+  Newly-attached watchers now signal immediately, matching what already
+  happens at startup (`seed_watchers`).
+- The same resync tick used to retry — and log a failure for — any
+  permanently unwatchable pid (e.g. WindowServer, which owns some
+  on-screen overlay windows but isn't a real AX-subscribable app) on
+  every single tick forever, wasting AX calls and flooding the log.
+  Pids that fail to subscribe are now remembered and skipped until they
+  actually disappear.
+- Parked (inactive-workspace) windows no longer sit at a coordinate far
+  outside every monitor's bounds — confirmed on real hardware that AppKit
+  silently clamps such a request back to near a real screen's edge
+  regardless of how far outside it's requested (it only constrains a
+  window's *origin* to stay reachable, not its full frame). Windows are
+  now positioned so their origin lands just inside the main monitor's own
+  corner instead, letting the window's own size do the actual hiding by
+  extending past it — the same technique AeroSpace's `MacWindow.hideInCorner`
+  uses. A sliver still isn't achievable to hide *completely* (a real,
+  accepted AppKit constraint), but this is dramatically less visible than
+  before.
+- The first directional focus command (`focus <direction>`) issued after
+  changing real OS focus some other way (a mouse click, Cmd-Tab, ...)
+  could silently do nothing or jump the wrong way — `WmState`'s own idea
+  of "the current window" only ever moved via its own explicit
+  `focus`/`move` commands, so it went stale the moment the user focused
+  something manually. Fixed by resolving which window macOS currently
+  considers focused synchronously, immediately before every command runs
+  (`WmState::sync_focus_from_frontmost`, called at the top of `dispatch()`)
+  — mirrors AeroSpace's own design (`getNativeFocusedWindow`/
+  `updateFocusCache`, done the same way before every command). Earlier,
+  reactive attempts at this same fix (an AX per-window notification, then
+  an `NSWorkspaceDidActivateApplicationNotification` subscription — the
+  latter confirmed on real hardware to never fire for a process with no
+  `NSApplication` instance, unlike the process-lifecycle Launch/Terminate
+  notifications tili already relies on elsewhere) all had an unavoidable
+  race against the very next keypress; resolving focus synchronously
+  right before using it has none.
 
 ### Changed
 

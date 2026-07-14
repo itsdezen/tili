@@ -3,6 +3,14 @@ use tili_ipc::{Command, Response};
 use crate::state::WmState;
 
 pub fn dispatch(state: &mut WmState, command: Command) -> Response {
+    // Resolves `WmState`'s focus bookkeeping against whatever window real
+    // macOS currently considers focused, synchronously, before *any*
+    // command runs — see `WmState::sync_focus_from_frontmost`'s doc comment
+    // for why this can't be a reactive background sync instead (an
+    // unavoidable race against the very next hotkey press). Mirrors
+    // AeroSpace's `runLightSession`, which does the same
+    // `getNativeFocusedWindow`/`updateFocusCache` step before every command.
+    state.sync_focus_from_frontmost();
     match command {
         Command::Ping => Response::Ok,
         Command::ListWindows => match serde_json::to_value(state.list_windows()) {

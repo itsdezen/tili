@@ -84,102 +84,47 @@ pub fn main_display_frame() -> Rect {
         })
 }
 
-/// The bounding rect of every monitor's full (unadjusted) bounds combined —
-/// used to compute a parking-zone origin that can never land on a real,
-/// currently-connected display no matter how many are attached, or how
-/// they're arranged. `Rect::default()` (all zeros) if `monitors` is empty.
-pub fn combined_bounds(monitors: &[Monitor]) -> Rect {
-    let Some(first) = monitors.first() else {
-        return Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
-        };
-    };
-    let mut min_x = first.frame.x;
-    let mut min_y = first.frame.y;
-    let mut max_x = first.frame.x + first.frame.width;
-    let mut max_y = first.frame.y + first.frame.height;
-    for m in &monitors[1..] {
-        min_x = min_x.min(m.frame.x);
-        min_y = min_y.min(m.frame.y);
-        max_x = max_x.max(m.frame.x + m.frame.width);
-        max_y = max_y.max(m.frame.y + m.frame.height);
-    }
-    Rect {
-        x: min_x,
-        y: min_y,
-        width: max_x - min_x,
-        height: max_y - min_y,
-    }
-}
+/// How far a parked window's origin sits *inside* a real monitor's own
+/// corner — not a margin pushed outward. Confirmed on real hardware that
+/// setting `kAXPositionAttribute` to somewhere far outside every monitor's
+/// bounds (this function's previous approach) gets silently clamped back to
+/// within roughly this same distance of the nearest real screen edge
+/// regardless of how far outside it's requested — AppKit only constrains a
+/// window's *origin* to stay reachable on some real display, it doesn't
+/// care whether the window's full frame does. So instead of fighting that
+/// clamp, `parking_position` exploits it exactly the way AeroSpace's
+/// `MacWindow.hideInCorner` does: keep the origin legitimately on-screen,
+/// just barely, and let the window's own size push everything past it off
+/// the edge. A larger value here doesn't hide more — it would just be a
+/// wider on-screen sliver, the opposite of what parking wants.
+const PARK_EPSILON: f64 = 1.0;
 
-fn point_in_rect(x: f64, y: f64, rect: Rect) -> bool {
-    x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
-}
-
-/// Which corner of `combined_bounds` a parking origin was chosen at — only
-/// used to know which direction to push `margin` outward in.
-#[derive(Clone, Copy)]
-enum Corner {
-    BottomRight,
-    BottomLeft,
-    TopRight,
-    TopLeft,
-}
-
-/// Picks a corner of the connected monitors' combined bounds to park
-/// invisible/inactive-workspace windows beyond, then pushes `margin` units
-/// outward from it (in both axes) so the returned point is guaranteed clear
-/// of every connected monitor.
+/// Computes where to position a window so only a `PARK_EPSILON` sliver of
+/// it remains on-screen, hugging the main monitor's (or the first
+/// available one's) bottom-right corner. `size` isn't actually needed for
+/// this corner specifically — the window's own top-left lands just inside
+/// the corner, and its body (extending in the +x/+y direction from there)
+/// does all the hiding regardless of how big it is — but is taken anyway
+/// so this signature doesn't need to change if a different corner
+/// (needing it, like AeroSpace's bottom-left case) is ever added.
 ///
-/// Checked in a fixed preference order — bottom-right, bottom-left,
-/// top-right, top-left — picking whichever corner point (the bounding box's
-/// actual corner, before pushing outward) is contained in the *fewest*
-/// connected monitors' frames; ties (including the common single/dual-
-/// monitor case, where every corner sits on some monitor equally) keep
-/// today's default of parking off the bottom-right. This matters for
-/// irregular (e.g. L-shaped) arrangements: a bounding-box corner that
-/// happens to coincide with a real monitor's own corner is a worse parking
-/// spot than one that falls in genuinely empty space no monitor reaches —
-/// e.g. three monitors arranged in an L leave one quadrant of their
-/// combined bounding box empty; parking there instead of hugging whichever
-/// monitor happens to own the bottom-right corner keeps parked windows
-/// further from anything the user might drag/Mission-Control near.
-pub fn choose_parking_corner(monitors: &[Monitor], margin: f64) -> (f64, f64) {
-    let bounds = combined_bounds(monitors);
-    let candidates = [
-        (
-            Corner::BottomRight,
-            bounds.x + bounds.width,
-            bounds.y + bounds.height,
-        ),
-        (Corner::BottomLeft, bounds.x, bounds.y + bounds.height),
-        (Corner::TopRight, bounds.x + bounds.width, bounds.y),
-        (Corner::TopLeft, bounds.x, bounds.y),
-    ];
-
-    let mut best = candidates[0];
-    let mut best_count = usize::MAX;
-    for &(corner, x, y) in &candidates {
-        let count = monitors
-            .iter()
-            .filter(|m| point_in_rect(x, y, m.frame))
-            .count();
-        if count < best_count {
-            best_count = count;
-            best = (corner, x, y);
-        }
-    }
-
-    let (corner, x, y) = best;
-    match corner {
-        Corner::BottomRight => (x + margin, y + margin),
-        Corner::BottomLeft => (x - margin, y + margin),
-        Corner::TopRight => (x + margin, y - margin),
-        Corner::TopLeft => (x - margin, y - margin),
-    }
+/// Doesn't need to check other connected monitors: `PARK_EPSILON` is tiny
+/// enough that this point is always deep inside the main monitor's own
+/// bounds, never anywhere close to a neighboring display's — unlike the
+/// previous far-outside-every-bound approach, which genuinely could land
+/// on a different physical monitor depending on arrangement.
+pub fn parking_position(monitors: &[Monitor], _size: (f64, f64)) -> (f64, f64) {
+    let Some(main) = monitors
+        .iter()
+        .find(|m| m.is_main)
+        .or_else(|| monitors.first())
+    else {
+        return (0.0, 0.0);
+    };
+    (
+        main.frame.x + main.frame.width - PARK_EPSILON,
+        main.frame.y + main.frame.height - PARK_EPSILON,
+    )
 }
 
 /// How close two frame origins need to be (in points) to treat an old and a
@@ -294,60 +239,6 @@ pub fn spawn_display_watcher() -> std::sync::mpsc::Receiver<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn combined_bounds_of_no_monitors_is_zero() {
-        let bounds = combined_bounds(&[]);
-        assert_eq!(bounds.width, 0.0);
-        assert_eq!(bounds.height, 0.0);
-    }
-
-    #[test]
-    fn combined_bounds_of_one_monitor_matches_its_frame() {
-        let monitors = [Monitor {
-            id: 1,
-            frame: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 1920.0,
-                height: 1080.0,
-            },
-            is_main: true,
-        }];
-        let bounds = combined_bounds(&monitors);
-        assert_eq!(bounds.width, 1920.0);
-        assert_eq!(bounds.height, 1080.0);
-    }
-
-    #[test]
-    fn combined_bounds_spans_side_by_side_monitors() {
-        let monitors = [
-            Monitor {
-                id: 1,
-                frame: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: true,
-            },
-            Monitor {
-                id: 2,
-                frame: Rect {
-                    x: 1920.0,
-                    y: 0.0,
-                    width: 2560.0,
-                    height: 1440.0,
-                },
-                is_main: false,
-            },
-        ];
-        let bounds = combined_bounds(&monitors);
-        assert_eq!(bounds.x, 0.0);
-        assert_eq!(bounds.width, 4480.0);
-        assert_eq!(bounds.height, 1440.0);
-    }
-
     fn monitor(id: u32, x: f64, y: f64, width: f64, height: f64) -> Monitor {
         Monitor {
             id,
@@ -362,51 +253,38 @@ mod tests {
     }
 
     #[test]
-    fn single_monitor_parks_bottom_right_beyond_it() {
+    fn single_monitor_parks_one_epsilon_inside_its_bottom_right_corner() {
         let monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
-        let (x, y) = choose_parking_corner(&monitors, 100.0);
-        assert_eq!(x, 2020.0);
-        assert_eq!(y, 1180.0);
+        let (x, y) = parking_position(&monitors, (400.0, 300.0));
+        assert_eq!(x, 1919.0);
+        assert_eq!(y, 1079.0);
     }
 
     #[test]
-    fn side_by_side_equal_height_pair_ties_to_bottom_right() {
+    fn side_by_side_pair_still_parks_at_the_main_monitors_own_corner() {
         let monitors = [
             monitor(1, 0.0, 0.0, 1920.0, 1080.0),
             monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
         ];
-        let (x, y) = choose_parking_corner(&monitors, 100.0);
-        assert_eq!(x, 3940.0);
-        assert_eq!(y, 1180.0);
+        let (x, y) = parking_position(&monitors, (400.0, 300.0));
+        assert_eq!(x, 1919.0);
+        assert_eq!(y, 1079.0);
     }
 
     #[test]
-    fn l_shaped_triple_prefers_the_uncovered_quadrant() {
-        // Top row spans both monitors; only the bottom-left is populated,
-        // leaving the combined bounds' bottom-right quadrant empty.
-        let monitors = [
-            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
-            monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
-            monitor(3, 0.0, 1080.0, 1920.0, 1080.0),
-        ];
-        let (x, y) = choose_parking_corner(&monitors, 100.0);
-        assert_eq!(x, 3940.0);
-        assert_eq!(y, 2260.0);
+    fn falls_back_to_the_first_monitor_when_none_is_main() {
+        let mut monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
+        monitors[0].is_main = false;
+        let (x, y) = parking_position(&monitors, (400.0, 300.0));
+        assert_eq!(x, 1919.0);
+        assert_eq!(y, 1079.0);
     }
 
     #[test]
-    fn chooses_the_empty_quadrant_even_when_its_not_bottom_right() {
-        // Mirror image of the L above: the *top-left* quadrant is the one
-        // left empty, and no monitor's own corner sits there — proving
-        // this doesn't just always default to bottom-right.
-        let monitors = [
-            monitor(1, 1920.0, 0.0, 1920.0, 1080.0),
-            monitor(2, 0.0, 1080.0, 1920.0, 1080.0),
-            monitor(3, 1920.0, 1080.0, 1920.0, 1080.0),
-        ];
-        let (x, y) = choose_parking_corner(&monitors, 100.0);
-        assert_eq!(x, -100.0);
-        assert_eq!(y, -100.0);
+    fn no_monitors_parks_at_the_origin() {
+        let (x, y) = parking_position(&[], (400.0, 300.0));
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 0.0);
     }
 
     #[test]

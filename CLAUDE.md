@@ -93,10 +93,7 @@ the dependency direction is a hard boundary, not just organization:
   `NSScreen.visibleFrame` (which would be more precise about notches/Dock
   placement but requires flipping between `NSScreen`'s bottom-left-origin
   coordinate space and AX/`CGDisplay`'s top-left-origin one — judged not
-  worth the risk for what M9 needs). `combined_bounds(&[Monitor])` is a
-  pure, unit-tested helper giving the union of every connected monitor's
-  bounds, used to keep parked windows outside of *all* real displays, not
-  just main. `spawn_display_watcher()` registers a
+  worth the risk for what M9 needs). `spawn_display_watcher()` registers a
   `CGDisplayRegisterReconfigurationCallback` on its own dedicated
   `CFRunLoop` thread (same reasoning as the NSWorkspace/AX watchers) and
   just signals "something changed, re-enumerate" per callback — it doesn't
@@ -217,8 +214,17 @@ the dependency direction is a hard boundary, not just organization:
   frames" — most callers only need the focused monitor (`relayout_active`),
   but anything that could touch a workspace visible on a *different*
   monitor (app termination, config reload) uses `relayout_all_visible`.
-  `park()` targets `tili_ax::combined_bounds(&self.monitors)`, not just
-  main's bounds, so a parked window can't land on a real second monitor.
+  `park()` targets `tili_ax::parking_position` — a window's origin lands
+  just a point inside the main monitor's own bottom-right corner (not
+  pushed *outside* every monitor's bounds, `combined_bounds`'s original
+  purpose): confirmed on real hardware that AppKit clamps a
+  `kAXPositionAttribute` write requesting somewhere totally unreachable
+  back to near a real screen's edge regardless of how far outside it's
+  requested (it only constrains the origin, not the window's full frame).
+  Keeping the origin legitimately on-screen and letting the window's own
+  size extend past the corner (the same technique AeroSpace's
+  `MacWindow.hideInCorner` uses) avoids that clamp entirely instead of
+  fighting it.
   Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
   parsed since M5) is intentionally still unwired — M9's bar is
   hot-plug/unplug safety, not that finer-grained UX.
@@ -266,6 +272,27 @@ the dependency direction is a hard boundary, not just organization:
   so both `main.rs`'s socket-accept and hotkey `select!` arms check for it
   and `break` the loop directly instead of routing it through `dispatch()`
   (which would have nowhere to signal "please exit the process" from).
+  `dispatch()` itself calls `WmState::sync_focus_from_frontmost()` before
+  the command match — resolves which window real macOS currently considers
+  focused (via `tili_ax::workspace::frontmost_app_pid`, an
+  `AXUIElementCreateSystemWide`-based query) and updates `workspace_focus`
+  synchronously, immediately before that command runs. This is deliberately
+  not a reactive background sync triggered by an event arriving whenever —
+  confirmed on real hardware that a background poll/notification updating
+  focus asynchronously has an unavoidable race against the very next
+  hotkey press, since there's no ordering guarantee between "the
+  background sync noticed the click" and "the keypress got processed."
+  Mirrors AeroSpace's own design (`getNativeFocusedWindow`/
+  `updateFocusCache`, called synchronously at the top of every command in
+  its `runLightSession`/`runHeavyCompleteRefreshSession`) — this is the fix
+  for a long-reported "the first direction key press after switching
+  windows manually does nothing/goes the wrong way" bug that several
+  reactive-sync attempts (an AX per-window notification, then an
+  `NSWorkspaceDidActivateApplicationNotification` subscription — confirmed
+  to never fire for a process like this one with no `NSApplication`
+  instance, unlike the process-lifecycle Launch/Terminate notifications,
+  which don't depend on window-server UI-activation machinery — then a
+  poll on `watch.rs`'s resync tick) all failed to fully close.
   `src/main.rs` is one
   `tokio::select!` loop merging socket accepts,
   `tili_ax::spawn_event_watcher()`'s channel, the config-reload bridge, the

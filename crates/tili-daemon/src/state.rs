@@ -20,11 +20,20 @@ const DEFAULT_MODE: &str = "main";
 
 /// macOS has no public API to enumerate/control Spaces, so workspaces are
 /// virtual: only the active one's windows are actually laid out on screen.
-/// Every other workspace's windows are "parked" — moved to a coordinate far
-/// outside the display's bounds, offset per-window so they don't all stack
-/// exactly on top of each other (irrelevant to the user, but keeps
-/// `tili list-windows` output sane to eyeball while debugging).
-const PARK_MARGIN: f64 = 10_000.0;
+/// Every other workspace's windows are "parked" via `tili_ax::parking_position`
+/// — positioned so only a tiny sliver stays reachable at a real monitor's
+/// own corner, offset per-window so they don't all stack exactly on top of
+/// each other (irrelevant to the user, but keeps `tili list-windows` output
+/// sane to eyeball while debugging).
+///
+/// Confirmed on real hardware that pushing a window's position far *outside*
+/// every display's bounds instead (this constant's previous approach)
+/// doesn't work: AppKit clamps `kAXPositionAttribute` writes that would
+/// place a window's origin somewhere unreachable back to near a real
+/// screen's own edge regardless of how far outside it's requested — it
+/// only constrains the origin, not the window's full frame. See
+/// `parking_position`'s doc comment for the technique this uses instead
+/// (the same one AeroSpace's `MacWindow.hideInCorner` uses).
 const PARK_OFFSET_STEP: f64 = 50.0;
 
 /// How close two frames need to be to count as "the same" when deciding
@@ -313,12 +322,6 @@ pub struct WmState {
     workspaces: HashMap<String, Tree>,
     workspace_focus: HashMap<String, NodeId>,
     monitors: Vec<Monitor>,
-    /// Where `park` targets, beyond every connected monitor — recomputed
-    /// via `tili_ax::choose_parking_corner` whenever `monitors` changes
-    /// (`Default::default`, `on_displays_changed`) rather than on every
-    /// `park` call, since it only depends on the current monitor
-    /// arrangement, not on which window is being parked.
-    parking_origin: (f64, f64),
     active_workspace: HashMap<u32, String>,
     focused_monitor: u32,
     frame_setter: Box<dyn WindowFrameSetter>,
@@ -379,7 +382,6 @@ impl Default for WmState {
         workspaces.insert(DEFAULT_WORKSPACE.to_string(), Tree::new());
 
         let monitors = tili_ax::list_monitors();
-        let parking_origin = tili_ax::choose_parking_corner(&monitors, PARK_MARGIN);
         let focused_monitor = monitors.first().map(|m| m.id).unwrap_or(0);
         let mut active_workspace = HashMap::new();
         active_workspace.insert(focused_monitor, DEFAULT_WORKSPACE.to_string());
@@ -394,7 +396,6 @@ impl Default for WmState {
             workspaces,
             workspace_focus: HashMap::new(),
             monitors,
-            parking_origin,
             active_workspace,
             focused_monitor,
             frame_setter: Box::new(InstantFrameSetter),
@@ -1080,7 +1081,6 @@ impl WmState {
         let diff = tili_ax::match_monitors(&self.monitors, &new_monitors);
 
         self.monitors = new_monitors;
-        self.parking_origin = tili_ax::choose_parking_corner(&self.monitors, PARK_MARGIN);
 
         for (old_id, new_id) in diff.renamed {
             if let Some(name) = self.active_workspace.remove(&old_id) {
@@ -1139,6 +1139,60 @@ impl WmState {
         self.relayout_active();
         self.raise_focused();
         Ok(())
+    }
+
+    /// Re-resolves `workspace_focus` from whichever window real macOS
+    /// currently considers focused, *before* any command runs — not a
+    /// reactive sync triggered by a notification/poll event arriving at
+    /// some later, unpredictable time. Confirmed on real hardware that the
+    /// reactive version has an unavoidable race: a background poll/notification
+    /// updating `workspace_focus` asynchronously can easily still be stale
+    /// by the time a hotkey fires moments later, since there's no ordering
+    /// guarantee between "the poll noticed the click" and "the user's next
+    /// keypress got processed." Mirrors AeroSpace's own design exactly
+    /// (`getNativeFocusedWindow`/`updateFocusCache`, called synchronously at
+    /// the top of *every* command in its `runLightSession`/
+    /// `runHeavyCompleteRefreshSession`) — resolve reality synchronously,
+    /// immediately before using it, rather than trusting a cache that was
+    /// last updated by some independent, unsynchronized background event.
+    /// Called once at the top of `dispatch()`, covering both socket- and
+    /// hotkey-triggered commands.
+    pub fn sync_focus_from_frontmost(&mut self) {
+        if let Some(pid) = tili_ax::workspace::frontmost_app_pid() {
+            self.sync_focus_from_pid(pid);
+        }
+    }
+
+    /// Syncs `workspace_focus` to reflect a real OS focus change for `pid`'s
+    /// currently AX-focused/main window — see `sync_focus_from_frontmost`,
+    /// the only real caller. A no-op if: the pid's focused window can't be
+    /// resolved, it isn't one of ours, it's not `Tiled` (floating/special
+    /// windows have no node to focus), or it's already the recorded focus
+    /// for its workspace — deliberately doesn't relayout or raise anything,
+    /// since the OS already did the actual focusing here; this only updates
+    /// internal bookkeeping to match reality.
+    fn sync_focus_from_pid(&mut self, pid: i32) {
+        let Some(window_id) = tili_ax::AxWindow::focused_id_for_pid(pid) else {
+            return;
+        };
+        let Some(placement) = self.placements.get(&window_id) else {
+            return;
+        };
+        if !matches!(placement.kind, PlacementKind::Tiled) {
+            return;
+        }
+        let workspace = placement.workspace.clone();
+        let Some(tree) = self.workspaces.get_mut(&workspace) else {
+            return;
+        };
+        let Some(node) = tree.node_for_window(window_id) else {
+            return;
+        };
+        if self.workspace_focus.get(&workspace) == Some(&node) {
+            return;
+        }
+        tree.record_focus(node);
+        self.workspace_focus.insert(workspace, node);
     }
 
     /// Moves the focused window one step in `dir`, re-parenting it through
@@ -1861,20 +1915,24 @@ impl WmState {
         self.relayout_active();
     }
 
-    /// Moves a window off-screen without resizing it, outside the combined
-    /// bounds of every *currently connected* monitor so a parked window can
-    /// never land on a real display no matter how many are attached or how
-    /// they're arranged. `offset_index` spreads multiple simultaneously-
-    /// parked windows apart so they don't all land on the exact same
-    /// off-screen coordinate.
+    /// Moves a window to hug a real monitor's own corner (see
+    /// `tili_ax::parking_position`) without resizing it. `offset_index`
+    /// spreads multiple simultaneously-parked windows apart so they don't
+    /// all land on the exact same coordinate — subtracted *inward* (toward
+    /// the center of the screen), never outward past the corner, since
+    /// going outward is exactly the "push it far away" approach confirmed
+    /// not to work (see `parking_position`'s doc comment); moving inward
+    /// stays safely on-screen regardless of how many windows need spreading.
     fn park(&mut self, id: WindowId, offset_index: usize) {
         self.capture_manual_geometry_before_park(id);
-        let (origin_x, origin_y) = self.parking_origin;
-        let x = origin_x + (offset_index as f64 * PARK_OFFSET_STEP);
-        let y = origin_y;
-        if let Some(window) = self.windows.get_mut(&id) {
-            window.set_position(x, y);
-        }
+        let Some(window) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let frame = window.frame();
+        let (origin_x, origin_y) =
+            tili_ax::parking_position(&self.monitors, (frame.width, frame.height));
+        let x = origin_x - (offset_index as f64 * PARK_OFFSET_STEP);
+        window.set_position(x, origin_y);
     }
 
     fn monitor_frame(&self, monitor_id: u32) -> Option<Rect> {

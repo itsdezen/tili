@@ -125,6 +125,17 @@ impl Tree {
         }
     }
 
+    /// Reverse of `window_at` — which node holds a given window, if any.
+    /// O(n) in this tree's node count, but only ever called in response to a
+    /// real OS focus-change event (see `WmState::sync_focus_from_pid`), not
+    /// on any hot path.
+    pub fn node_for_window(&self, window: WindowId) -> Option<NodeId> {
+        self.nodes.iter().find_map(|(id, node)| match node {
+            Node::Window { window: w } if *w == window => Some(id),
+            _ => None,
+        })
+    }
+
     /// Every window currently in the tree, in no particular order.
     pub fn window_ids(&self) -> Vec<WindowId> {
         self.nodes

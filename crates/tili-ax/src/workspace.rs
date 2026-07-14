@@ -120,6 +120,24 @@ pub fn activate_app(pid: i32) {
     }
 }
 
+/// The pid of the currently frontmost application, via the system-wide
+/// Accessibility element (`AXUIElementCreateSystemWide`'s
+/// `AXFocusedApplication` attribute) — a direct, synchronous query, not a
+/// notification. Used instead of `NSWorkspaceDidActivateApplicationNotification`
+/// (confirmed on real hardware to never fire for a process like
+/// `tili-daemon` that never creates an `NSApplication` instance, unlike the
+/// process-lifecycle `Launch`/`Terminate` notifications above, which don't
+/// depend on window-server UI-activation machinery and do work) —
+/// `watch.rs` polls this on its existing cheap resync tick instead.
+pub fn frontmost_app_pid() -> Option<i32> {
+    axuielement::system_wide()?
+        .focused_application()
+        .ok()
+        .flatten()?
+        .pid()
+        .ok()
+}
+
 /// Whether a process's app is currently hidden (Cmd-H / "Hide app-name"),
 /// via `NSRunningApplication.isHidden`. Called once per pid per refresh,
 /// same cost profile as `bundle_id_for_pid` — used to classify a process's

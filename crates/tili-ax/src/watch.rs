@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
@@ -128,7 +128,17 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
     workspace::spawn_workspace_watcher(app_tx);
 
     let mut watched: HashMap<i32, tokio::task::JoinHandle<()>> = HashMap::new();
-    seed_watchers(&rt, &event_tx, &mut watched);
+    // Pids a subscription attempt has already failed for (e.g. WindowServer,
+    // pid 403 — a system compositor process, not a real app, that shows up
+    // in `onscreen_owner_pids` as the owner of some overlay windows but will
+    // never support an AX subscription). Without this, `resync_watchers`
+    // would retry — and log a failure for — the exact same permanently
+    // unwatchable pid on every single `RESYNC_INTERVAL` tick forever,
+    // wasting AX calls and flooding the log. Cleared when the pid actually
+    // disappears (see the `retain` below and `AppEvent::Terminated`), so a
+    // *new* process reusing the same pid gets a fresh attempt.
+    let mut unwatchable: HashSet<i32> = HashSet::new();
+    seed_watchers(&rt, &event_tx, &mut watched, &mut unwatchable);
 
     std::thread::spawn(move || {
         // Debounce-since-quiet with a hard cap: a burst of real `AppEvent`s
@@ -143,14 +153,20 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
             match app_rx.recv_timeout(RESYNC_INTERVAL) {
                 Ok(AppEvent::Launched { pid, bundle_id }) => {
                     let _ = event_tx.send(WmEvent::AppLaunched { pid, bundle_id });
-                    if let Some(handle) = watch_app(&rt, pid, event_tx.clone()) {
-                        watched.insert(pid, handle);
+                    match watch_app(&rt, pid, event_tx.clone()) {
+                        Some(handle) => {
+                            watched.insert(pid, handle);
+                        }
+                        None => {
+                            unwatchable.insert(pid);
+                        }
                     }
                     let _ = event_tx.send(WmEvent::WindowsChanged { pid });
                     debounce_deadline = Some(Instant::now() + FULL_RESYNC_DEBOUNCE);
                 }
                 Ok(AppEvent::Terminated { pid }) => {
                     let _ = event_tx.send(WmEvent::AppTerminated { pid });
+                    unwatchable.remove(&pid);
                     if let Some(handle) = watched.remove(&pid) {
                         // Aborting drops the owned AXNotificationStream, which
                         // stops its dedicated CFRunLoop thread (see
@@ -169,7 +185,13 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
                         last_full_resync = now;
                         debounce_deadline = None;
                     }
-                    resync_watchers(&rt, &event_tx, &mut watched, full_window_resync);
+                    resync_watchers(
+                        &rt,
+                        &event_tx,
+                        &mut watched,
+                        &mut unwatchable,
+                        full_window_resync,
+                    );
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -197,11 +219,17 @@ fn seed_watchers(
     rt: &tokio::runtime::Handle,
     event_tx: &mpsc::UnboundedSender<WmEvent>,
     watched: &mut HashMap<i32, tokio::task::JoinHandle<()>>,
+    unwatchable: &mut HashSet<i32>,
 ) {
     let onscreen = enumerate::onscreen_owner_pids();
     for pid in watchable_pids() {
-        if let Some(handle) = watch_app(rt, pid, event_tx.clone()) {
-            watched.insert(pid, handle);
+        match watch_app(rt, pid, event_tx.clone()) {
+            Some(handle) => {
+                watched.insert(pid, handle);
+            }
+            None => {
+                unwatchable.insert(pid);
+            }
         }
         if onscreen.contains(&pid) {
             let _ = event_tx.send(WmEvent::WindowsChanged { pid });
@@ -213,27 +241,54 @@ fn seed_watchers(
 /// pid that should be watched but isn't yet (a missed/never-fired launch
 /// notification), and drops watchers for pids that are no longer running
 /// (a missed termination notification). Only re-signals `WindowsChanged`
-/// for every on-screen pid — the rarer safety net for a missed
-/// window-level notification — when `full_window_resync` is set; see
-/// `WINDOW_RESYNC_EVERY`.
+/// for every *already-watched* on-screen pid — the rarer safety net for a
+/// missed window-level notification — when `full_window_resync` is set; see
+/// `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL`.
+///
+/// A pid newly discovered *by this function* (as opposed to via the
+/// `AppEvent::Launched` push notification, which already signals
+/// `WindowsChanged` itself) always gets an immediate `WindowsChanged` the
+/// moment its watcher is attached, regardless of `full_window_resync` —
+/// mirrors `seed_watchers`. Without this, a missed launch notification
+/// still got a watcher attached promptly (within one `RESYNC_INTERVAL`
+/// tick) but its already-existing window(s) sat untiled until the next
+/// full resync — up to `FULL_RESYNC_MAX_INTERVAL` later — since attaching
+/// a watcher only catches *future* per-window notifications, not windows
+/// that already existed before the subscription began.
+///
+/// `unwatchable` skips re-attempting a subscription for a pid that already
+/// failed once (see its doc comment at the call site) — otherwise a
+/// permanently unwatchable pid (WindowServer and similar system processes
+/// that show up as on-screen window owners but aren't real AX-subscribable
+/// apps) would retry and log a failure every single tick forever.
 fn resync_watchers(
     rt: &tokio::runtime::Handle,
     event_tx: &mpsc::UnboundedSender<WmEvent>,
     watched: &mut HashMap<i32, tokio::task::JoinHandle<()>>,
+    unwatchable: &mut HashSet<i32>,
     full_window_resync: bool,
 ) {
     let current = watchable_pids();
+    let onscreen = enumerate::onscreen_owner_pids();
 
     for &pid in &current {
-        if !watched.contains_key(&pid)
-            && let Some(handle) = watch_app(rt, pid, event_tx.clone())
-        {
-            watched.insert(pid, handle);
+        if !watched.contains_key(&pid) && !unwatchable.contains(&pid) {
+            match watch_app(rt, pid, event_tx.clone()) {
+                Some(handle) => {
+                    watched.insert(pid, handle);
+                }
+                None => {
+                    unwatchable.insert(pid);
+                }
+            }
+            if onscreen.contains(&pid) {
+                let _ = event_tx.send(WmEvent::WindowsChanged { pid });
+            }
         }
     }
 
     if full_window_resync {
-        for pid in enumerate::onscreen_owner_pids() {
+        for &pid in &onscreen {
             let _ = event_tx.send(WmEvent::WindowsChanged { pid });
         }
     }
@@ -251,6 +306,7 @@ fn resync_watchers(
             false
         }
     });
+    unwatchable.retain(|pid| current.contains(pid));
 }
 
 /// Subscribes to one app's window lifecycle notifications and forwards a

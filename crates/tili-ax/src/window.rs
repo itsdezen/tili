@@ -108,6 +108,30 @@ impl AxWindow {
         (status == 0).then_some(id)
     }
 
+    /// Resolves which of `pid`'s windows currently holds AX focus — reads
+    /// the app's `AXFocusedWindow` attribute, falling back to `AXMainWindow`
+    /// for apps that only expose that one (some single-window apps never
+    /// populate `AXFocusedWindow` distinctly). Used to sync `WmState`'s own
+    /// focus tracking when the user changes real OS focus by some means
+    /// other than tili's own `focus`/`move` commands (a mouse click,
+    /// Cmd-Tab, ...) — those never update which window tili itself
+    /// considers "current" otherwise, so the next directional command
+    /// would act relative to stale state instead of the window the user is
+    /// actually looking at.
+    pub fn focused_id_for_pid(pid: i32) -> Option<WindowId> {
+        let app = AXUIElement::from_pid(pid)?;
+        let focused = app
+            .element_attribute(axuielement::ffi::kAXFocusedWindowAttribute)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                app.element_attribute(axuielement::ffi::kAXMainWindowAttribute)
+                    .ok()
+                    .flatten()
+            })?;
+        Self::resolve_window_id(&focused)
+    }
+
     /// Builds an `AxWindow` from an `AXUIElement` known to be a window
     /// (typically an entry from an application's `AXWindows` attribute).
     /// `bundle_id` is resolved once per process by the caller (see
