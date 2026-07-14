@@ -71,10 +71,14 @@ keybindings mode="main" {
 
     bind "alt-slash" "layout toggle"
 
-    // Sets the focused container's split axis directly (as opposed to
-    // "layout toggle", which switches between tiles and accordion).
-    bind "alt-shift-minus" "layout horizontal"
-    bind "alt-shift-equal" "layout vertical"
+    // Flips the focused container's split axis between horizontal and
+    // vertical — pairs with "layout toggle" above (tiles vs. accordion).
+    bind "alt-shift-slash" "layout toggle-orientation"
+
+    // Grows/shrinks the focused window's share of its nearest tiled
+    // container — AeroSpace's convention for these two keys.
+    bind "alt-shift-minus" "resize -0.1"
+    bind "alt-shift-equal" "resize 0.1"
 
     // Cycles which connected monitor the above all target — a no-op with
     // only one monitor. See ROADMAP.md M9.

@@ -74,6 +74,8 @@ fn parse_tokens(tokens: &[&str]) -> Command {
         }
         ["layout", "vertical"] => Command::OrientationSet(OrientationKind::Vertical, false),
         ["layout", "vertical", "root"] => Command::OrientationSet(OrientationKind::Vertical, true),
+        ["layout", "toggle-orientation"] => Command::OrientationToggle(false),
+        ["layout", "toggle-orientation", "root"] => Command::OrientationToggle(true),
         ["resize", amount] => amount
             .parse::<f32>()
             .map_or_else(|_| raw(tokens), |amount| Command::ResizeRatio { amount }),
@@ -179,6 +181,18 @@ mod tests {
         assert!(matches!(
             parse("layout vertical root"),
             Command::OrientationSet(OrientationKind::Vertical, true)
+        ));
+    }
+
+    #[test]
+    fn parses_orientation_toggle() {
+        assert!(matches!(
+            parse("layout toggle-orientation"),
+            Command::OrientationToggle(false)
+        ));
+        assert!(matches!(
+            parse("layout toggle-orientation root"),
+            Command::OrientationToggle(true)
         ));
     }
 

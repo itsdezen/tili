@@ -39,6 +39,7 @@ enum LayoutArg {
     Accordion,
     Horizontal,
     Vertical,
+    ToggleOrientation,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -188,6 +189,7 @@ fn main() {
                 LayoutArg::Vertical => {
                     Command::OrientationSet(tili_ipc::OrientationKind::Vertical, root)
                 }
+                LayoutArg::ToggleOrientation => Command::OrientationToggle(root),
             };
             (command, ExpectedPayload::None)
         }
