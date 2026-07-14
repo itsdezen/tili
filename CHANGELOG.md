@@ -12,6 +12,56 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
 
 ### Changed
 
+- `tili-tree`'s container model rewritten from a binary tree to an
+  AeroSpace-style n-ary tree (`Node::Container { layout, orientation,
+  children, weights, mru }`), with `insert_window` joining a flat sibling
+  list next to the focused window instead of always wrapping it in a fresh
+  2-child split. A window's `NodeId` is now stable for its whole lifetime in
+  the tree — `move` re-parents the window itself rather than swapping which
+  `NodeId` holds which window. Two invariants are maintained automatically
+  after every mutation (`Tree::normalize`): no single-child containers, and
+  no same-orientation `Tiles` container directly nested in another. `focus`
+  now escalates across orientation boundaries and descends via "most
+  recently used" child (`Tree::record_focus`/`mru_leaf`) instead of always
+  landing on a container's first child.
+- Accordion containers now have their own orientation and render every
+  child (not just the active one) with a configurable peek padding on the
+  side(s) where a sibling exists (`settings.accordion-padding`, default 30,
+  `0` collapses back to full-frame-per-child) — matches AeroSpace's
+  accordion rendering. `layout toggle`/`layout accordion` no longer rebuild
+  the container; they flip a `layout` field in place, so orientation,
+  weights, and MRU carry over untouched.
+
+### Added
+
+- `join <left|right|up|down>` — wraps the focused window and its neighbor
+  into a new, perpendicular container (AeroSpace's `join-with`).
+- `layout horizontal`/`layout vertical` (optionally `--root`) — sets a
+  container's split axis directly, independent of `layout toggle`'s
+  tiles/accordion switch.
+- `resize <amount>` is now wired up (`tili resize <amount>`): grows or
+  shrinks the focused window's share of its nearest tiled container,
+  proportionally taken from its siblings.
+- `settings.accordion-padding` and `settings.default-root-orientation`
+  (`"auto"`, `"horizontal"`, or `"vertical"`) config settings.
+
+### Fixed
+
+- `Tree::remove_window` now correctly handles a window whose parent
+  container is an `Accordion` (reached via `layout toggle`), not just
+  `Split`. Previously it silently failed to remove the leaf from the
+  `Accordion`'s children, leaving a dangling `NodeId` behind — the
+  surviving sibling would vanish from layout entirely (its `active` index
+  still pointed at the now-gone child), and every caller of
+  `remove_window` (window close, `move-to-workspace`, etc.) misread the
+  resulting `None` as "workspace has no windows left," corrupting
+  per-workspace remembered focus and leaving later `focus`/`workspace`
+  commands resolving to a dead node. This is very likely the root cause of
+  reported "everything is broken" workspace/tiling breakage, since
+  Accordion is one keypress away (`alt-slash` in the default config).
+
+### Changed
+
 - `tili start`/`stop` now manage tili-daemon's LaunchAgent directly,
   folding in what used to be the separate `tili daemon install`/
   `uninstall` subcommand: `tili start` writes and `launchctl load`s the

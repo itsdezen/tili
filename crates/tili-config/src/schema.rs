@@ -65,6 +65,24 @@ pub struct Settings {
     pub mouse_follows_focus: bool,
     pub focus_follows_monitor: bool,
     pub auto_reload: bool,
+    /// Which declared workspace is active at daemon startup, on the first
+    /// config load only — a hot reload never changes what's currently on
+    /// screen. `None` falls back to the alphabetically-first declared
+    /// workspace; resolving that fallback is `tili-daemon`'s job (a
+    /// startup-sequencing concern), not this crate's.
+    pub default_workspace: Option<String>,
+    /// How many points of a non-visible `Accordion` sibling peek out from
+    /// behind the active one, on the side(s) where a sibling exists — `0`
+    /// collapses every child to the exact same full frame. Matches
+    /// AeroSpace's accordion padding.
+    pub accordion_padding: u32,
+    /// Orientation a workspace's root container gets when it's created for
+    /// its second window (the point a lone-window root actually becomes a
+    /// container) — `"horizontal"`, `"vertical"`, or `"auto"` (pick from
+    /// the target monitor's aspect ratio). Anything else is treated as
+    /// `"auto"`; converting the string to `tili_tree::Orientation` is
+    /// `tili-daemon`'s job, since this crate can't depend on `tili-tree`.
+    pub default_root_orientation: String,
 }
 
 impl Default for Settings {
@@ -73,6 +91,9 @@ impl Default for Settings {
             mouse_follows_focus: false,
             focus_follows_monitor: false,
             auto_reload: true,
+            default_workspace: None,
+            accordion_padding: 30,
+            default_root_orientation: "auto".to_string(),
         }
     }
 }
@@ -225,6 +246,25 @@ fn parse_settings(doc: &KdlDocument) -> Settings {
     }
     if let Some(v) = children.get_arg("auto-reload").and_then(|v| v.as_bool()) {
         settings.auto_reload = v;
+    }
+    if let Some(v) = children
+        .get_arg("default-workspace")
+        .and_then(|v| v.as_string())
+    {
+        settings.default_workspace = Some(v.to_string());
+    }
+    if let Some(v) = children
+        .get_arg("accordion-padding")
+        .and_then(|v| v.as_integer())
+        .and_then(|v| u32::try_from(v).ok())
+    {
+        settings.accordion_padding = v;
+    }
+    if let Some(v) = children
+        .get_arg("default-root-orientation")
+        .and_then(|v| v.as_string())
+    {
+        settings.default_root_orientation = v.to_string();
     }
     settings
 }
@@ -426,14 +466,36 @@ mod tests {
             settings {
                 mouse-follows-focus #true
                 auto-reload #false
+                default-workspace "work"
             }
         "#;
         let config = parse(source).unwrap();
         assert_eq!(config.default_layout.as_deref(), Some("accordion"));
         assert!(config.settings.mouse_follows_focus);
         assert!(!config.settings.auto_reload);
+        assert_eq!(config.settings.default_workspace.as_deref(), Some("work"));
         // Untouched setting keeps its default.
         assert!(!config.settings.focus_follows_monitor);
+    }
+
+    #[test]
+    fn parses_accordion_padding_and_root_orientation() {
+        let source = r#"
+            settings {
+                accordion-padding 40
+                default-root-orientation "vertical"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.settings.accordion_padding, 40);
+        assert_eq!(config.settings.default_root_orientation, "vertical");
+    }
+
+    #[test]
+    fn accordion_padding_and_root_orientation_default_when_unset() {
+        let config = parse("").unwrap();
+        assert_eq!(config.settings.accordion_padding, 30);
+        assert_eq!(config.settings.default_root_orientation, "auto");
     }
 
     #[test]

@@ -13,16 +13,18 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
         },
         Command::Focus(dir) => result_response(state.focus(to_tree_direction(dir))),
         Command::Move(dir) => result_response(state.move_focused(to_tree_direction(dir))),
+        Command::Join(dir) => result_response(state.join(to_tree_direction(dir))),
+        Command::ResizeRatio { amount } => result_response(state.resize(amount)),
+        Command::OrientationSet(kind, root) => {
+            result_response(state.set_orientation(to_tree_orientation(kind), root))
+        }
         Command::ListWorkspaces => match serde_json::to_value(state.list_workspaces()) {
             Ok(payload) => Response::OkWithPayload(payload),
             Err(e) => Response::Err {
                 message: e.to_string(),
             },
         },
-        Command::WorkspaceSwitch(name) => {
-            state.switch_workspace(&name);
-            Response::Ok
-        }
+        Command::WorkspaceSwitch(name) => result_response(state.switch_workspace(&name)),
         Command::MoveNodeToWorkspace(name) => {
             result_response(state.move_focused_to_workspace(&name))
         }
@@ -31,8 +33,8 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
             state.exit_mode();
             Response::Ok
         }
-        Command::LayoutToggle => result_response(state.toggle_layout()),
-        Command::LayoutSet(kind) => result_response(state.set_layout(kind)),
+        Command::LayoutToggle(root) => result_response(state.toggle_layout(root)),
+        Command::LayoutSet(kind, root) => result_response(state.set_layout(kind, root)),
         Command::FocusMonitor => {
             state.focus_monitor_next();
             Response::Ok
@@ -55,6 +57,13 @@ fn to_tree_direction(dir: tili_ipc::Direction) -> tili_tree::Direction {
         tili_ipc::Direction::Right => tili_tree::Direction::Right,
         tili_ipc::Direction::Up => tili_tree::Direction::Up,
         tili_ipc::Direction::Down => tili_tree::Direction::Down,
+    }
+}
+
+fn to_tree_orientation(kind: tili_ipc::OrientationKind) -> tili_tree::Orientation {
+    match kind {
+        tili_ipc::OrientationKind::Horizontal => tili_tree::Orientation::Horizontal,
+        tili_ipc::OrientationKind::Vertical => tili_tree::Orientation::Vertical,
     }
 }
 
@@ -97,12 +106,12 @@ mod tests {
     #[test]
     fn layout_toggle_with_no_windows_is_an_error() {
         let mut state = WmState::default();
-        let response = dispatch(&mut state, Command::LayoutToggle);
+        let response = dispatch(&mut state, Command::LayoutToggle(false));
         assert!(matches!(response, Response::Err { .. }));
 
         let response = dispatch(
             &mut state,
-            Command::LayoutSet(tili_ipc::LayoutKind::Accordion),
+            Command::LayoutSet(tili_ipc::LayoutKind::Accordion, false),
         );
         assert!(matches!(response, Response::Err { .. }));
     }
@@ -121,8 +130,39 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_a_new_workspace_creates_it() {
+    fn switching_to_an_undeclared_workspace_is_an_error() {
         let mut state = WmState::default();
+        let response = dispatch(
+            &mut state,
+            Command::WorkspaceSwitch("entertain".to_string()),
+        );
+        assert!(matches!(response, Response::Err { .. }));
+
+        let response = dispatch(&mut state, Command::ListWorkspaces);
+        let Response::OkWithPayload(payload) = response else {
+            panic!("expected OkWithPayload");
+        };
+        let workspaces: Vec<tili_ipc::WorkspaceInfo> = serde_json::from_value(payload).unwrap();
+        assert_eq!(
+            workspaces.len(),
+            1,
+            "undeclared workspace must not be created"
+        );
+    }
+
+    #[test]
+    fn switching_to_a_declared_workspace_activates_it() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            workspaces {
+                workspace "entertain"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
         let response = dispatch(
             &mut state,
             Command::WorkspaceSwitch("entertain".to_string()),
@@ -134,10 +174,37 @@ mod tests {
             panic!("expected OkWithPayload");
         };
         let workspaces: Vec<tili_ipc::WorkspaceInfo> = serde_json::from_value(payload).unwrap();
-        assert_eq!(workspaces.len(), 2);
         let active: Vec<_> = workspaces.iter().filter(|w| w.active).collect();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].name, "entertain");
+    }
+
+    #[test]
+    fn bootstrap_main_workspace_is_dropped_once_real_workspaces_are_declared() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            workspaces {
+                workspace "work"
+                workspace "entertain"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        let response = dispatch(&mut state, Command::WorkspaceSwitch("main".to_string()));
+        assert!(
+            matches!(response, Response::Err { .. }),
+            "the internal bootstrap workspace must not be reachable once config declares real ones"
+        );
+
+        let response = dispatch(&mut state, Command::ListWorkspaces);
+        let Response::OkWithPayload(payload) = response else {
+            panic!("expected OkWithPayload");
+        };
+        let workspaces: Vec<tili_ipc::WorkspaceInfo> = serde_json::from_value(payload).unwrap();
+        assert!(!workspaces.iter().any(|w| w.name == "main"));
     }
 
     #[test]

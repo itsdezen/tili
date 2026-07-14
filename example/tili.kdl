@@ -31,6 +31,15 @@ settings {
     // Moving the cursor onto a different monitor focuses it, same as the
     // `focus-monitor` command (M10). Off by default.
     focus-follows-monitor #false
+
+    // How many points of a non-visible accordion sibling peek out from
+    // behind the active one. 0 collapses every child to the same full frame.
+    accordion-padding 30
+
+    // Orientation a workspace's root container gets when it's created for
+    // its second window: "auto" (derive from the monitor's aspect ratio),
+    // "horizontal", or "vertical".
+    default-root-orientation "auto"
 }
 
 // Global hotkeys — no external tool (skhd etc.) needed, tili captures these
@@ -51,11 +60,21 @@ keybindings mode="main" {
     bind "alt-shift-j" "move down"
     bind "alt-shift-k" "move up"
 
+    // Wraps the focused window and its neighbor into a new, perpendicular
+    // container — e.g. "join left" on a row of windows stacks the focused
+    // one with its left neighbor.
+    bind "alt-shift-g" "join left"
+
     bind "alt-w" "workspace work"
     bind "alt-e" "workspace entertain"
     bind "alt-r" "workspace random"
 
     bind "alt-slash" "layout toggle"
+
+    // Sets the focused container's split axis directly (as opposed to
+    // "layout toggle", which switches between tiles and accordion).
+    bind "alt-shift-minus" "layout horizontal"
+    bind "alt-shift-equal" "layout vertical"
 
     // Cycles which connected monitor the above all target — a no-op with
     // only one monitor. See ROADMAP.md M9.
@@ -67,6 +86,12 @@ keybindings mode="main" {
 }
 
 keybindings mode="resize" {
+    // Grows/shrinks the focused window's share of its nearest tiled
+    // container — the amount is in the container's own weight-space, not
+    // pixels, so small steps like these are the right scale.
+    bind "h" "resize -0.1"
+    bind "l" "resize 0.1"
+
     bind "escape" "mode main"
     bind "enter" "mode main"
 }

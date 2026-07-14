@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use axuielement::AXUIElement;
 use axuielement::async_api::AXNotificationStream;
 use axuielement::ax_notification::{
-    AX_TITLE_CHANGED_NOTIFICATION, AX_WINDOW_CREATED_NOTIFICATION, AX_WINDOW_MOVED_NOTIFICATION,
-    AX_WINDOW_RESIZED_NOTIFICATION, AXUI_ELEMENT_DESTROYED_NOTIFICATION,
+    AX_WINDOW_CREATED_NOTIFICATION, AX_WINDOW_MOVED_NOTIFICATION, AX_WINDOW_RESIZED_NOTIFICATION,
+    AXUI_ELEMENT_DESTROYED_NOTIFICATION,
 };
 use tokio::sync::mpsc;
 
@@ -14,12 +14,22 @@ use crate::workspace::{self, AppEvent};
 /// One notification name registered per watched app; any of these firing
 /// means "re-read this process's windows," so the exact notification
 /// content doesn't need to be threaded through — see the module docs below.
+///
+/// Deliberately excludes `AX_TITLE_CHANGED_NOTIFICATION`: title has no
+/// bearing on layout (it's only read once, at window creation, for
+/// floating-rule title matching), and some apps — terminal emulators with a
+/// prompt that embeds cwd/git-branch/clock, in particular — fire it
+/// extremely often. Watching it turned every keystroke-driven title update
+/// into a full rescan-and-relayout cycle for that app, which was fast
+/// enough to flood the daemon's event loop and starve/delay everything else
+/// (including workspace-switch commands) behind a backlog of no-op
+/// relayouts. `list-windows`'s cached title just goes briefly stale between
+/// real window events instead — an acceptable trade.
 const WINDOW_NOTIFICATIONS: &[&str] = &[
     AX_WINDOW_CREATED_NOTIFICATION,
     AXUI_ELEMENT_DESTROYED_NOTIFICATION,
     AX_WINDOW_MOVED_NOTIFICATION,
     AX_WINDOW_RESIZED_NOTIFICATION,
-    AX_TITLE_CHANGED_NOTIFICATION,
 ];
 
 /// Something the daemon should react to. Deliberately coarse-grained:

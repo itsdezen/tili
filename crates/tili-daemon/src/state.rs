@@ -89,6 +89,25 @@ pub struct WmState {
     /// M10: moving the cursor onto a different monitor changes
     /// `focused_monitor`, same as an explicit `FocusMonitor` command.
     focus_follows_monitor: bool,
+    /// Whether `apply_config` has run before. Only the *first* call
+    /// resolves and applies a real default workspace (see
+    /// `apply_config`'s doc comment) — every call after that is a hot
+    /// reload, which must never yank focus off whatever's on screen.
+    config_loaded_once: bool,
+    /// Whether the left mouse button is currently held down. While true,
+    /// `apply_windows_changed` skips its relayout — a drag-resize fires a
+    /// continuous stream of `AXWindowResized` notifications, and forcing
+    /// the tree's computed frame on every single one fights the user's
+    /// drag and flashes the screen. `on_mouse_button_up` relays out once
+    /// to snap back to the tiled layout when the drag ends.
+    mouse_button_down: bool,
+    /// How many points of a non-visible `Accordion` sibling peek out from
+    /// behind the active one — see `tili_config::Settings::accordion_padding`.
+    accordion_padding: f64,
+    /// Orientation a workspace root gets when created for its second
+    /// window — `None` means "auto" (derive from the target monitor's
+    /// aspect ratio in `root_orientation_hint`).
+    default_root_orientation: Option<tili_tree::Orientation>,
 }
 
 impl Default for WmState {
@@ -118,6 +137,10 @@ impl Default for WmState {
             floating_defaults: tili_config::FloatingDefaults::default(),
             mouse_follows_focus: false,
             focus_follows_monitor: false,
+            config_loaded_once: false,
+            mouse_button_down: false,
+            accordion_padding: 30.0,
+            default_root_orientation: None,
         }
     }
 }
@@ -133,13 +156,29 @@ impl WmState {
     /// refreshed. Re-lays-out the active workspace's tiled windows
     /// afterward.
     pub fn apply_windows_changed(&mut self, pid: i32, mut fresh: Vec<AxWindow>) {
+        eprintln!(
+            "DEBUG apply_windows_changed pid={pid} received={}",
+            fresh.len()
+        );
         // Zero-size entries are usually menu-extra/phantom AX windows, not
         // real user-facing ones — skip them rather than giving them tiled
         // screen real estate.
         fresh.retain(|w| {
             let frame = w.frame();
-            frame.width > 0.0 && frame.height > 0.0
+            let keep = frame.width > 0.0 && frame.height > 0.0;
+            if !keep {
+                eprintln!(
+                    "DEBUG apply_windows_changed pid={pid} dropped zero-size id={} title={:?} frame={frame:?}",
+                    w.id(),
+                    w.title()
+                );
+            }
+            keep
         });
+        eprintln!(
+            "DEBUG apply_windows_changed pid={pid} retained={}",
+            fresh.len()
+        );
         let fresh_ids: std::collections::HashSet<WindowId> =
             fresh.iter().map(AxWindow::id).collect();
 
@@ -167,8 +206,30 @@ impl WmState {
             self.windows.insert(id, window);
 
             if !is_new {
+                // Parking is a one-shot nudge at the moment a workspace
+                // becomes inactive (see `park`/`switch_workspace`), not a
+                // continuously-enforced invariant — if the real window
+                // drifts back on screen afterward (some apps resist an
+                // off-screen move, or just re-notify without actually
+                // moving), nothing previously re-asserted it. Every
+                // refresh of an already-known window re-checks this
+                // instead. `park`'s target is idempotent (see
+                // `AxWindow::set_position`'s no-op-if-unchanged guard), so
+                // calling it redundantly here whenever the window truly is
+                // already parked costs nothing.
+                let needs_repark = self
+                    .placements
+                    .get(&id)
+                    .is_some_and(|p| !self.active_workspace.values().any(|w| w == &p.workspace));
+                if needs_repark {
+                    self.park(id, 0);
+                }
                 continue;
             }
+            eprintln!(
+                "DEBUG apply_windows_changed pid={pid} id={id} is_new floating={}",
+                floating_frame.is_some()
+            );
 
             if let Some(frame) = floating_frame {
                 self.placements.insert(
@@ -183,7 +244,10 @@ impl WmState {
                 }
             } else {
                 let near = self.workspace_focus.get(&active_workspace).copied();
-                let node = self.active_tree_mut().insert_window(id, near);
+                let root_orientation = self.root_orientation_hint();
+                let node = self
+                    .active_tree_mut()
+                    .insert_window(id, near, root_orientation);
                 self.workspace_focus
                     .entry(active_workspace.clone())
                     .or_insert(node);
@@ -197,7 +261,17 @@ impl WmState {
             }
         }
 
-        self.relayout_active();
+        eprintln!(
+            "DEBUG apply_windows_changed pid={pid} mouse_button_down={} active_workspace={active_workspace}",
+            self.mouse_button_down
+        );
+        if !self.mouse_button_down {
+            self.relayout_active();
+        } else {
+            eprintln!(
+                "DEBUG apply_windows_changed pid={pid} skipped relayout_active (mouse button down)"
+            );
+        }
     }
 
     /// Drops every window belonging to a process that just terminated,
@@ -263,6 +337,37 @@ impl WmState {
             self.workspaces.entry(workspace.name.clone()).or_default();
         }
 
+        // Only on the very first load (daemon startup, before any real
+        // window has been scanned — `apply_config` always runs before the
+        // event loop starts draining `WindowsChanged` events): swap the
+        // internal `DEFAULT_WORKSPACE` seed for a real, user-declared one,
+        // so windows present at startup don't land in a "main" workspace
+        // that doesn't exist in the user's config. A later hot reload must
+        // never do this — that would yank focus off whatever's on screen.
+        if !self.config_loaded_once {
+            self.config_loaded_once = true;
+            if let Some(default_name) = resolve_default_workspace(config) {
+                self.active_workspace
+                    .insert(self.focused_monitor, default_name);
+            }
+            // The bootstrap seed is only a placeholder until real
+            // workspaces are declared — once they are, drop it (unless the
+            // user's own config happens to declare a workspace literally
+            // named "main", in which case the declare-loop above already
+            // treats it as a normal one) so `switch_workspace` can no
+            // longer target an undeclared name through it.
+            if !config.workspaces.is_empty()
+                && !config
+                    .workspaces
+                    .iter()
+                    .any(|w| w.name == DEFAULT_WORKSPACE)
+            {
+                self.workspaces.remove(DEFAULT_WORKSPACE);
+                self.active_workspace
+                    .retain(|_, name| name != DEFAULT_WORKSPACE);
+            }
+        }
+
         self.mode_bindings = config
             .keybindings
             .iter()
@@ -316,6 +421,12 @@ impl WmState {
 
         self.mouse_follows_focus = config.settings.mouse_follows_focus;
         self.focus_follows_monitor = config.settings.focus_follows_monitor;
+        self.accordion_padding = f64::from(config.settings.accordion_padding);
+        self.default_root_orientation = match config.settings.default_root_orientation.as_str() {
+            "horizontal" => Some(tili_tree::Orientation::Horizontal),
+            "vertical" => Some(tili_tree::Orientation::Vertical),
+            _ => None,
+        };
 
         self.relayout_all_visible();
     }
@@ -475,29 +586,83 @@ impl WmState {
         Ok(())
     }
 
-    /// Swaps the focused window with its neighbor in `dir` — the focused
-    /// window ends up physically where the neighbor was (and vice versa),
-    /// and focus follows it there.
+    /// Moves the focused window one step in `dir`, re-parenting it through
+    /// the tree (see `Tree::move_in_direction`) rather than just swapping
+    /// which window sits where — the moved window keeps its own `NodeId`,
+    /// so it stays "the focused one" without needing to look up a target.
     pub fn move_focused(&mut self, dir: Direction) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
-        let target = self
-            .active_tree_mut()
-            .focus_in_direction(current, dir)
-            .ok_or("no window in that direction")?;
-        self.active_tree_mut().swap_windows(current, target);
-        self.set_focused_node(target);
+        if !self.active_tree_mut().move_in_direction(current, dir) {
+            return Err("no window in that direction".to_string());
+        }
+        self.set_focused_node(current);
         self.relayout_active();
         self.raise_focused();
         Ok(())
     }
 
-    /// Toggles the focused window's parent container between `Split`
-    /// (tiled) and `Accordion` (stacked, one visible at a time). Errors if
-    /// nothing's focused, or if the focused window is alone at the tree's
-    /// root with no container to toggle.
-    pub fn toggle_layout(&mut self) -> Result<(), String> {
+    /// Wraps the focused window and its neighbor in `dir` into a new,
+    /// perpendicular container — AeroSpace's `join-with`.
+    pub fn join(&mut self, dir: Direction) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
-        if self.active_tree_mut().toggle_layout(current) {
+        if self.active_tree_mut().join_with(current, dir) {
+            self.relayout_active();
+            Ok(())
+        } else {
+            Err("nothing to join in that direction".to_string())
+        }
+    }
+
+    /// Grows/shrinks the focused window's share of its nearest tiled
+    /// container by `amount` (weight-space, not pixels — see
+    /// `Tree::resize_weight`).
+    pub fn resize(&mut self, amount: f32) -> Result<(), String> {
+        let current = self.focused_node().ok_or("no window is focused")?;
+        if self.active_tree_mut().resize_weight(current, amount) {
+            self.relayout_active();
+            Ok(())
+        } else {
+            Err("nothing to resize — no tiled container here".to_string())
+        }
+    }
+
+    /// Sets the focused window's parent container's orientation (or the
+    /// workspace root's, if `root`) — matches AeroSpace's `layout
+    /// horizontal`/`layout vertical` (optionally `--root`).
+    pub fn set_orientation(
+        &mut self,
+        orientation: tili_tree::Orientation,
+        root: bool,
+    ) -> Result<(), String> {
+        let current = self.focused_node().ok_or("no window is focused")?;
+        let changed = if root {
+            self.active_tree_mut().set_root_orientation(orientation)
+        } else {
+            self.active_tree_mut().set_orientation(current, orientation)
+        };
+        if changed {
+            self.relayout_active();
+            Ok(())
+        } else {
+            Err("nothing to set — only one window here".to_string())
+        }
+    }
+
+    /// Toggles a container between `Split` (tiled) and `Accordion`
+    /// (stacked, one visible at a time) — the focused window's immediate
+    /// parent, or (`root: true`) the workspace's root container instead
+    /// (matches AeroSpace's `layout --root`; see `Tree::toggle_root_layout`
+    /// — still a single container, not a recursive apply-to-everything).
+    /// Errors if nothing's focused, or if the target container is a lone
+    /// window with no container to toggle.
+    pub fn toggle_layout(&mut self, root: bool) -> Result<(), String> {
+        let current = self.focused_node().ok_or("no window is focused")?;
+        let toggled = if root {
+            self.active_tree_mut().toggle_root_layout()
+        } else {
+            self.active_tree_mut().toggle_layout(current)
+        };
+        if toggled {
             self.relayout_active();
             Ok(())
         } else {
@@ -505,18 +670,28 @@ impl WmState {
         }
     }
 
-    /// Sets the focused window's parent container to a specific layout
-    /// kind — a no-op if it's already that kind, otherwise the same
-    /// toggle `toggle_layout` does (there are only two kinds, so "set" and
+    /// Sets a container (focused window's parent, or the workspace root if
+    /// `root: true` — see `toggle_layout`) to a specific layout kind — a
+    /// no-op if it's already that kind, otherwise the same toggle
+    /// `toggle_layout` does (there are only two kinds, so "set" and
     /// "toggle away from the other one" are the same operation).
-    pub fn set_layout(&mut self, kind: tili_ipc::LayoutKind) -> Result<(), String> {
+    pub fn set_layout(&mut self, kind: tili_ipc::LayoutKind, root: bool) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
-        let is_accordion = self.active_tree().is_accordion_container(current);
+        let is_accordion = if root {
+            self.active_tree().is_root_accordion()
+        } else {
+            self.active_tree().is_accordion_container(current)
+        };
         let want_accordion = matches!(kind, tili_ipc::LayoutKind::Accordion);
         if is_accordion == want_accordion {
             return Ok(());
         }
-        if self.active_tree_mut().toggle_layout(current) {
+        let toggled = if root {
+            self.active_tree_mut().toggle_root_layout()
+        } else {
+            self.active_tree_mut().toggle_layout(current)
+        };
+        if toggled {
             self.relayout_active();
             Ok(())
         } else {
@@ -535,11 +710,19 @@ impl WmState {
     /// swaps to whatever was on `focused_monitor` — two monitors never show
     /// the same workspace at once, since each has its own `Tree` layout
     /// computed against its own frame.
-    pub fn switch_workspace(&mut self, name: &str) {
+    ///
+    /// Errors if `name` isn't a workspace declared in config — workspaces
+    /// are only ever created by `apply_config`'s declare-loop, never
+    /// on-the-fly by name.
+    pub fn switch_workspace(&mut self, name: &str) -> Result<(), String> {
+        if !self.workspaces.contains_key(name) {
+            return Err(format!("workspace '{name}' isn't declared in config"));
+        }
+
         let monitor_id = self.focused_monitor;
         let current = self.active_workspace.get(&monitor_id).cloned();
         if current.as_deref() == Some(name) {
-            return;
+            return Ok(());
         }
 
         let swap_monitor = self
@@ -573,7 +756,6 @@ impl WmState {
             }
         }
 
-        self.workspaces.entry(name.to_string()).or_default();
         self.active_workspace.insert(monitor_id, name.to_string());
 
         self.relayout_active();
@@ -592,6 +774,8 @@ impl WmState {
             self.set_focused_node(node);
             self.raise_focused();
         }
+
+        Ok(())
     }
 
     /// Moves the focused window into a different workspace's tree and
@@ -600,6 +784,12 @@ impl WmState {
     /// relaid-out there right away instead of sitting parked. Focus moves
     /// to whatever the active workspace suggests next.
     pub fn move_focused_to_workspace(&mut self, target_name: &str) -> Result<(), String> {
+        if !self.workspaces.contains_key(target_name) {
+            return Err(format!(
+                "workspace '{target_name}' isn't declared in config"
+            ));
+        }
+
         let active_workspace = self.active_workspace_name();
         if target_name == active_workspace {
             return Ok(());
@@ -621,8 +811,12 @@ impl WmState {
         }
 
         let target_focus_hint = self.workspace_focus.get(target_name).copied();
-        let target_tree = self.workspaces.entry(target_name.to_string()).or_default();
-        let new_node = target_tree.insert_window(id, target_focus_hint);
+        let root_orientation = self.root_orientation_hint();
+        let target_tree = self
+            .workspaces
+            .get_mut(target_name)
+            .expect("validated above");
+        let new_node = target_tree.insert_window(id, target_focus_hint, root_orientation);
         self.workspace_focus
             .insert(target_name.to_string(), new_node);
         self.placements.insert(
@@ -711,8 +905,23 @@ impl WmState {
     }
 
     fn set_focused_node(&mut self, node: NodeId) {
-        self.workspace_focus
-            .insert(self.active_workspace_name(), node);
+        let name = self.active_workspace_name();
+        self.workspace_focus.insert(name, node);
+        self.active_tree_mut().record_focus(node);
+    }
+
+    /// Orientation a workspace root gets when it's created for its second
+    /// window — the configured `default_root_orientation` if explicit,
+    /// else derived from the focused monitor's aspect ratio (wide -> rows
+    /// side by side, tall -> stacked).
+    fn root_orientation_hint(&self) -> tili_tree::Orientation {
+        if let Some(o) = self.default_root_orientation {
+            return o;
+        }
+        match self.monitor_frame(self.focused_monitor) {
+            Some(frame) if frame.height > frame.width => tili_tree::Orientation::Vertical,
+            _ => tili_tree::Orientation::Horizontal,
+        }
     }
 
     fn raise_focused(&self) {
@@ -752,6 +961,20 @@ impl WmState {
         }
     }
 
+    /// Marks the left mouse button as held — see `mouse_button_down`'s doc
+    /// comment for why this suppresses relayout.
+    pub fn on_mouse_button_down(&mut self) {
+        self.mouse_button_down = true;
+    }
+
+    /// Marks the left mouse button as released and relays out once, so a
+    /// window that was just drag-resized snaps back to the tree's actual
+    /// tiled frame instead of staying wherever the drag left it.
+    pub fn on_mouse_button_up(&mut self) {
+        self.mouse_button_down = false;
+        self.relayout_active();
+    }
+
     /// Moves a window off-screen without resizing it, outside the combined
     /// bounds of every *currently connected* monitor so a parked window can
     /// never land on a real display no matter how many are attached or how
@@ -762,8 +985,14 @@ impl WmState {
         let bounds = tili_ax::combined_bounds(&self.monitors);
         let x = bounds.x + bounds.width + PARK_MARGIN + (offset_index as f64 * PARK_OFFSET_STEP);
         let y = bounds.y;
+        let current_frame = self.windows.get(&id).map(tili_ax::AxWindow::frame);
+        eprintln!(
+            "DEBUG park id={id} current_frame={current_frame:?} bounds={bounds:?} target=({x}, {y})"
+        );
         if let Some(window) = self.windows.get_mut(&id) {
             window.set_position(x, y);
+        } else {
+            eprintln!("DEBUG park id={id} not found in self.windows — nothing to move");
         }
     }
 
@@ -802,19 +1031,35 @@ impl WmState {
     /// (see `reposition_floating_for_monitor`).
     fn relayout_monitor(&mut self, monitor_id: u32) {
         let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
+            eprintln!(
+                "DEBUG relayout_monitor monitor_id={monitor_id} no active workspace — skipped"
+            );
             return;
         };
         let Some(area) = self.monitor_frame(monitor_id) else {
+            eprintln!(
+                "DEBUG relayout_monitor monitor_id={monitor_id} workspace={name} no monitor frame — skipped"
+            );
             return;
         };
         let Some(tree) = self.workspaces.get(&name) else {
+            eprintln!(
+                "DEBUG relayout_monitor monitor_id={monitor_id} workspace={name} no tree entry — skipped"
+            );
             return;
         };
         let gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
-        let placements = tree.layout(area, gaps);
+        let placements = tree.layout(area, gaps, self.accordion_padding);
+        eprintln!(
+            "DEBUG relayout_monitor monitor_id={monitor_id} workspace={name} area={area:?} placements={placements:?}"
+        );
         for (id, rect) in placements {
             if let Some(window) = self.windows.get_mut(&id) {
                 self.frame_setter.set_frame(window, rect);
+            } else {
+                eprintln!(
+                    "DEBUG relayout_monitor monitor_id={monitor_id} id={id} not found in self.windows — nothing to move"
+                );
             }
         }
     }
@@ -899,6 +1144,19 @@ impl WmState {
             height,
         })
     }
+}
+
+/// Which workspace should be active at daemon startup:
+/// `settings.default-workspace` if it names a declared workspace, else the
+/// alphabetically-first declared workspace, else `None` (config declares no
+/// workspaces at all — caller keeps the internal `DEFAULT_WORKSPACE` seed).
+fn resolve_default_workspace(config: &tili_config::Config) -> Option<String> {
+    if let Some(name) = &config.settings.default_workspace
+        && config.workspaces.iter().any(|w| &w.name == name)
+    {
+        return Some(name.clone());
+    }
+    config.workspaces.iter().map(|w| &w.name).min().cloned()
 }
 
 fn to_tree_gaps(gaps: tili_config::Gaps) -> Gaps {

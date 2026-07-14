@@ -13,7 +13,7 @@ pub use display::{
 pub use enumerate::{list_windows, list_windows_for_pid};
 pub use frame_setter::{InstantFrameSetter, WindowFrameSetter};
 pub use hotkey::{KeyCombo, parse_key_combo, spawn_hotkey_tap};
-pub use mouse::{spawn_mouse_watcher, warp_cursor_to};
+pub use mouse::{MouseSignal, spawn_mouse_watcher, warp_cursor_to};
 pub use watch::{WmEvent, spawn_event_watcher};
 pub use window::AxWindow;
 pub use workspace::{AppEvent, bundle_id_for_pid, spawn_workspace_watcher};

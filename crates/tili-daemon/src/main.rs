@@ -30,7 +30,7 @@ async fn main() -> std::io::Result<()> {
     let active_combos = Arc::new(Mutex::new(HashSet::new()));
     let mut hotkeys = spawn_hotkey_bridge(active_combos.clone());
     let mut displays_changed = spawn_display_watcher_bridge();
-    let mut mouse_moves = spawn_mouse_watcher_bridge();
+    let mut mouse_events = spawn_mouse_watcher_bridge();
     let mut state = WmState::default();
 
     let config_path = tili_config::default_config_path();
@@ -110,10 +110,19 @@ async fn main() -> std::io::Result<()> {
                 // callback doesn't say which, so just re-enumerate.
                 state.on_displays_changed();
             }
-            Some((x, y)) = mouse_moves.recv() => {
-                // Throttled cursor positions (M10, focus-follows-monitor) —
-                // a no-op inside `on_mouse_moved` unless that setting is on.
-                state.on_mouse_moved(x, y);
+            Some(signal) = mouse_events.recv() => {
+                match signal {
+                    // Throttled cursor positions (M10, focus-follows-monitor)
+                    // — a no-op inside `on_mouse_moved` unless that setting
+                    // is on.
+                    tili_ax::MouseSignal::Moved(x, y) => state.on_mouse_moved(x, y),
+                    // Suppresses relayout for the duration of a drag-resize
+                    // (M10.1) so `apply_windows_changed` doesn't fight the
+                    // user's drag; button-up relays out once to snap back
+                    // to the tiled layout.
+                    tili_ax::MouseSignal::ButtonDown => state.on_mouse_button_down(),
+                    tili_ax::MouseSignal::ButtonUp => state.on_mouse_button_up(),
+                }
             }
         }
     }
@@ -224,14 +233,14 @@ fn spawn_display_watcher_bridge() -> tokio::sync::mpsc::UnboundedReceiver<()> {
 /// into a tokio channel, same pattern as the other bridges (M10). Runs
 /// unconditionally regardless of `focus-follows-monitor`, same as the
 /// hotkey tap running regardless of whether any keybindings are
-/// configured — `WmState::on_mouse_moved` is what actually gates on the
-/// setting.
-fn spawn_mouse_watcher_bridge() -> tokio::sync::mpsc::UnboundedReceiver<(f64, f64)> {
+/// configured — `WmState::on_mouse_moved`/`on_mouse_button_down`/
+/// `on_mouse_button_up` are what actually gate on settings/state.
+fn spawn_mouse_watcher_bridge() -> tokio::sync::mpsc::UnboundedReceiver<tili_ax::MouseSignal> {
     let sync_rx = tili_ax::spawn_mouse_watcher();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        while let Ok(point) = sync_rx.recv() {
-            if tx.send(point).is_err() {
+        while let Ok(signal) = sync_rx.recv() {
+            if tx.send(signal).is_err() {
                 break;
             }
         }

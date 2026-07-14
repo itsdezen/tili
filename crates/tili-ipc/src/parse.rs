@@ -1,4 +1,4 @@
-use crate::{Command, Direction, LayoutKind};
+use crate::{Command, Direction, LayoutKind, OrientationKind};
 
 /// Parses a keybinding's command string (the second argument of a KDL
 /// `bind "key" "command"` line, e.g. `"focus left"`) into a `Command`.
@@ -12,11 +12,21 @@ pub fn parse(command: &str) -> Command {
     match tokens.as_slice() {
         ["focus", dir] => direction(dir).map_or_else(|| raw(&tokens), Command::Focus),
         ["move", dir] => direction(dir).map_or_else(|| raw(&tokens), Command::Move),
+        ["join", dir] => direction(dir).map_or_else(|| raw(&tokens), Command::Join),
         ["workspace", name] => Command::WorkspaceSwitch((*name).to_string()),
         ["move-node-to-workspace", name] => Command::MoveNodeToWorkspace((*name).to_string()),
-        ["layout", "toggle"] => Command::LayoutToggle,
-        ["layout", "tiles"] => Command::LayoutSet(LayoutKind::Tiles),
-        ["layout", "accordion"] => Command::LayoutSet(LayoutKind::Accordion),
+        ["layout", "toggle"] => Command::LayoutToggle(false),
+        ["layout", "toggle", "root"] => Command::LayoutToggle(true),
+        ["layout", "tiles"] => Command::LayoutSet(LayoutKind::Tiles, false),
+        ["layout", "tiles", "root"] => Command::LayoutSet(LayoutKind::Tiles, true),
+        ["layout", "accordion"] => Command::LayoutSet(LayoutKind::Accordion, false),
+        ["layout", "accordion", "root"] => Command::LayoutSet(LayoutKind::Accordion, true),
+        ["layout", "horizontal"] => Command::OrientationSet(OrientationKind::Horizontal, false),
+        ["layout", "horizontal", "root"] => {
+            Command::OrientationSet(OrientationKind::Horizontal, true)
+        }
+        ["layout", "vertical"] => Command::OrientationSet(OrientationKind::Vertical, false),
+        ["layout", "vertical", "root"] => Command::OrientationSet(OrientationKind::Vertical, true),
         ["resize", amount] => amount
             .parse::<f32>()
             .map_or_else(|_| raw(&tokens), |amount| Command::ResizeRatio { amount }),
@@ -77,10 +87,34 @@ mod tests {
 
     #[test]
     fn parses_layout_commands() {
-        assert!(matches!(parse("layout toggle"), Command::LayoutToggle));
+        assert!(matches!(
+            parse("layout toggle"),
+            Command::LayoutToggle(false)
+        ));
+        assert!(matches!(
+            parse("layout toggle root"),
+            Command::LayoutToggle(true)
+        ));
         assert!(matches!(
             parse("layout tiles"),
-            Command::LayoutSet(LayoutKind::Tiles)
+            Command::LayoutSet(LayoutKind::Tiles, false)
+        ));
+        assert!(matches!(
+            parse("layout accordion root"),
+            Command::LayoutSet(LayoutKind::Accordion, true)
+        ));
+    }
+
+    #[test]
+    fn parses_join_and_orientation_commands() {
+        assert!(matches!(parse("join left"), Command::Join(Direction::Left)));
+        assert!(matches!(
+            parse("layout horizontal"),
+            Command::OrientationSet(OrientationKind::Horizontal, false)
+        ));
+        assert!(matches!(
+            parse("layout vertical root"),
+            Command::OrientationSet(OrientationKind::Vertical, true)
         ));
     }
 

@@ -28,6 +28,15 @@ pub enum Direction {
     Down,
 }
 
+/// Which of a container's two rendering modes is active — orthogonal to
+/// `Orientation` (a container has both, independently, matching AeroSpace's
+/// model: "Every container has two properties: Layout ... Orientation").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Tiles,
+    Accordion,
+}
+
 /// Spacing applied during layout — config-driven from M5 on. `outer` is
 /// CSS-shorthand ordered: (top, right, bottom, left).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -42,25 +51,43 @@ new_key_type! { pub struct NodeId; }
 /// Resolved once in `tili-ax` and treated as an opaque key everywhere else.
 pub type WindowId = u32;
 
+/// A container holds an arbitrary number of children (windows and/or
+/// nested containers) — not a binary tree. `weights` are per-child
+/// proportions consumed by `Tiles` layout (arbitrary positive numbers,
+/// normalized by their sum — not required to add up to any particular
+/// total). `mru` ("most recently used") is the index of whichever child
+/// was most recently focused/moved-to: it doubles as both "which child is
+/// visible" for `Accordion` and "which child navigation descends into" for
+/// `Tiles` (matching AeroSpace's `mostRecentChild`, which unifies the two
+/// concepts rather than tracking them separately).
 #[derive(Debug, Clone)]
 pub enum Node {
-    Split {
+    Container {
+        layout: Layout,
         orientation: Orientation,
         children: Vec<NodeId>,
-        ratios: Vec<f32>,
-    },
-    Accordion {
-        children: Vec<NodeId>,
-        active: usize,
+        weights: Vec<f32>,
+        mru: usize,
     },
     Window {
         window: WindowId,
     },
 }
 
-/// The container tree for one workspace: a binary tree of splits with
+/// The container tree for one workspace: an n-ary tree of containers with
 /// windows at the leaves. Pure data + algorithms — no macOS/AX types appear
 /// anywhere in this crate, so all of this is unit-testable without a Mac.
+///
+/// Two invariants hold after every mutating call (enforced by `normalize`,
+/// run at the end of every one of them): no container has exactly one
+/// child (it gets flattened away — the root is the one place this
+/// "flattening" bottoms out as a bare `Window` leaf with no wrapping
+/// container at all, rather than disappearing entirely), and no `Tiles`
+/// container is directly nested inside a same-orientation `Tiles` parent
+/// (the child's children get spliced into the parent instead). A `Window`
+/// leaf's `NodeId` never changes once inserted — only containers are
+/// created/destroyed — so callers (`tili-daemon`'s `workspace_focus`) can
+/// hold onto a leaf's `NodeId` across arbitrary tree mutations.
 #[derive(Debug, Default)]
 pub struct Tree {
     nodes: SlotMap<NodeId, Node>,
@@ -83,9 +110,9 @@ impl Tree {
 
     /// A reasonable node to focus when this tree becomes the active
     /// workspace and nothing better (a remembered previous focus) is
-    /// available — the root's first leaf, or `None` if the tree is empty.
+    /// available — the root's MRU leaf, or `None` if the tree is empty.
     pub fn default_focus(&self) -> Option<NodeId> {
-        self.root.map(|root| self.first_leaf(root))
+        self.root.map(|root| self.mru_leaf(root))
     }
 
     pub fn window_at(&self, node: NodeId) -> Option<WindowId> {
@@ -114,14 +141,24 @@ impl Tree {
         })
     }
 
-    /// Inserts a new window as a sibling of `near` (splitting it into a new
-    /// 2-child `Split`), or as the sole root if the tree is empty. Returns
+    /// Inserts a new window as a sibling of `near`, in `near`'s own parent
+    /// container (i3/AeroSpace-style flat insertion — never wraps `near` in
+    /// a fresh 2-child container the way a binary-tree insert would), or as
+    /// the sole root if the tree is empty. `root_orientation` only matters
+    /// the one time this call is what turns a lone-window root into an
+    /// actual container (the tree's second-ever window) — every other call
+    /// inserts into an already-oriented container and ignores it. Returns
     /// the new leaf's id — callers typically focus it immediately.
     ///
     /// If `near` isn't a valid leaf in this tree (stale id, or a container
-    /// id), falls back to the tree's root so the window still lands
+    /// id), falls back to the tree's MRU leaf so the window still lands
     /// somewhere sensible rather than being dropped.
-    pub fn insert_window(&mut self, window: WindowId, near: Option<NodeId>) -> NodeId {
+    pub fn insert_window(
+        &mut self,
+        window: WindowId,
+        near: Option<NodeId>,
+        root_orientation: Orientation,
+    ) -> NodeId {
         let new_leaf = self.nodes.insert(Node::Window { window });
 
         let Some(root) = self.root else {
@@ -130,97 +167,446 @@ impl Tree {
         };
 
         let target = near.filter(|&n| self.nodes.contains_key(n)).unwrap_or(root);
-        let target = self.first_leaf(target);
-        self.split_leaf(target, new_leaf);
+        let target = self.mru_leaf(target);
+
+        match self.parents.get(&target).copied() {
+            Some(parent) => {
+                if let Some(Node::Container {
+                    children,
+                    weights,
+                    mru,
+                    ..
+                }) = self.nodes.get_mut(parent)
+                {
+                    let idx = children
+                        .iter()
+                        .position(|&c| c == target)
+                        .unwrap_or(children.len().saturating_sub(1));
+                    let avg_weight = if weights.is_empty() {
+                        1.0
+                    } else {
+                        weights.iter().sum::<f32>() / weights.len() as f32
+                    };
+                    children.insert(idx + 1, new_leaf);
+                    weights.insert(idx + 1, avg_weight);
+                    *mru = idx + 1;
+                }
+                self.parents.insert(new_leaf, parent);
+            }
+            None => {
+                // `target` (== root) has no parent container yet — it's a
+                // lone window root. This insert is what creates the very
+                // first container.
+                let new_root = self.nodes.insert(Node::Container {
+                    layout: Layout::Tiles,
+                    orientation: root_orientation,
+                    children: vec![target, new_leaf],
+                    weights: vec![1.0, 1.0],
+                    mru: 1,
+                });
+                self.parents.insert(target, new_root);
+                self.parents.insert(new_leaf, new_root);
+                self.root = Some(new_root);
+            }
+        }
+
+        self.normalize();
         new_leaf
     }
 
-    fn split_leaf(&mut self, existing_leaf: NodeId, new_leaf: NodeId) {
-        let parent = self.parents.get(&existing_leaf).copied();
-        let new_split = self.nodes.insert(Node::Split {
-            // New splits default to side-by-side. A smarter aspect-ratio
-            // heuristic (wide area -> horizontal, tall area -> vertical) is
-            // a reasonable future refinement, not required for M3.
-            orientation: Orientation::Horizontal,
-            children: vec![existing_leaf, new_leaf],
-            ratios: vec![0.5, 0.5],
-        });
-        self.parents.insert(existing_leaf, new_split);
-        self.parents.insert(new_leaf, new_split);
-
-        match parent {
-            Some(p) => {
-                self.replace_child(p, existing_leaf, new_split);
-                self.parents.insert(new_split, p);
-            }
-            None => self.root = Some(new_split),
-        }
-    }
-
-    /// Removes a window from the tree, collapsing its now-single-child
-    /// parent split if needed. Returns a reasonable node to focus next
-    /// (a remaining sibling), or `None` if the tree is now empty.
+    /// Removes a window from the tree, collapsing any now-empty or
+    /// now-single-child ancestor containers. Returns a reasonable node to
+    /// focus next (the MRU leaf of whatever's left near where the removed
+    /// window was), or `None` if the tree is now empty.
     pub fn remove_window(&mut self, window: WindowId) -> Option<NodeId> {
         let leaf = self.find_node(window)?;
-        let parent = self.parents.remove(&leaf);
-        self.nodes.remove(leaf);
-
-        let Some(parent_id) = parent else {
+        let Some(mut container_id) = self.parents.remove(&leaf) else {
+            // The removed leaf was the lone root window.
+            self.nodes.remove(leaf);
             self.root = None;
             return None;
         };
+        self.nodes.remove(leaf);
+        self.remove_child(container_id, leaf);
 
-        let remaining_after_removal = {
-            let Some(Node::Split {
-                children, ratios, ..
-            }) = self.nodes.get_mut(parent_id)
-            else {
-                return None;
-            };
-            let idx = children.iter().position(|&c| c == leaf)?;
-            children.remove(idx);
-            if idx < ratios.len() {
-                ratios.remove(idx);
+        // Walk up removing now-empty containers (a container that drops to
+        // exactly one child is left for `normalize`'s flatten pass, since
+        // it's still a well-formed — if soon-to-be-flattened — tree).
+        loop {
+            let is_empty = matches!(self.nodes.get(container_id), Some(Node::Container { children, .. }) if children.is_empty());
+            if !is_empty {
+                break;
             }
-            (children.len() == 1).then(|| children[0])
-        };
-
-        if let Some(remaining_child) = remaining_after_removal {
-            let grandparent = self.parents.remove(&parent_id);
-            self.nodes.remove(parent_id);
+            let grandparent = self.parents.remove(&container_id);
+            self.nodes.remove(container_id);
             match grandparent {
                 Some(gp) => {
-                    self.replace_child(gp, parent_id, remaining_child);
-                    self.parents.insert(remaining_child, gp);
+                    self.remove_child(gp, container_id);
+                    container_id = gp;
                 }
                 None => {
-                    self.root = Some(remaining_child);
-                    self.parents.remove(&remaining_child);
+                    self.root = None;
+                    return None;
                 }
             }
-            Some(self.first_leaf(remaining_child))
-        } else {
-            let Some(Node::Split { children, .. }) = self.nodes.get(parent_id) else {
-                return None;
-            };
-            children.first().map(|&c| self.first_leaf(c))
+        }
+
+        let focus = self.mru_leaf(container_id);
+        self.normalize();
+        Some(focus)
+    }
+
+    /// Removes `child` from `container`'s children/weights, keeping `mru`
+    /// pointing at the same surviving child it did before removal (not
+    /// whatever now sits at its old index). Does not touch `child` itself
+    /// or `self.parents[child]` — callers that are relocating (not
+    /// deleting) `child` handle that separately.
+    fn remove_child(&mut self, container: NodeId, child: NodeId) {
+        let Some(Node::Container {
+            children,
+            weights,
+            mru,
+            ..
+        }) = self.nodes.get_mut(container)
+        else {
+            return;
+        };
+        let Some(idx) = children.iter().position(|&c| c == child) else {
+            return;
+        };
+        children.remove(idx);
+        if idx < weights.len() {
+            weights.remove(idx);
+        }
+        if !children.is_empty() {
+            if idx < *mru {
+                *mru -= 1;
+            } else if *mru >= children.len() {
+                *mru = children.len() - 1;
+            }
         }
     }
 
-    /// Walks up from `from` to the nearest ancestor `Split` whose
-    /// orientation matches `dir`'s axis and where `from` isn't already the
-    /// boundary child, then descends into the neighboring subtree.
-    /// Returns `None` if `from` is already at the tree's edge in `dir`.
-    pub fn navigate(&self, from: NodeId, dir: Direction) -> Option<NodeId> {
-        let axis = match dir {
-            Direction::Left | Direction::Right => Orientation::Horizontal,
-            Direction::Up | Direction::Down => Orientation::Vertical,
+    /// Detaches `node` from `parent`'s children (bookkeeping only — `node`
+    /// stays alive, just orphaned) so it can be re-inserted elsewhere.
+    fn detach(&mut self, node: NodeId, parent: NodeId) {
+        self.parents.remove(&node);
+        self.remove_child(parent, node);
+    }
+
+    /// Inserts `node` as `anchor`'s new sibling, immediately before it if
+    /// `before` else immediately after, taking on `anchor`'s current weight
+    /// (split — this is a fresh landing spot, not a resize) and becoming
+    /// the container's new MRU child.
+    fn insert_sibling(&mut self, node: NodeId, anchor: NodeId, before: bool) {
+        let Some(&parent) = self.parents.get(&anchor) else {
+            return;
         };
+        let Some(Node::Container {
+            children,
+            weights,
+            mru,
+            ..
+        }) = self.nodes.get_mut(parent)
+        else {
+            return;
+        };
+        let Some(anchor_idx) = children.iter().position(|&c| c == anchor) else {
+            return;
+        };
+        let insert_idx = if before { anchor_idx } else { anchor_idx + 1 };
+        let weight = weights.get(anchor_idx).copied().unwrap_or(1.0);
+        children.insert(insert_idx, node);
+        weights.insert(insert_idx, weight);
+        *mru = insert_idx;
+        self.parents.insert(node, parent);
+    }
+
+    /// Records that `node` was just focused: walks from `node` to the root,
+    /// setting each ancestor container's `mru` to the branch leading to
+    /// `node`. This is what makes `Accordion` show the right child and
+    /// `Tiles` navigation descend to where the user actually was, rather
+    /// than always landing on a container's first child.
+    pub fn record_focus(&mut self, node: NodeId) {
+        let mut child = node;
+        while let Some(&parent) = self.parents.get(&child) {
+            if let Some(Node::Container { children, mru, .. }) = self.nodes.get_mut(parent)
+                && let Some(idx) = children.iter().position(|&c| c == child)
+            {
+                *mru = idx;
+            }
+            child = parent;
+        }
+    }
+
+    /// Whether `from`'s immediate parent container is an `Accordion` (as
+    /// opposed to `Tiles`, or `from` having no parent at all).
+    pub fn is_accordion_container(&self, from: NodeId) -> bool {
+        self.parents
+            .get(&from)
+            .and_then(|&p| self.nodes.get(p))
+            .is_some_and(|n| {
+                matches!(
+                    n,
+                    Node::Container {
+                        layout: Layout::Accordion,
+                        ..
+                    }
+                )
+            })
+    }
+
+    /// Whether the workspace's root container is itself an `Accordion` —
+    /// the root-container analogue of `is_accordion_container`, used by
+    /// `layout --root` (`set_layout`) since the root has no parent to check.
+    pub fn is_root_accordion(&self) -> bool {
+        self.root.and_then(|r| self.nodes.get(r)).is_some_and(|n| {
+            matches!(
+                n,
+                Node::Container {
+                    layout: Layout::Accordion,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// `from`'s immediate parent container's orientation, or `None` if
+    /// `from` has no parent (the lone root window).
+    pub fn orientation_of(&self, from: NodeId) -> Option<Orientation> {
+        let &parent = self.parents.get(&from)?;
+        match self.nodes.get(parent)? {
+            Node::Container { orientation, .. } => Some(*orientation),
+            Node::Window { .. } => None,
+        }
+    }
+
+    /// The workspace root container's orientation, or `None` if the tree is
+    /// empty or the root is a lone window with no container.
+    pub fn root_orientation(&self) -> Option<Orientation> {
+        match self.nodes.get(self.root?)? {
+            Node::Container { orientation, .. } => Some(*orientation),
+            Node::Window { .. } => None,
+        }
+    }
+
+    /// Converts `from`'s immediate parent container between `Tiles` and
+    /// `Accordion` in place — orientation, children, weights, and MRU are
+    /// all shared fields, so this is a pure flip of `layout`, nothing else
+    /// changes (the currently-visible/focused child stays exactly that,
+    /// since `mru` already tracks it independently of `layout`).
+    ///
+    /// Returns `false` (nothing changed) if `from` has no parent — a lone
+    /// root window has no container to toggle.
+    pub fn toggle_layout(&mut self, from: NodeId) -> bool {
+        let Some(&parent) = self.parents.get(&from) else {
+            return false;
+        };
+        self.flip_layout(parent)
+    }
+
+    /// Same conversion as `toggle_layout`, but always targets the
+    /// workspace's root container — matches AeroSpace's `layout --root`
+    /// flag. Returns `false` if the tree is empty or the root itself is a
+    /// lone window (nothing to toggle).
+    pub fn toggle_root_layout(&mut self) -> bool {
+        let Some(root) = self.root else {
+            return false;
+        };
+        self.flip_layout(root)
+    }
+
+    fn flip_layout(&mut self, container: NodeId) -> bool {
+        match self.nodes.get_mut(container) {
+            Some(Node::Container { layout, .. }) => {
+                *layout = match layout {
+                    Layout::Tiles => Layout::Accordion,
+                    Layout::Accordion => Layout::Tiles,
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Sets `from`'s immediate parent container's orientation. A no-op
+    /// (still returns `true`) if it's already that orientation — there are
+    /// only two, so "set" and "flip away from the other one" coincide.
+    /// Returns `false` if `from` has no parent container.
+    pub fn set_orientation(&mut self, from: NodeId, orientation: Orientation) -> bool {
+        let Some(&parent) = self.parents.get(&from) else {
+            return false;
+        };
+        self.apply_orientation(parent, orientation)
+    }
+
+    /// Root-container analogue of `set_orientation` — matches AeroSpace's
+    /// `layout --root` flag applied to `horizontal`/`vertical`.
+    pub fn set_root_orientation(&mut self, orientation: Orientation) -> bool {
+        let Some(root) = self.root else {
+            return false;
+        };
+        self.apply_orientation(root, orientation)
+    }
+
+    fn apply_orientation(&mut self, container: NodeId, orientation: Orientation) -> bool {
+        let Some(Node::Container { orientation: o, .. }) = self.nodes.get_mut(container) else {
+            return false;
+        };
+        *o = orientation;
+        // Changing orientation can newly agree with a same-orientation
+        // parent (or child), which normalize's merge pass needs to clean up.
+        self.normalize();
+        true
+    }
+
+    /// Wraps `from` and its neighbor in `dir` (within `from`'s own parent
+    /// container — this doesn't escalate up the tree the way `move` does)
+    /// into a brand-new container, orientation perpendicular to `dir` —
+    /// matches AeroSpace's `join-with` (preferred over i3-style `split`,
+    /// since `split` on its own would create a 1-child container that
+    /// `normalize` would immediately flatten right back away). Returns
+    /// `false` if `from`'s parent orientation doesn't match `dir`'s axis or
+    /// there's no neighbor there.
+    pub fn join_with(&mut self, from: NodeId, dir: Direction) -> bool {
+        let axis = axis_for(dir);
+        let forward = matches!(dir, Direction::Right | Direction::Down);
+        let Some(&parent) = self.parents.get(&from) else {
+            return false;
+        };
+        let Some(Node::Container {
+            orientation,
+            children,
+            weights,
+            ..
+        }) = self.nodes.get(parent)
+        else {
+            return false;
+        };
+        if *orientation != axis {
+            return false;
+        }
+        let Some(idx) = children.iter().position(|&c| c == from) else {
+            return false;
+        };
+        let target_idx = if forward {
+            idx.checked_add(1)
+        } else {
+            idx.checked_sub(1)
+        };
+        let Some(target_idx) = target_idx.filter(|&i| i < children.len()) else {
+            return false;
+        };
+        let neighbor = children[target_idx];
+        let combined_weight = weights[idx] + weights[target_idx];
+        let insert_at = idx.min(target_idx);
+
+        self.detach(from, parent);
+        self.detach(neighbor, parent);
+
+        let perpendicular = match axis {
+            Orientation::Horizontal => Orientation::Vertical,
+            Orientation::Vertical => Orientation::Horizontal,
+        };
+        let new_container = self.nodes.insert(Node::Container {
+            layout: Layout::Tiles,
+            orientation: perpendicular,
+            children: vec![from, neighbor],
+            weights: vec![1.0, 1.0],
+            mru: 0,
+        });
+        self.parents.insert(from, new_container);
+        self.parents.insert(neighbor, new_container);
+
+        if let Some(Node::Container {
+            children,
+            weights,
+            mru,
+            ..
+        }) = self.nodes.get_mut(parent)
+        {
+            let at = insert_at.min(children.len());
+            children.insert(at, new_container);
+            weights.insert(at, combined_weight);
+            *mru = at;
+        }
+        self.parents.insert(new_container, parent);
+
+        self.normalize();
+        true
+    }
+
+    /// Grows (or, with a negative `delta`, shrinks) the weight of the
+    /// branch containing `from` within its nearest ancestor `Tiles`
+    /// container (any orientation — resize affects whichever axis that
+    /// container actually splits on; an `Accordion` ancestor is skipped
+    /// over since its children aren't sized against each other). The
+    /// change is taken from (or given back to) the other siblings in that
+    /// container, proportionally, clamped so no sibling's weight goes
+    /// below a small minimum. `delta` is in the same weight-space as
+    /// `Node::Container::weights` itself (not pixels) — small values like
+    /// `0.05`-`0.2` are reasonable steps. Returns `false` if `from` has no
+    /// `Tiles` ancestor with another child to trade weight with.
+    pub fn resize_weight(&mut self, from: NodeId, delta: f32) -> bool {
+        let mut child = from;
+        while let Some(&parent) = self.parents.get(&child) {
+            if let Some(Node::Container {
+                layout: Layout::Tiles,
+                ..
+            }) = self.nodes.get(parent)
+                && self.apply_resize(parent, child, delta)
+            {
+                return true;
+            }
+            child = parent;
+        }
+        false
+    }
+
+    fn apply_resize(&mut self, container: NodeId, branch: NodeId, delta: f32) -> bool {
+        const MIN_WEIGHT: f32 = 0.05;
+        let Some(Node::Container {
+            children, weights, ..
+        }) = self.nodes.get_mut(container)
+        else {
+            return false;
+        };
+        if children.len() < 2 {
+            return false;
+        }
+        let Some(idx) = children.iter().position(|&c| c == branch) else {
+            return false;
+        };
+
+        let others: Vec<usize> = (0..children.len()).filter(|&i| i != idx).collect();
+        let others_total: f32 = others.iter().map(|&i| weights[i]).sum();
+        if others_total <= 0.0 {
+            return false;
+        }
+
+        let max_take = (others_total - MIN_WEIGHT * others.len() as f32).max(0.0);
+        let actual_delta = delta.clamp(-(weights[idx] - MIN_WEIGHT).max(0.0), max_take);
+
+        weights[idx] += actual_delta;
+        for &i in &others {
+            weights[i] -= actual_delta * (weights[i] / others_total);
+        }
+        true
+    }
+
+    /// Walks up from `from` to the nearest ancestor container whose
+    /// orientation matches `dir`'s axis and where `from` isn't already the
+    /// boundary child, then descends into the neighboring branch's MRU
+    /// leaf. Returns `None` if `from` is already at the tree's edge in
+    /// `dir`. Read-only — see `focus_in_direction` for the version that
+    /// also updates MRU.
+    pub fn navigate(&self, from: NodeId, dir: Direction) -> Option<NodeId> {
+        let axis = axis_for(dir);
         let forward = matches!(dir, Direction::Right | Direction::Down);
 
         let mut child = from;
         while let Some(&parent) = self.parents.get(&child) {
-            if let Some(Node::Split {
+            if let Some(Node::Container {
                 orientation,
                 children,
                 ..
@@ -234,7 +620,7 @@ impl Tree {
                     idx.checked_sub(1)
                 };
                 if let Some(&target) = target_idx.and_then(|i| children.get(i)) {
-                    return Some(self.first_leaf(target));
+                    return Some(self.mru_leaf(target));
                 }
             }
             child = parent;
@@ -242,112 +628,197 @@ impl Tree {
         None
     }
 
-    /// The navigation entry point that's Accordion-aware: if `from`'s
-    /// immediate parent is an `Accordion`, `dir` cycles which child is
-    /// active (wrapping around at the ends — Right/Down go forward,
-    /// Left/Up go backward, uniformly regardless of the accordion's own
-    /// orientation, since a stack of fully-overlapping children has no
-    /// inherent spatial axis) and returns the newly-active child's leaf.
-    /// Otherwise falls back to the plain spatial `navigate`.
+    /// The navigation entry point `WmState` actually calls: `navigate`
+    /// plus recording the result as newly focused (so a subsequent
+    /// `Accordion` peek or nested navigate lands where the user just went,
+    /// not always at a container's first child). One algorithm for both
+    /// `Tiles` and `Accordion` — an `Accordion`'s own orientation
+    /// determines which directions cycle it, and hitting its edge
+    /// escalates up to the next matching ancestor exactly like `Tiles`,
+    /// rather than wrapping.
     pub fn focus_in_direction(&mut self, from: NodeId, dir: Direction) -> Option<NodeId> {
-        if let Some(&parent) = self.parents.get(&from) {
-            let accordion = match self.nodes.get(parent) {
-                Some(Node::Accordion { children, active }) => Some((children.clone(), *active)),
-                _ => None,
-            };
-            if let Some((children, active)) = accordion {
-                let n = children.len();
-                if n == 0 {
-                    return None;
-                }
-                let forward = matches!(dir, Direction::Right | Direction::Down);
-                let new_active = if forward {
-                    (active + 1) % n
-                } else {
-                    (active + n - 1) % n
-                };
-                if let Some(Node::Accordion { active, .. }) = self.nodes.get_mut(parent) {
-                    *active = new_active;
-                }
-                return Some(children[new_active]);
-            }
-        }
-        self.navigate(from, dir)
+        let target = self.navigate(from, dir)?;
+        self.record_focus(target);
+        Some(target)
     }
 
-    /// Whether `from`'s immediate parent container is an `Accordion` (as
-    /// opposed to a `Split`, or `from` having no parent at all).
-    pub fn is_accordion_container(&self, from: NodeId) -> bool {
-        self.parents
-            .get(&from)
-            .and_then(|&p| self.nodes.get(p))
-            .is_some_and(|n| matches!(n, Node::Accordion { .. }))
-    }
-
-    /// Converts `from`'s immediate parent container between `Split` and
-    /// `Accordion` in place, preserving its children. Converting to
-    /// `Accordion` sets `active` to `from`'s own position, so the window
-    /// that was visible/focused stays visible. Converting to `Split`
-    /// defaults to `Horizontal` with equal ratios — a reasonable default,
-    /// not an attempt to remember whatever the container's orientation was
-    /// before it became an accordion (that history isn't tracked).
+    /// Moves `from` one step in `dir`, re-parenting it through the tree
+    /// (not just swapping which window sits where) — ported from
+    /// AeroSpace's `MoveCommand`:
+    /// - Same-axis neighbor is a window: the two trade positions (and thus
+    ///   footprints) within their shared parent.
+    /// - Same-axis neighbor is a container: `from` moves into it, landing
+    ///   at the edge nearest the boundary it just crossed.
+    /// - No same-axis room at this level: escalate up (`move_out`) to the
+    ///   nearest ancestor whose orientation matches, landing next to the
+    ///   branch `from` climbed out of.
+    /// - No such ancestor exists anywhere up to the root: wrap the whole
+    ///   tree in a brand-new root container along `dir`'s axis (AeroSpace's
+    ///   "implicit container" at the workspace boundary).
     ///
-    /// Returns `false` (nothing changed) if `from` has no parent — a lone
-    /// root window has no container to toggle.
-    pub fn toggle_layout(&mut self, from: NodeId) -> bool {
-        let Some(&parent) = self.parents.get(&from) else {
-            return false;
-        };
-        let Some(node) = self.nodes.get(parent) else {
-            return false;
-        };
-        let replacement = match node {
-            Node::Split { children, .. } => {
-                let active = children.iter().position(|&c| c == from).unwrap_or(0);
-                Node::Accordion {
-                    children: children.clone(),
-                    active,
-                }
-            }
-            Node::Accordion { children, .. } => {
-                let n = children.len().max(1);
-                Node::Split {
-                    orientation: Orientation::Horizontal,
-                    ratios: vec![1.0 / n as f32; n],
-                    children: children.clone(),
-                }
-            }
-            Node::Window { .. } => return false,
-        };
-        if let Some(slot) = self.nodes.get_mut(parent) {
-            *slot = replacement;
+    /// Returns `false` if `from` is the tree's only window (nothing to
+    /// move relative to).
+    pub fn move_in_direction(&mut self, from: NodeId, dir: Direction) -> bool {
+        let axis = axis_for(dir);
+        let forward = matches!(dir, Direction::Right | Direction::Down);
+
+        if let Some(&parent) = self.parents.get(&from)
+            && self.orientation_matches(parent, axis)
+            && self.move_within(from, parent, axis, forward)
+        {
+            self.record_focus(from);
+            self.normalize();
+            return true;
         }
+
+        if self.move_out(from, axis, forward) {
+            self.record_focus(from);
+            self.normalize();
+            return true;
+        }
+
+        self.wrap_root(from, axis, forward)
+    }
+
+    fn orientation_matches(&self, container: NodeId, axis: Orientation) -> bool {
+        matches!(self.nodes.get(container), Some(Node::Container { orientation, .. }) if *orientation == axis)
+    }
+
+    fn move_within(
+        &mut self,
+        from: NodeId,
+        parent: NodeId,
+        axis: Orientation,
+        forward: bool,
+    ) -> bool {
+        let Some(Node::Container { children, .. }) = self.nodes.get(parent) else {
+            return false;
+        };
+        let Some(idx) = children.iter().position(|&c| c == from) else {
+            return false;
+        };
+        let target_idx = if forward {
+            idx.checked_add(1)
+        } else {
+            idx.checked_sub(1)
+        };
+        let Some(&sibling) = target_idx.and_then(|i| children.get(i)) else {
+            return false;
+        };
+        let target_idx = target_idx.expect("checked above");
+
+        match self.nodes.get(sibling) {
+            Some(Node::Window { .. }) => {
+                if let Some(Node::Container { children, .. }) = self.nodes.get_mut(parent) {
+                    children.swap(idx, target_idx);
+                }
+                true
+            }
+            Some(Node::Container { .. }) => {
+                let anchor = self.entry_point(sibling, axis, forward);
+                if anchor == from {
+                    return false;
+                }
+                self.detach(from, parent);
+                self.insert_sibling(from, anchor, forward);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Climbs from `from`'s immediate parent looking for an ancestor
+    /// container whose orientation matches `axis`, then re-parents `from`
+    /// as a new sibling of the branch it climbed out of, on the side
+    /// facing `dir`. Returns `false` if no such ancestor exists (the
+    /// caller falls back to `wrap_root`).
+    fn move_out(&mut self, from: NodeId, axis: Orientation, forward: bool) -> bool {
+        let Some(&from_parent) = self.parents.get(&from) else {
+            return false;
+        };
+        let mut branch = from_parent;
+        while let Some(&ancestor) = self.parents.get(&branch) {
+            if self.orientation_matches(ancestor, axis) {
+                self.detach(from, from_parent);
+                self.insert_sibling(from, branch, forward);
+                return true;
+            }
+            branch = ancestor;
+        }
+        false
+    }
+
+    /// Wraps the entire tree in a fresh root container along `axis`,
+    /// placing `from` on the side of the old root that `forward` faces.
+    /// Returns `false` if `from` is already the whole tree (the lone root
+    /// window — nothing to wrap it against).
+    fn wrap_root(&mut self, from: NodeId, axis: Orientation, forward: bool) -> bool {
+        let Some(old_root) = self.root else {
+            return false;
+        };
+        if old_root == from {
+            return false;
+        }
+        let Some(&from_parent) = self.parents.get(&from) else {
+            return false;
+        };
+        self.detach(from, from_parent);
+
+        let children = if forward {
+            vec![old_root, from]
+        } else {
+            vec![from, old_root]
+        };
+        let new_root = self.nodes.insert(Node::Container {
+            layout: Layout::Tiles,
+            orientation: axis,
+            children,
+            weights: vec![1.0, 1.0],
+            mru: usize::from(forward),
+        });
+        self.parents.insert(old_root, new_root);
+        self.parents.insert(from, new_root);
+        self.root = Some(new_root);
+
+        self.record_focus(from);
+        self.normalize();
         true
     }
 
-    /// Swaps the windows held by two leaf nodes in place — used for `move`,
-    /// which (in this simplified implementation) swaps the focused window
-    /// with whatever's adjacent rather than re-parenting it into the
-    /// neighboring container.
-    pub fn swap_windows(&mut self, a: NodeId, b: NodeId) {
-        if a == b {
-            return;
-        }
-        let (Some(wa), Some(wb)) = (self.window_at(a), self.window_at(b)) else {
-            return;
-        };
-        if let Some(Node::Window { window }) = self.nodes.get_mut(a) {
-            *window = wb;
-        }
-        if let Some(Node::Window { window }) = self.nodes.get_mut(b) {
-            *window = wa;
+    /// Finds the leaf nearest the edge of `container` that faces the
+    /// direction traveled from (i.e. the edge a window entering `container`
+    /// from that side would land at): descends through containers whose
+    /// orientation matches `axis` via their near edge (index `0` if
+    /// `forward`, else the last index), and through orientation-mismatched
+    /// containers via MRU (there's no inherent near/far edge on an axis a
+    /// container doesn't split on, so MRU is the closest thing to "the
+    /// child the user was last looking at here").
+    fn entry_point(&self, container: NodeId, axis: Orientation, forward: bool) -> NodeId {
+        match self.nodes.get(container) {
+            Some(Node::Container {
+                orientation,
+                children,
+                mru,
+                ..
+            }) if !children.is_empty() => {
+                let next = if *orientation == axis {
+                    children[if forward { 0 } else { children.len() - 1 }]
+                } else {
+                    children[(*mru).min(children.len() - 1)]
+                };
+                self.entry_point(next, axis, forward)
+            }
+            _ => container,
         }
     }
 
     /// Computes each window's frame within `area` by recursively dividing
-    /// it per the tree's splits, applying `gaps` (outer padding around the
-    /// whole area, inner spacing between siblings).
-    pub fn layout(&self, area: Rect, gaps: Gaps) -> Vec<(WindowId, Rect)> {
+    /// it per the tree's containers, applying `gaps` (outer padding around
+    /// the whole area, inner spacing between `Tiles` siblings) and
+    /// `accordion_padding` (how much of each non-focused `Accordion`
+    /// sibling peeks out from behind the active one — `0.0` collapses every
+    /// child to the exact same full frame).
+    pub fn layout(&self, area: Rect, gaps: Gaps, accordion_padding: f64) -> Vec<(WindowId, Rect)> {
         let mut out = Vec::new();
         if let Some(root) = self.root {
             let (top, right, bottom, left) = gaps.outer;
@@ -357,7 +828,7 @@ impl Tree {
                 width: (area.width - left - right).max(0.0),
                 height: (area.height - top - bottom).max(0.0),
             };
-            self.layout_node(root, padded, gaps.inner, &mut out);
+            self.layout_node(root, padded, gaps.inner, accordion_padding, &mut out);
         }
         out
     }
@@ -367,25 +838,23 @@ impl Tree {
         node: NodeId,
         area: Rect,
         inner_gap: f64,
+        accordion_padding: f64,
         out: &mut Vec<(WindowId, Rect)>,
     ) {
         match self.nodes.get(node) {
             Some(Node::Window { window }) => out.push((*window, area)),
-            Some(Node::Split {
+            Some(Node::Container {
+                layout: Layout::Tiles,
                 orientation,
                 children,
-                ratios,
+                weights,
+                ..
             }) => {
                 let n = children.len();
                 if n == 0 {
                     return;
                 }
-                let effective_ratios: Vec<f32> = if ratios.len() == n {
-                    ratios.clone()
-                } else {
-                    vec![1.0 / n as f32; n]
-                };
-                let total: f32 = effective_ratios.iter().sum();
+                let total: f32 = weights.iter().sum::<f32>().max(f32::EPSILON);
                 let total_gap = inner_gap * (n.saturating_sub(1)) as f64;
                 let divisible = match orientation {
                     Orientation::Horizontal => (area.width - total_gap).max(0.0),
@@ -393,7 +862,7 @@ impl Tree {
                 };
                 let mut offset = 0.0_f64;
                 for (i, &child) in children.iter().enumerate() {
-                    let fraction = f64::from(effective_ratios[i] / total);
+                    let fraction = f64::from(weights[i] / total);
                     let child_size = divisible * fraction;
                     let child_area = match orientation {
                         Orientation::Horizontal => Rect {
@@ -410,43 +879,212 @@ impl Tree {
                         },
                     };
                     offset += child_size + inner_gap;
-                    self.layout_node(child, child_area, inner_gap, out);
+                    self.layout_node(child, child_area, inner_gap, accordion_padding, out);
                 }
             }
-            // Accordion layout algorithm proper lands in M7; until then,
-            // just show whichever child is marked active so an Accordion
-            // node in the tree doesn't break layout. No inner gap applies
-            // (only one child is ever visible at a time).
-            Some(Node::Accordion { children, active }) => {
-                if let Some(&active_child) = children.get(*active) {
-                    self.layout_node(active_child, area, inner_gap, out);
+            Some(Node::Container {
+                layout: Layout::Accordion,
+                orientation,
+                children,
+                ..
+            }) => {
+                let n = children.len();
+                for (i, &child) in children.iter().enumerate() {
+                    let mut child_area = area;
+                    let pad_before = i > 0;
+                    let pad_after = i + 1 < n;
+                    match orientation {
+                        Orientation::Horizontal => {
+                            if pad_before {
+                                child_area.x += accordion_padding;
+                                child_area.width -= accordion_padding;
+                            }
+                            if pad_after {
+                                child_area.width -= accordion_padding;
+                            }
+                        }
+                        Orientation::Vertical => {
+                            if pad_before {
+                                child_area.y += accordion_padding;
+                                child_area.height -= accordion_padding;
+                            }
+                            if pad_after {
+                                child_area.height -= accordion_padding;
+                            }
+                        }
+                    }
+                    child_area.width = child_area.width.max(0.0);
+                    child_area.height = child_area.height.max(0.0);
+                    self.layout_node(child, child_area, inner_gap, accordion_padding, out);
                 }
             }
             None => {}
         }
     }
 
+    /// Runs both normalizations to restore the tree's two invariants (see
+    /// the struct doc comment) after a mutation. Always safe to call more
+    /// than needed — small tree sizes (a WM's window count) make the
+    /// simplicity of "just rescan" worth more than avoiding a redundant pass.
+    fn normalize(&mut self) {
+        self.flatten();
+        self.merge_same_orientation();
+        self.flatten();
+    }
+
+    /// Promotes any single-child container's child up into its own slot,
+    /// repeating until none remain — including all the way up to `self.root`
+    /// itself, which is how a root container ever collapses back down to a
+    /// bare `Window` leaf with no container at all.
+    fn flatten(&mut self) {
+        loop {
+            let target = self.nodes.iter().find_map(|(id, node)| match node {
+                Node::Container { children, .. } if children.len() == 1 => Some((id, children[0])),
+                _ => None,
+            });
+            let Some((container_id, only_child)) = target else {
+                break;
+            };
+            let parent = self.parents.remove(&container_id);
+            self.nodes.remove(container_id);
+            match parent {
+                Some(p) => {
+                    self.replace_child(p, container_id, only_child);
+                    self.parents.insert(only_child, p);
+                }
+                None => {
+                    self.root = Some(only_child);
+                    self.parents.remove(&only_child);
+                }
+            }
+        }
+    }
+
+    /// Splices any `Tiles` container's children directly into its `Tiles`
+    /// parent when they share an orientation, repeating until none remain.
+    /// `Accordion` containers are never merge candidates (in either
+    /// direction) — an accordion nested in a same-orientation tiles parent
+    /// (or vice versa) is a meaningful, distinct structure, not redundant
+    /// nesting.
+    fn merge_same_orientation(&mut self) {
+        loop {
+            let target = self.nodes.iter().find_map(|(id, node)| {
+                let Node::Container {
+                    layout: Layout::Tiles,
+                    orientation,
+                    ..
+                } = node
+                else {
+                    return None;
+                };
+                let &parent_id = self.parents.get(&id)?;
+                let Some(Node::Container {
+                    layout: Layout::Tiles,
+                    orientation: parent_orientation,
+                    ..
+                }) = self.nodes.get(parent_id)
+                else {
+                    return None;
+                };
+                (orientation == parent_orientation).then_some((id, parent_id))
+            });
+            let Some((child_id, parent_id)) = target else {
+                break;
+            };
+            self.splice_container(child_id, parent_id);
+        }
+    }
+
+    fn splice_container(&mut self, child_id: NodeId, parent_id: NodeId) {
+        let Some(Node::Container {
+            children: grandkids,
+            weights: gk_weights,
+            mru: gk_mru,
+            ..
+        }) = self.nodes.remove(child_id)
+        else {
+            return;
+        };
+        self.parents.remove(&child_id);
+
+        let Some(Node::Container {
+            children, weights, ..
+        }) = self.nodes.get(parent_id)
+        else {
+            return;
+        };
+        let Some(idx) = children.iter().position(|&c| c == child_id) else {
+            return;
+        };
+        let own_weight = weights[idx];
+        let gk_total: f32 = gk_weights.iter().sum::<f32>().max(f32::EPSILON);
+        let scaled: Vec<f32> = gk_weights
+            .iter()
+            .map(|w| own_weight * w / gk_total)
+            .collect();
+        let was_mru_branch =
+            matches!(self.nodes.get(parent_id), Some(Node::Container { mru, .. }) if *mru == idx);
+
+        let Some(Node::Container {
+            children,
+            weights,
+            mru,
+            ..
+        }) = self.nodes.get_mut(parent_id)
+        else {
+            return;
+        };
+        children.remove(idx);
+        weights.remove(idx);
+        for (i, (&gc, &w)) in grandkids.iter().zip(scaled.iter()).enumerate() {
+            children.insert(idx + i, gc);
+            weights.insert(idx + i, w);
+        }
+
+        if was_mru_branch {
+            *mru = idx + gk_mru;
+        } else if *mru > idx {
+            *mru += grandkids.len() - 1;
+        }
+        if *mru >= children.len() {
+            *mru = children.len().saturating_sub(1);
+        }
+
+        for &gc in &grandkids {
+            self.parents.insert(gc, parent_id);
+        }
+    }
+
     fn replace_child(&mut self, parent: NodeId, old: NodeId, new: NodeId) {
-        if let Some(Node::Split { children, .. } | Node::Accordion { children, .. }) =
-            self.nodes.get_mut(parent)
+        if let Some(Node::Container { children, .. }) = self.nodes.get_mut(parent)
             && let Some(pos) = children.iter().position(|&c| c == old)
         {
             children[pos] = new;
         }
     }
 
-    fn first_leaf(&self, mut node: NodeId) -> NodeId {
+    /// Descends through containers via their `mru` child (falling back to
+    /// the first child if `mru` is somehow out of range) until reaching a
+    /// `Window` leaf.
+    fn mru_leaf(&self, mut node: NodeId) -> NodeId {
         loop {
             match self.nodes.get(node) {
-                Some(Node::Split { children, .. } | Node::Accordion { children, .. }) => {
-                    match children.first() {
-                        Some(&first) => node = first,
+                Some(Node::Container { children, mru, .. }) => {
+                    match children.get(*mru).or_else(|| children.first()) {
+                        Some(&next) => node = next,
                         None => return node,
                     }
                 }
                 _ => return node,
             }
         }
+    }
+}
+
+fn axis_for(dir: Direction) -> Orientation {
+    match dir {
+        Direction::Left | Direction::Right => Orientation::Horizontal,
+        Direction::Up | Direction::Down => Orientation::Vertical,
     }
 }
 
@@ -463,32 +1101,48 @@ mod tests {
         }
     }
 
+    fn insert(tree: &mut Tree, window: WindowId, near: Option<NodeId>) -> NodeId {
+        tree.insert_window(window, near, Orientation::Horizontal)
+    }
+
+    /// Widths of every window in `layout`, as a lookup by window id — the
+    /// tests below check proportions, not raw pixels, so `f64` rounding
+    /// noise from weight division doesn't cause flakiness.
+    fn width_of(layout: &[(WindowId, Rect)], window: WindowId) -> f64 {
+        layout.iter().find(|(w, _)| *w == window).unwrap().1.width
+    }
+
     #[test]
     fn empty_tree_has_no_root() {
         let tree = Tree::new();
         assert_eq!(tree.root(), None);
         assert!(tree.is_empty());
-        assert!(tree.layout(area(), Gaps::default()).is_empty());
+        assert!(tree.layout(area(), Gaps::default(), 0.0).is_empty());
     }
 
     #[test]
-    fn first_window_becomes_root() {
+    fn first_window_becomes_root_with_no_container() {
         let mut tree = Tree::new();
-        let leaf = tree.insert_window(1, None);
+        let leaf = insert(&mut tree, 1, None);
         assert_eq!(tree.root(), Some(leaf));
         assert_eq!(tree.window_at(leaf), Some(1));
+        assert_eq!(
+            tree.orientation_of(leaf),
+            None,
+            "lone window has no parent container"
+        );
 
-        let layout = tree.layout(area(), Gaps::default());
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
         assert_eq!(layout, vec![(1, area())]);
     }
 
     #[test]
     fn second_window_splits_side_by_side_and_fills_area() {
         let mut tree = Tree::new();
-        let first = tree.insert_window(1, None);
-        tree.insert_window(2, Some(first));
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
 
-        let layout = tree.layout(area(), Gaps::default());
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
         assert_eq!(layout.len(), 2);
 
         let total_width: f64 = layout.iter().map(|(_, r)| r.width).sum();
@@ -500,19 +1154,58 @@ mod tests {
     }
 
     #[test]
+    fn three_windows_inserted_sequentially_are_three_equal_flat_siblings() {
+        // Regression test for the old binary-tree bug: inserting next to
+        // the most-recently-inserted window used to nest into a fresh
+        // 2-child split each time (50/25/25), instead of joining the same
+        // flat container as an equal third sibling.
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        insert(&mut tree, 3, Some(w2));
+
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        assert_eq!(layout.len(), 3);
+        let w1_width = width_of(&layout, 1);
+        let w2_width = width_of(&layout, 2);
+        let w3_width = width_of(&layout, 3);
+        assert!((w1_width - w2_width).abs() < 0.01);
+        assert!((w2_width - w3_width).abs() < 0.01);
+    }
+
+    #[test]
+    fn root_orientation_hint_only_applies_when_creating_the_first_container() {
+        let mut tree = Tree::new();
+        let w1 = tree.insert_window(1, None, Orientation::Vertical);
+        // Orientation is irrelevant for the very first (containerless) insert.
+        assert_eq!(tree.orientation_of(w1), None);
+
+        tree.insert_window(2, Some(w1), Orientation::Vertical);
+        assert_eq!(tree.root_orientation(), Some(Orientation::Vertical));
+
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        for (_, rect) in &layout {
+            assert_eq!(
+                rect.width,
+                area().width,
+                "vertical root stacks full-width rows"
+            );
+        }
+    }
+
+    #[test]
     fn gaps_shrink_outer_area_and_separate_siblings() {
         let mut tree = Tree::new();
-        let first = tree.insert_window(1, None);
-        tree.insert_window(2, Some(first));
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
 
         let gaps = Gaps {
             inner: 10.0,
             outer: (20.0, 20.0, 20.0, 20.0),
         };
-        let layout = tree.layout(area(), gaps);
+        let layout = tree.layout(area(), gaps, 0.0);
         assert_eq!(layout.len(), 2);
 
-        // Outer padding on every side.
         let leftmost = layout
             .iter()
             .min_by(|a, b| a.1.x.total_cmp(&b.1.x))
@@ -521,131 +1214,385 @@ mod tests {
         assert_eq!(leftmost.1.y, 20.0);
         assert_eq!(leftmost.1.height, area().height - 40.0);
 
-        // The two windows plus the inner gap between them should exactly
-        // fill the padded width — no overlap, no leftover slack.
         let total_width: f64 = layout.iter().map(|(_, r)| r.width).sum();
         let padded_width = area().width - 40.0;
         assert!((total_width + gaps.inner - padded_width).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn toggle_layout_converts_split_to_accordion_and_back() {
+    fn toggle_layout_converts_tiles_to_accordion_and_back_preserving_mru() {
         let mut tree = Tree::new();
-        let a = tree.insert_window(1, None);
-        let b = tree.insert_window(2, Some(a));
+        let a = insert(&mut tree, 1, None);
+        let b = insert(&mut tree, 2, Some(a));
+        tree.record_focus(b);
         assert!(!tree.is_accordion_container(a));
 
         assert!(tree.toggle_layout(a));
         assert!(tree.is_accordion_container(a));
         assert!(tree.is_accordion_container(b));
 
-        // Only the active accordion child gets a frame from layout — the
-        // other is hidden behind it, not tiled.
-        let layout = tree.layout(area(), Gaps::default());
-        assert_eq!(layout.len(), 1);
-        assert_eq!(layout[0].0, 1); // window 1 (leaf `a`) was active on toggle
+        // MRU (window 2, focused above) is still what shows fully — with
+        // zero padding, every accordion child gets the exact same frame, so
+        // this really just checks both windows still exist and layout
+        // didn't blow up on the layout-kind flip.
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        assert_eq!(layout.len(), 2);
 
         assert!(tree.toggle_layout(a));
         assert!(!tree.is_accordion_container(a));
-        let layout = tree.layout(area(), Gaps::default());
-        assert_eq!(layout.len(), 2, "back to Split, both windows tile again");
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        assert_eq!(layout.len(), 2, "back to Tiles, both windows tile again");
     }
 
     #[test]
     fn toggle_layout_on_lone_root_window_is_a_no_op() {
         let mut tree = Tree::new();
-        let only = tree.insert_window(1, None);
+        let only = insert(&mut tree, 1, None);
         assert!(!tree.toggle_layout(only));
     }
 
     #[test]
-    fn focus_in_direction_cycles_accordion_children_and_wraps() {
-        // `insert_window` always creates strictly binary splits (see its
-        // own doc comment), so a "flat" accordion via sequential inserts
-        // only ever has 2 children — enough to test cycling and wrapping.
+    fn toggle_root_layout_targets_root_not_a_deeply_nested_parent() {
         let mut tree = Tree::new();
-        let a = tree.insert_window(1, None);
-        let b = tree.insert_window(2, Some(a));
-        tree.toggle_layout(a);
+        let w1 = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(w1));
+        insert(&mut tree, 3, Some(w1));
+        // Flat n-ary insert means all three share the root container
+        // directly now — toggling root affects all three at once.
 
-        assert_eq!(tree.focus_in_direction(a, Direction::Right), Some(b));
-        assert_eq!(
-            tree.focus_in_direction(b, Direction::Right),
-            Some(a),
-            "wraps back to the start"
-        );
-        // Backward from `a` with only one sibling lands on that sibling too.
-        assert_eq!(tree.focus_in_direction(a, Direction::Left), Some(b));
-
-        // Only the active child is laid out.
-        let active_now = tree.focus_in_direction(a, Direction::Right).unwrap();
-        let layout = tree.layout(area(), Gaps::default());
-        assert_eq!(layout.len(), 1);
-        assert_eq!(layout[0].0, tree.window_at(active_now).unwrap());
+        assert!(tree.toggle_root_layout());
+        assert!(tree.is_root_accordion());
+        assert!(tree.toggle_root_layout());
+        assert!(!tree.is_root_accordion());
     }
 
     #[test]
-    fn navigate_left_right_across_a_horizontal_split() {
+    fn toggle_root_layout_on_lone_root_window_is_a_no_op() {
         let mut tree = Tree::new();
-        let left = tree.insert_window(1, None);
-        let right_leaf = tree.insert_window(2, Some(left));
+        insert(&mut tree, 1, None);
+        assert!(!tree.toggle_root_layout());
+    }
+
+    #[test]
+    fn set_orientation_then_navigate_up_down_works() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        // Default root orientation from `insert` helper is Horizontal, so
+        // up/down should find nothing yet.
+        assert_eq!(tree.navigate(w1, Direction::Down), None);
+
+        assert!(tree.set_orientation(w1, Orientation::Vertical));
+        assert_eq!(tree.navigate(w1, Direction::Down), Some(w2));
+        assert_eq!(tree.navigate(w1, Direction::Right), None);
+    }
+
+    #[test]
+    fn merge_splices_same_orientation_child_into_parent() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        insert(&mut tree, 3, Some(w2));
+        // root(h) = [1, 2, 3] flat.
+        assert!(tree.join_with(w2, Direction::Right)); // wraps 2,3 into a nested vertical container
+        assert_eq!(tree.orientation_of(w2), Some(Orientation::Vertical));
+        assert_eq!(tree.window_ids().len(), 3);
+
+        // Flip the nested container back to horizontal, matching the root
+        // — normalize's merge pass should splice its children straight
+        // into the root rather than leaving a redundant nested
+        // same-orientation container.
+        assert!(tree.set_orientation(w2, Orientation::Horizontal));
+        assert_eq!(tree.orientation_of(w2), tree.orientation_of(w1));
+
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        assert_eq!(layout.len(), 3);
+        let w1_width = width_of(&layout, 1);
+        let w2_width = width_of(&layout, 2);
+        let w3_width = width_of(&layout, 3);
+        assert!((w1_width - w2_width).abs() < 0.01);
+        assert!((w2_width - w3_width).abs() < 0.01);
+    }
+
+    #[test]
+    fn join_with_wraps_two_leaves_in_a_perpendicular_container() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        assert_eq!(tree.root_orientation(), Some(Orientation::Horizontal));
+
+        assert!(tree.join_with(w1, Direction::Right));
+        // w1 and w2 are now stacked vertically inside their own container.
+        assert_eq!(tree.orientation_of(w1), Some(Orientation::Vertical));
+        assert_eq!(tree.orientation_of(w2), Some(Orientation::Vertical));
+
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        for (_, rect) in &layout {
+            assert_eq!(rect.width, area().width, "joined pair stacks full-width");
+        }
+    }
+
+    #[test]
+    fn join_with_no_neighbor_in_that_direction_is_a_no_op() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(w1));
+        assert!(
+            !tree.join_with(w1, Direction::Left),
+            "w1 is already leftmost"
+        );
+        assert!(
+            !tree.join_with(w1, Direction::Down),
+            "root is horizontal, not vertical"
+        );
+    }
+
+    #[test]
+    fn navigate_left_right_across_a_horizontal_root() {
+        let mut tree = Tree::new();
+        let left = insert(&mut tree, 1, None);
+        let right_leaf = insert(&mut tree, 2, Some(left));
 
         assert_eq!(tree.navigate(left, Direction::Right), Some(right_leaf));
         assert_eq!(tree.navigate(right_leaf, Direction::Left), Some(left));
-        // No window above/below in a purely horizontal split.
         assert_eq!(tree.navigate(left, Direction::Up), None);
         assert_eq!(tree.navigate(left, Direction::Down), None);
-        // Already at the left edge.
         assert_eq!(tree.navigate(left, Direction::Left), None);
     }
 
     #[test]
-    fn move_swaps_window_identities_between_leaves() {
+    fn focus_in_direction_records_mru_for_later_descent() {
         let mut tree = Tree::new();
-        let a = tree.insert_window(1, None);
-        let b = tree.insert_window(2, Some(a));
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        let w3 = insert(&mut tree, 3, Some(w2));
+        assert!(tree.join_with(w2, Direction::Right)); // wraps 2,3 into a nested vertical container
 
-        tree.swap_windows(a, b);
-        assert_eq!(tree.window_at(a), Some(2));
-        assert_eq!(tree.window_at(b), Some(1));
+        // Right after the join, the nested container's MRU is w2 (it was
+        // the node the join pivoted on) — navigating in from w1 should
+        // land there.
+        assert_eq!(tree.focus_in_direction(w1, Direction::Right), Some(w2));
+
+        // Focus w3 directly, then navigate away and back — the nested
+        // container's MRU should now be w3, not fall back to w2.
+        tree.record_focus(w3);
+        assert_eq!(
+            tree.focus_in_direction(w1, Direction::Left),
+            None,
+            "already leftmost"
+        );
+        assert_eq!(tree.focus_in_direction(w1, Direction::Right), Some(w3));
     }
 
     #[test]
-    fn remove_collapses_parent_split_and_leaves_sibling_as_root() {
+    fn move_within_swaps_two_windows() {
+        // A `move` re-parents by array position, not by rewriting which
+        // window a `NodeId` points to (that binding is permanent — see the
+        // struct doc comment) — so after the swap each `NodeId` still
+        // carries its original window, but the two windows' on-screen
+        // rects trade places.
         let mut tree = Tree::new();
-        let a = tree.insert_window(1, None);
-        tree.insert_window(2, Some(a));
+        let a = insert(&mut tree, 1, None);
+        let b = insert(&mut tree, 2, Some(a));
+
+        let before = tree.layout(area(), Gaps::default(), 0.0);
+        let a_rect_before = *before.iter().find(|(w, _)| *w == 1).unwrap();
+        let b_rect_before = *before.iter().find(|(w, _)| *w == 2).unwrap();
+
+        assert!(tree.move_in_direction(a, Direction::Right));
+        assert_eq!(tree.window_at(a), Some(1));
+        assert_eq!(tree.window_at(b), Some(2));
+
+        let after = tree.layout(area(), Gaps::default(), 0.0);
+        let a_rect_after = *after.iter().find(|(w, _)| *w == 1).unwrap();
+        let b_rect_after = *after.iter().find(|(w, _)| *w == 2).unwrap();
+        assert_eq!(a_rect_after.1, b_rect_before.1);
+        assert_eq!(b_rect_after.1, a_rect_before.1);
+    }
+
+    #[test]
+    fn move_out_reparents_into_perpendicular_ancestor() {
+        // root(h) = [1, joined-container(v) = [2, 3]]
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        insert(&mut tree, 3, Some(w2));
+        assert!(tree.join_with(w2, Direction::Right)); // wraps w2,w3 vertically
+        assert_eq!(tree.orientation_of(w2), Some(Orientation::Vertical));
+
+        // Moving w2 Left (root's axis) should climb out of the vertical
+        // pair and land back in the horizontal root, next to window 1.
+        assert!(tree.move_in_direction(w2, Direction::Left));
+        assert_eq!(tree.orientation_of(w2), Some(Orientation::Horizontal));
+        assert_eq!(tree.window_ids().len(), 3);
+    }
+
+    #[test]
+    fn move_wraps_root_when_no_matching_ancestor_exists() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        // Root is horizontal; moving Down has no vertical ancestor anywhere.
+        assert!(tree.move_in_direction(w2, Direction::Down));
+        assert_eq!(tree.root_orientation(), Some(Orientation::Vertical));
+        assert_eq!(tree.window_ids().len(), 2);
+    }
+
+    #[test]
+    fn move_lone_root_window_is_a_no_op() {
+        let mut tree = Tree::new();
+        let only = insert(&mut tree, 1, None);
+        assert!(!tree.move_in_direction(only, Direction::Left));
+    }
+
+    #[test]
+    fn resize_weight_grows_target_and_shrinks_sibling() {
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(a));
+
+        let before = width_of(&tree.layout(area(), Gaps::default(), 0.0), 1);
+        assert!(tree.resize_weight(a, 0.2));
+        let after = width_of(&tree.layout(area(), Gaps::default(), 0.0), 1);
+        assert!(after > before);
+    }
+
+    #[test]
+    fn resize_weight_clamps_instead_of_going_negative() {
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(a));
+
+        assert!(tree.resize_weight(a, -100.0));
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        for (_, rect) in &layout {
+            assert!(rect.width > 0.0, "clamped weight must stay positive");
+        }
+    }
+
+    #[test]
+    fn resize_weight_with_no_tiles_ancestor_is_a_no_op() {
+        let mut tree = Tree::new();
+        let only = insert(&mut tree, 1, None);
+        assert!(!tree.resize_weight(only, 0.1));
+    }
+
+    #[test]
+    fn accordion_padding_insets_edges_only_for_first_and_last_of_three() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        insert(&mut tree, 3, Some(w2)); // chained near, so children stay flat [1, 2, 3]
+        assert!(tree.toggle_root_layout());
+
+        let layout = tree.layout(area(), Gaps::default(), 30.0);
+        assert_eq!(layout.len(), 3);
+        let first = layout.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let last = layout.iter().find(|(w, _)| *w == 3).unwrap().1;
+
+        // First child: only trailing padding (its own left edge is flush
+        // with the container).
+        assert_eq!(first.x, area().x);
+        assert!(first.width < area().width);
+        // Last child: only leading padding (its own right edge is flush).
+        assert!((last.x + last.width - area().width).abs() < 0.01);
+    }
+
+    #[test]
+    fn accordion_single_child_gets_no_padding() {
+        let mut tree = Tree::new();
+        insert(&mut tree, 1, None);
+        // A lone root window has no container to toggle to Accordion, so
+        // this exercises the "n == 1" branch of the accordion layout
+        // itself via a 2-window tree collapsed back down isn't reachable —
+        // instead verify directly that a single-child container renders
+        // full-area regardless of padding by joining then removing one.
+        let mut tree2 = Tree::new();
+        let a = insert(&mut tree2, 10, None);
+        insert(&mut tree2, 20, Some(a));
+        assert!(tree2.toggle_root_layout());
+        tree2.remove_window(20);
+        let layout = tree2.layout(area(), Gaps::default(), 30.0);
+        assert_eq!(layout, vec![(10, area())]);
+        let _ = tree;
+    }
+
+    #[test]
+    fn accordion_padding_zero_gives_every_child_the_full_frame() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(w1));
+        assert!(tree.toggle_root_layout());
+
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        for (_, rect) in &layout {
+            assert_eq!(*rect, area());
+        }
+    }
+
+    #[test]
+    fn remove_collapses_parent_and_leaves_sibling_as_bare_root() {
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(a));
 
         let next_focus = tree.remove_window(1);
         assert_eq!(tree.window_ids(), vec![2]);
         assert_eq!(tree.window_at(next_focus.unwrap()), Some(2));
-        // Root itself should now be the surviving window's own leaf, not a
-        // dangling single-child split.
+        assert_eq!(tree.window_at(tree.root().unwrap()), Some(2));
+        assert_eq!(tree.orientation_of(tree.root().unwrap()), None);
+
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        assert_eq!(layout, vec![(2, area())]);
+    }
+
+    #[test]
+    fn remove_from_three_way_flat_container_keeps_the_other_two_flat() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(w1));
+        insert(&mut tree, 3, Some(w1));
+
+        tree.remove_window(2);
+        assert_eq!(tree.window_ids().len(), 2);
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let w1_width = width_of(&layout, 1);
+        let w3_width = width_of(&layout, 3);
+        assert!((w1_width - w3_width).abs() < 0.01);
+    }
+
+    #[test]
+    fn remove_active_accordion_child_leaves_sibling_visible() {
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(a));
+        tree.record_focus(a);
+        assert!(tree.toggle_root_layout());
+
+        let next_focus = tree.remove_window(1);
+        assert_eq!(tree.window_ids(), vec![2]);
+        assert_eq!(tree.window_at(next_focus.unwrap()), Some(2));
         assert_eq!(tree.window_at(tree.root().unwrap()), Some(2));
 
-        let layout = tree.layout(area(), Gaps::default());
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
         assert_eq!(layout, vec![(2, area())]);
     }
 
     #[test]
     fn remove_last_window_empties_the_tree() {
         let mut tree = Tree::new();
-        tree.insert_window(1, None);
+        insert(&mut tree, 1, None);
         let next_focus = tree.remove_window(1);
         assert_eq!(next_focus, None);
         assert!(tree.is_empty());
     }
 
     #[test]
-    fn three_windows_navigate_correctly() {
-        // 1 | 2 | 3, all in one horizontal split (each insert splits the
-        // previously-focused leaf, so inserting 3 next to 2 nests it under 2
-        // rather than flattening into a 3-way split — still a valid tree
-        // shape for navigation purposes).
+    fn three_windows_navigate_correctly_when_flat() {
         let mut tree = Tree::new();
-        let w1 = tree.insert_window(1, None);
-        let w2 = tree.insert_window(2, Some(w1));
-        let w3 = tree.insert_window(3, Some(w2));
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        let w3 = insert(&mut tree, 3, Some(w2));
 
         assert_eq!(tree.navigate(w1, Direction::Right), Some(w2));
         assert_eq!(tree.navigate(w2, Direction::Right), Some(w3));

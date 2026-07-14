@@ -35,6 +35,8 @@ enum LayoutArg {
     Toggle,
     Tiles,
     Accordion,
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Subcommand)]
@@ -54,16 +56,31 @@ enum Commands {
     ListWindows,
     /// Move focus to the window in the given direction.
     Focus { direction: DirArg },
-    /// Swap the focused window with its neighbor in the given direction.
+    /// Move the focused window one step in the given direction, re-parenting
+    /// it through the tree rather than just swapping places.
     Move { direction: DirArg },
+    /// Wrap the focused window and its neighbor in the given direction into
+    /// a new, perpendicular container.
+    Join { direction: DirArg },
+    /// Grow (positive) or shrink (negative) the focused window's share of
+    /// its nearest tiled container.
+    Resize { amount: f32 },
     /// List workspaces, marking which one is active.
     ListWorkspaces,
-    /// Switch the active workspace (creating it if it doesn't exist yet).
+    /// Switch the active workspace. Errors if `name` isn't declared in
+    /// config — workspaces are never created on the fly.
     Workspace { name: String },
     /// Move the focused window to another workspace without following it.
     MoveToWorkspace { name: String },
     /// Toggle, or explicitly set, the focused window's container layout.
-    Layout { mode: LayoutArg },
+    Layout {
+        mode: LayoutArg,
+        /// Target the workspace's root container instead of the focused
+        /// window's immediate parent (matches AeroSpace's `layout --root`;
+        /// still one container, not applied to every container at once).
+        #[arg(long)]
+        root: bool,
+    },
     /// Cycle which connected monitor commands act on.
     FocusMonitor,
     /// List connected monitors, marking which one is focused.
@@ -109,16 +126,24 @@ fn main() {
         Commands::ListWindows => (Command::ListWindows, ExpectedPayload::Windows),
         Commands::Focus { direction } => (Command::Focus(direction.into()), ExpectedPayload::None),
         Commands::Move { direction } => (Command::Move(direction.into()), ExpectedPayload::None),
+        Commands::Join { direction } => (Command::Join(direction.into()), ExpectedPayload::None),
+        Commands::Resize { amount } => (Command::ResizeRatio { amount }, ExpectedPayload::None),
         Commands::ListWorkspaces => (Command::ListWorkspaces, ExpectedPayload::Workspaces),
         Commands::Workspace { name } => (Command::WorkspaceSwitch(name), ExpectedPayload::None),
         Commands::MoveToWorkspace { name } => {
             (Command::MoveNodeToWorkspace(name), ExpectedPayload::None)
         }
-        Commands::Layout { mode } => {
+        Commands::Layout { mode, root } => {
             let command = match mode {
-                LayoutArg::Toggle => Command::LayoutToggle,
-                LayoutArg::Tiles => Command::LayoutSet(LayoutKind::Tiles),
-                LayoutArg::Accordion => Command::LayoutSet(LayoutKind::Accordion),
+                LayoutArg::Toggle => Command::LayoutToggle(root),
+                LayoutArg::Tiles => Command::LayoutSet(LayoutKind::Tiles, root),
+                LayoutArg::Accordion => Command::LayoutSet(LayoutKind::Accordion, root),
+                LayoutArg::Horizontal => {
+                    Command::OrientationSet(tili_ipc::OrientationKind::Horizontal, root)
+                }
+                LayoutArg::Vertical => {
+                    Command::OrientationSet(tili_ipc::OrientationKind::Vertical, root)
+                }
             };
             (command, ExpectedPayload::None)
         }

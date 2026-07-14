@@ -18,14 +18,37 @@ pub enum LayoutKind {
     Accordion,
 }
 
+/// A container's orientation axis — orthogonal to `LayoutKind` (a container
+/// has both, independently; see `tili_tree::Node::Container`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum OrientationKind {
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     Focus(Direction),
     Move(Direction),
+    /// Wraps the focused window and its neighbor in `dir` into a new,
+    /// perpendicular container — AeroSpace's `join-with`.
+    Join(Direction),
     WorkspaceSwitch(String),
     MoveNodeToWorkspace(String),
-    LayoutSet(LayoutKind),
-    LayoutToggle,
+    /// `root: true` targets the workspace's root tiling container instead
+    /// of the focused window's immediate parent — matches AeroSpace's
+    /// `layout --root` flag. Still a single-container operation either way,
+    /// not a recursive apply-to-every-container.
+    LayoutSet(LayoutKind, bool),
+    LayoutToggle(bool),
+    /// Sets the focused window's parent container's orientation (or the
+    /// workspace root's, if the bool is `true` — same `--root` convention
+    /// as `LayoutSet`/`LayoutToggle`).
+    OrientationSet(OrientationKind, bool),
+    /// Grows (positive) or shrinks (negative) the focused window's share of
+    /// its nearest tiled container, taken from its siblings. `amount` is in
+    /// the same weight-space as `tili_tree`'s container weights, not
+    /// pixels — see `Tree::resize_weight`.
     ResizeRatio {
         amount: f32,
     },

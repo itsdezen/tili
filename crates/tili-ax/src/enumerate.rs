@@ -24,8 +24,10 @@ pub(crate) fn onscreen_owner_pids() -> BTreeSet<i32> {
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
         kCGNullWindowID,
     ) else {
+        eprintln!("DEBUG: copy_window_info returned None");
         return pids;
     };
+    eprintln!("DEBUG: copy_window_info returned {} entries", windows.len());
 
     for i in 0..windows.len() {
         let Some(entry) = windows.get(i) else {
@@ -64,11 +66,22 @@ pub fn list_windows() -> Vec<AxWindow> {
 /// process, rather than re-running the full system-wide scan.
 pub fn list_windows_for_pid(pid: i32) -> Vec<AxWindow> {
     let Some(app) = AXUIElement::from_pid(pid) else {
+        eprintln!("DEBUG pid={pid}: AXUIElement::from_pid failed");
         return Vec::new();
     };
-    let Ok(ax_windows) = app.element_array_attribute(kAXWindowsAttribute) else {
-        return Vec::new();
+    let ax_windows = match app.element_array_attribute(kAXWindowsAttribute) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!(
+                "DEBUG pid={pid}: element_array_attribute(kAXWindowsAttribute) failed: {e:?}"
+            );
+            return Vec::new();
+        }
     };
+    eprintln!(
+        "DEBUG pid={pid}: raw AXWindows count = {}",
+        ax_windows.len()
+    );
     // Resolved once per process, not once per window — floating-rule
     // matching (M8) needs it on every `AxWindow`, but a `NSRunningApplication`
     // lookup per window would be redundant work for multi-window apps.

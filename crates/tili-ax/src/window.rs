@@ -1,4 +1,9 @@
 use axuielement::AXUIElement;
+use axuielement::ax_attribute::roles::AX_WINDOW_ROLE;
+use axuielement::ax_attribute::subroles::AX_STANDARD_WINDOW_SUBROLE;
+use axuielement::ax_attribute::{
+    AX_FULL_SCREEN_BUTTON_ATTRIBUTE, AX_ROLE_ATTRIBUTE, AX_SUBROLE_ATTRIBUTE,
+};
 use axuielement::ffi::{
     AXUIElementRef, kAXFocusedAttribute, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
     kAXTitleAttribute,
@@ -14,6 +19,17 @@ use tili_tree::{Rect, WindowId};
 // so users never need to disable System Integrity Protection.
 unsafe extern "C" {
     fn _AXUIElementGetWindow(element: AXUIElementRef, out: *mut u32) -> i32;
+}
+
+/// How close two frame coordinates need to be to count as "the same" for
+/// the purposes of skipping a redundant AX write — see `AxWindow::set_frame`.
+const FRAME_EPSILON: f64 = 0.5;
+
+fn frame_matches(a: Rect, b: Rect) -> bool {
+    (a.x - b.x).abs() < FRAME_EPSILON
+        && (a.y - b.y).abs() < FRAME_EPSILON
+        && (a.width - b.width).abs() < FRAME_EPSILON
+        && (a.height - b.height).abs() < FRAME_EPSILON
 }
 
 /// Wraps a cached `AXUIElement` handle for one window, plus its resolved
@@ -53,15 +69,56 @@ impl AxWindow {
         (status == 0).then_some(id)
     }
 
+    /// Whether `element` looks like a real, tileable window rather than a
+    /// transient popup/panel (autofill suggestions, IME candidate windows,
+    /// spellcheck bubbles, system dialogs) that `kAXWindowsAttribute`
+    /// sometimes includes alongside genuine windows. Mirrors (a stripped-down
+    /// version of) AeroSpace's own window-vs-popup heuristic — `AXRole`/
+    /// `AXSubrole` first, since that's the precise, standard signal AppKit
+    /// populates for ordinary `NSWindow`s; a missing `AXSubrole` is treated
+    /// as ambiguous rather than rejected outright (silently dropping a
+    /// legitimate window is worse than occasionally tiling a stray popup),
+    /// tie-broken by presence of a fullscreen button, the same secondary
+    /// signal AeroSpace falls back on for exactly this ambiguous case.
+    fn looks_like_a_real_window(element: &AXUIElement) -> bool {
+        let role = element.string_attribute(AX_ROLE_ATTRIBUTE).ok().flatten();
+        let subrole = element
+            .string_attribute(AX_SUBROLE_ATTRIBUTE)
+            .ok()
+            .flatten();
+        let result = if role.as_deref().is_some_and(|r| r != AX_WINDOW_ROLE) {
+            false
+        } else {
+            match &subrole {
+                Some(s) => s == AX_STANDARD_WINDOW_SUBROLE,
+                None => element
+                    .element_attribute(AX_FULL_SCREEN_BUTTON_ATTRIBUTE)
+                    .ok()
+                    .flatten()
+                    .is_some(),
+            }
+        };
+        eprintln!("DEBUG looks_like_a_real_window: role={role:?} subrole={subrole:?} -> {result}");
+        result
+    }
+
     /// Builds an `AxWindow` from an `AXUIElement` known to be a window
     /// (typically an entry from an application's `AXWindows` attribute).
     /// `bundle_id` is resolved once per process by the caller (see
     /// `enumerate::list_windows_for_pid`) rather than once per window, to
     /// avoid redundant `NSRunningApplication` lookups for apps with
     /// multiple windows. Returns `None` if the private call can't resolve
-    /// a window id.
+    /// a window id, or if `element` doesn't look like a real window (see
+    /// `looks_like_a_real_window`) — both cases mean "skip this element."
     pub fn from_element(element: AXUIElement, pid: i32, bundle_id: Option<String>) -> Option<Self> {
-        let id = Self::resolve_window_id(&element)?;
+        if !Self::looks_like_a_real_window(&element) {
+            eprintln!("DEBUG from_element pid={pid}: rejected by looks_like_a_real_window");
+            return None;
+        }
+        let Some(id) = Self::resolve_window_id(&element) else {
+            eprintln!("DEBUG from_element pid={pid}: resolve_window_id failed");
+            return None;
+        };
         let title = element
             .string_attribute(kAXTitleAttribute)
             .ok()
@@ -131,31 +188,56 @@ impl AxWindow {
     /// Best-effort: a window that refuses a resize (fixed-size dialogs,
     /// apps that don't honor AX writes) is left wherever it ends up — tili
     /// has no way to force it, matching every other AX-based WM.
+    ///
+    /// No-ops (skips both AX writes entirely) if `target` already matches
+    /// the cached frame within `FRAME_EPSILON`. This isn't just an
+    /// optimization: writing a position/size via AX fires
+    /// `AXWindowMoved`/`AXWindowResized` *even when the value is unchanged*,
+    /// and `tili-ax`'s own watcher reacts to those by re-triggering a
+    /// relayout — without this check, repeatedly setting a window to the
+    /// same frame it's already at becomes a self-sustaining feedback loop
+    /// (write -> notification -> relayout -> same write -> ...), which
+    /// showed up as the window visibly jittering.
     pub fn set_frame(&mut self, target: Rect) {
-        let _ = self.element.set_point_attribute(
+        if frame_matches(self.frame, target) {
+            return;
+        }
+        let position_result = self.element.set_point_attribute(
             kAXPositionAttribute,
             AXPoint {
                 x: target.x,
                 y: target.y,
             },
         );
-        let _ = self.element.set_size_attribute(
+        let size_result = self.element.set_size_attribute(
             kAXSizeAttribute,
             AXSize {
                 width: target.width,
                 height: target.height,
             },
         );
+        eprintln!(
+            "DEBUG set_frame id={} target={target:?} position_result={position_result:?} size_result={size_result:?}",
+            self.id
+        );
         self.frame = target;
     }
 
     /// Moves the window without touching its size — used to park a window
     /// off-screen (M4), where resizing would be pointless and needlessly
-    /// invasive to apps that dislike being resized.
+    /// invasive to apps that dislike being resized. Same no-op-if-unchanged
+    /// guard as `set_frame`, and for the same feedback-loop reason.
     pub fn set_position(&mut self, x: f64, y: f64) {
-        let _ = self
+        if (self.frame.x - x).abs() < FRAME_EPSILON && (self.frame.y - y).abs() < FRAME_EPSILON {
+            return;
+        }
+        let position_result = self
             .element
             .set_point_attribute(kAXPositionAttribute, AXPoint { x, y });
+        eprintln!(
+            "DEBUG set_position id={} target=({x}, {y}) position_result={position_result:?}",
+            self.id
+        );
         self.frame.x = x;
         self.frame.y = y;
     }
