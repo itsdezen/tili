@@ -66,6 +66,7 @@ async fn main() -> std::io::Result<()> {
                         // through dispatch(), since it's process lifecycle,
                         // not a WmState mutation.
                         let _ = socket::write_response(&mut stream, &Response::Ok).await;
+                        state.unpark_all();
                         println!("tili-daemon: shutting down");
                         break;
                     }
@@ -98,6 +99,7 @@ async fn main() -> std::io::Result<()> {
                 // socket branch above.
                 if let Some(command) = state.resolve_hotkey(combo) {
                     if matches!(command, Command::Shutdown) {
+                        state.unpark_all();
                         println!("tili-daemon: shutting down (hotkey)");
                         break;
                     }

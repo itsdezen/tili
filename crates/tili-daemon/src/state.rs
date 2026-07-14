@@ -503,28 +503,17 @@ impl WmState {
             }
         }
 
-        let is_positionable = matches!(
-            self.placements.get(&id).map(|p| &p.kind),
-            Some(PlacementKind::Tiled) | Some(PlacementKind::Floating { .. })
-        );
-        if is_positionable {
-            // Parking is a one-shot nudge at the moment a workspace becomes
-            // inactive (see `park`/`switch_workspace`), not a continuously-
-            // enforced invariant — if the real window drifts back on
-            // screen afterward (some apps resist an off-screen move, or
-            // just re-notify without actually moving), nothing previously
-            // re-asserted it. Every refresh of an already-known window
-            // re-checks this instead. `park`'s target is idempotent (see
-            // `AxWindow::set_position`'s no-op-if-unchanged guard), so
-            // calling it redundantly here whenever the window truly is
-            // already parked costs nothing.
-            let needs_repark = self
-                .placements
-                .get(&id)
-                .is_some_and(|p| !self.active_workspace.values().any(|w| w == &p.workspace));
-            if needs_repark {
-                self.park(id, 0);
-            }
+        // Parking is a one-shot nudge at the moment a workspace becomes
+        // inactive (see `park`/`switch_workspace`), not a continuously-
+        // enforced invariant — if the real window drifts back on screen
+        // afterward (some apps resist an off-screen move, or just re-notify
+        // without actually moving), nothing previously re-asserted it.
+        // Every refresh of an already-known window re-checks this instead.
+        // `park`'s target is idempotent (see `AxWindow::set_position`'s
+        // no-op-if-unchanged guard), so calling it redundantly here
+        // whenever the window truly is already parked costs nothing.
+        if self.parked_positionable_ids().contains(&id) {
+            self.park(id, 0);
         }
     }
 
@@ -692,6 +681,50 @@ impl WmState {
             self.remove_placement(id);
         }
         self.relayout_all_visible();
+    }
+
+    /// Moves every currently-parked `Tiled`/`Floating` window back on
+    /// screen, within the focused monitor's bounds — called once, right
+    /// before the daemon process exits (`Shutdown`), so windows aren't left
+    /// sitting off-screen indefinitely if the user doesn't restart tili
+    /// right away. Precise layout doesn't matter here (a restart rescans
+    /// and re-tiles everything from scratch); this only needs to land each
+    /// window somewhere visible. Never touches `Minimized`/
+    /// `NativeFullscreen`/`HiddenApplication`/`Popup` placements — those
+    /// were never "parked" (moved off-screen by `park`) in the first
+    /// place, so leaving them exactly as they are is correct, not an
+    /// oversight.
+    pub fn unpark_all(&mut self) {
+        let Some(area) = self.monitor_frame(self.focused_monitor) else {
+            return;
+        };
+        for id in self.parked_positionable_ids() {
+            let manual = self.placements.get(&id).and_then(|p| match &p.kind {
+                PlacementKind::Floating { manual } => *manual,
+                _ => None,
+            });
+            let frame = manual.map_or(area, |geometry| restore_floating_frame(geometry, area));
+            if let Some(window) = self.windows.get_mut(&id) {
+                self.frame_setter.set_frame(window, frame);
+            }
+        }
+    }
+
+    /// Every `Tiled`/`Floating` window whose workspace isn't currently
+    /// active on any connected monitor — i.e. exactly the set `park` would
+    /// have moved off-screen at some point. Shared by `unpark_all` and
+    /// `reconcile_existing_placement`'s repark check.
+    fn parked_positionable_ids(&self) -> Vec<WindowId> {
+        self.placements
+            .iter()
+            .filter(|(_, p)| {
+                matches!(
+                    p.kind,
+                    PlacementKind::Tiled | PlacementKind::Floating { .. }
+                ) && !self.active_workspace.values().any(|w| w == &p.workspace)
+            })
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     pub fn list_windows(&self) -> Vec<WindowInfo> {
@@ -2080,5 +2113,61 @@ mod tests {
             state.placements.get(&id).map(|p| &p.kind),
             Some(PlacementKind::Floating { manual: Some(g) }) if *g == captured
         ));
+    }
+
+    #[test]
+    fn parked_positionable_ids_includes_only_parked_tiled_and_floating() {
+        let mut state = floating_test_state();
+
+        // Tiled, in a workspace that's parked (not in active_workspace).
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: "parked".to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        // Floating, also parked.
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: "parked".to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+        // Tiled, but in the currently-active workspace — not parked.
+        state.placements.insert(
+            3,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        // Minimized in a parked workspace — never "parked" in the park()
+        // sense, since it was never moved off-screen to begin with.
+        state.placements.insert(
+            4,
+            Placement {
+                workspace: "parked".to_string(),
+                kind: PlacementKind::Minimized(Restore::Tiled),
+            },
+        );
+
+        let mut ids = state.parked_positionable_ids();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn unpark_all_does_not_panic_with_no_real_windows() {
+        let mut state = floating_test_state();
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: "parked".to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.unpark_all();
     }
 }
