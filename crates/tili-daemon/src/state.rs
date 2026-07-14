@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use tili_ax::{AxWindow, InstantFrameSetter, KeyCombo, Monitor, WindowFrameSetter};
@@ -32,6 +33,15 @@ const PARK_OFFSET_STEP: f64 = 50.0;
 /// `tili-ax`'s own `AxWindow::set_frame` epsilon, since drift detection is
 /// only meaningful at that same granularity.
 const FLOAT_DRIFT_EPSILON: f64 = 0.5;
+
+/// How long a window that's vanished from a fresh AX scan is kept in
+/// `WmState::pending_removal` before being treated as genuinely closed —
+/// long enough to absorb a transient AX hiccup (an app briefly failing to
+/// report one of its windows mid-update) without losing track of a window
+/// that's actually still open. `WmState::removal_grace` starts at this
+/// value but is a field (not used directly) so tests can shrink it to zero
+/// instead of sleeping for real.
+const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(300);
 
 fn frames_match(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < FLOAT_DRIFT_EPSILON
@@ -284,6 +294,16 @@ struct CompiledFloatingRule {
 pub struct WmState {
     windows: HashMap<WindowId, AxWindow>,
     placements: HashMap<WindowId, Placement>,
+    /// Windows missing from a fresh scan of their process's windows, and
+    /// when they were first noticed missing — see `finalize_expired_removals`.
+    /// Reappearing (found in a later scan) un-pends a window; `remove_app`
+    /// (whole process quit) removes immediately/unconditionally and isn't
+    /// affected by this grace period.
+    pending_removal: HashMap<WindowId, Instant>,
+    /// How long a pending removal waits before being finalized — starts at
+    /// `REMOVAL_GRACE_PERIOD`; a field rather than using the constant
+    /// directly so tests can shrink it to zero instead of sleeping for real.
+    removal_grace: Duration,
     workspaces: HashMap<String, Tree>,
     workspace_focus: HashMap<String, NodeId>,
     monitors: Vec<Monitor>,
@@ -346,6 +366,8 @@ impl Default for WmState {
         Self {
             windows: HashMap::new(),
             placements: HashMap::new(),
+            pending_removal: HashMap::new(),
+            removal_grace: REMOVAL_GRACE_PERIOD,
             workspaces,
             workspace_focus: HashMap::new(),
             monitors,
@@ -370,6 +392,29 @@ impl Default for WmState {
 }
 
 impl WmState {
+    /// Finalizes any `pending_removal` entry that's been missing for at
+    /// least `removal_grace`: actually drops it from `windows`/`placements`,
+    /// same as the old unconditional-removal behavior. Called at the start
+    /// of `apply_windows_changed` so a grace period set by one process's
+    /// event still gets rechecked opportunistically by any other process's
+    /// event in the meantime; `main.rs`'s periodic maintenance tick calls
+    /// this too, so it's rechecked even with no window events at all.
+    pub fn finalize_expired_removals(&mut self) {
+        let now = Instant::now();
+        let grace = self.removal_grace;
+        let expired: Vec<WindowId> = self
+            .pending_removal
+            .iter()
+            .filter(|&(_, &since)| now.duration_since(since) >= grace)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in expired {
+            self.pending_removal.remove(&id);
+            self.windows.remove(&id);
+            self.remove_placement(id);
+        }
+    }
+
     /// Replaces one process's windows with a freshly-scanned set, in
     /// response to a `WmEvent::WindowsChanged { pid }`: whatever isn't in
     /// the fresh scan is gone (removed from whichever workspace/placement
@@ -380,6 +425,8 @@ impl WmState {
     /// refreshed. Re-lays-out the active workspace's tiled windows
     /// afterward.
     pub fn apply_windows_changed(&mut self, pid: i32, mut fresh: Vec<AxWindow>) {
+        self.finalize_expired_removals();
+
         // Zero-size entries are usually menu-extra/phantom AX windows, not
         // real user-facing ones — skip them rather than giving them tiled
         // screen real estate.
@@ -390,6 +437,11 @@ impl WmState {
         let fresh_ids: std::collections::HashSet<WindowId> =
             fresh.iter().map(AxWindow::id).collect();
 
+        // A window missing from this scan isn't dropped immediately — it's
+        // only a candidate for removal until `finalize_expired_removals`
+        // confirms (on a later call) that it's stayed missing for
+        // `removal_grace`, absorbing a transient AX hiccup rather than
+        // treating every momentary gap as a real close.
         let stale_ids: Vec<WindowId> = self
             .windows
             .iter()
@@ -397,14 +449,16 @@ impl WmState {
             .map(|(&id, _)| id)
             .collect();
         for id in stale_ids {
-            self.windows.remove(&id);
-            self.remove_placement(id);
+            self.pending_removal.entry(id).or_insert_with(Instant::now);
         }
 
         let active_workspace = self.active_workspace_name();
         let app_hidden = tili_ax::is_app_hidden(pid);
         for window in fresh {
             let id = window.id();
+            // Present in this scan after all — un-pend it, whether or not
+            // it was ever actually pending.
+            self.pending_removal.remove(&id);
             let is_new = !self.placements.contains_key(&id);
             let kind = window.kind();
             let minimized = window.minimized();
@@ -668,7 +722,10 @@ impl WmState {
     }
 
     /// Drops every window belonging to a process that just terminated,
-    /// wherever (whichever workspace, tiled or floating) it was.
+    /// wherever (whichever workspace, tiled or floating) it was — immediate
+    /// and unconditional, unlike a single missing window in
+    /// `apply_windows_changed`; the whole process is gone, so there's
+    /// nothing to wait out a grace period for.
     pub fn remove_app(&mut self, pid: i32) {
         let ids: Vec<WindowId> = self
             .windows
@@ -679,6 +736,7 @@ impl WmState {
         for id in ids {
             self.windows.remove(&id);
             self.remove_placement(id);
+            self.pending_removal.remove(&id);
         }
         self.relayout_all_visible();
     }
@@ -2169,5 +2227,49 @@ mod tests {
             },
         );
         state.unpark_all();
+    }
+
+    #[test]
+    fn finalize_expired_removals_drops_entries_past_the_grace_period() {
+        let mut state = WmState {
+            removal_grace: Duration::ZERO,
+            ..WmState::default()
+        };
+        let id: WindowId = 1;
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.pending_removal.insert(id, Instant::now());
+
+        state.finalize_expired_removals();
+
+        assert!(!state.placements.contains_key(&id));
+        assert!(!state.pending_removal.contains_key(&id));
+    }
+
+    #[test]
+    fn finalize_expired_removals_keeps_entries_still_within_the_grace_period() {
+        let mut state = WmState {
+            removal_grace: Duration::from_secs(3600),
+            ..WmState::default()
+        };
+        let id: WindowId = 1;
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.pending_removal.insert(id, Instant::now());
+
+        state.finalize_expired_removals();
+
+        assert!(state.placements.contains_key(&id));
+        assert!(state.pending_removal.contains_key(&id));
     }
 }
