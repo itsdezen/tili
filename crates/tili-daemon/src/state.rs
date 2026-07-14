@@ -26,14 +26,163 @@ const DEFAULT_MODE: &str = "main";
 const PARK_MARGIN: f64 = 10_000.0;
 const PARK_OFFSET_STEP: f64 = 50.0;
 
-/// Which workspace a window belongs to, and whether it's tiled (part of
-/// that workspace's `Tree`) or floating (positioned once, outside the
-/// tree). Indexed by `WindowId` in `WmState::placements` so "which
-/// workspace owns this window" is an O(1) lookup instead of scanning every
-/// workspace's tree (M4 through M7 did the latter).
+/// Which workspace a window belongs to, and its current placement state.
+/// Indexed by `WindowId` in `WmState::placements` so "which workspace owns
+/// this window" is an O(1) lookup instead of scanning every workspace's
+/// tree (M4 through M7 did the latter).
 struct Placement {
     workspace: String,
-    floating: bool,
+    kind: PlacementKind,
+}
+
+/// A window's placement state, beyond just "which workspace." Only `Tiled`
+/// windows live in that workspace's `Tree`; `Floating` windows are
+/// positioned once (creation, or workspace-reactivation) and otherwise left
+/// alone; everything else is a "special" state a window can be demoted
+/// into (see `demote_to_special`/`promote_from_special`) and back out of
+/// without losing track of which of `Tiled`/`Floating` it should return to.
+///
+/// `Popup` (ambiguous `WindowKind`, see `tili_ax::WindowKind`) is tracked
+/// (shows up in `list_windows`) but — like the transient popups it
+/// replaces the old binary reject-outright behavior for — is never tiled,
+/// floated, or parked; tili simply never touches its geometry.
+#[derive(Clone, Debug)]
+enum PlacementKind {
+    Tiled,
+    Floating {
+        /// The user's own drag/resize, captured proportionally the first
+        /// time a live frame diverges from what tili last set — `None`
+        /// until then, meaning "recompute from the floating rule every
+        /// time." Not yet read anywhere: capture/restore lands in the
+        /// very next phase of this same refactor, which is why this
+        /// isn't a bare `Floating` variant already.
+        #[allow(dead_code)]
+        manual: Option<FloatGeometry>,
+    },
+    NativeFullscreen(Restore),
+    Minimized(Restore),
+    HiddenApplication(Restore),
+    Popup,
+}
+
+/// Which non-special state a demoted window (`PlacementKind::NativeFullscreen`/
+/// `Minimized`/`HiddenApplication`) should return to once it stops being
+/// special — decided once, from the window's `WindowKind`/floating-rule
+/// match, at the moment it *first* enters a special state (or at creation,
+/// if it starts in one), and carried forward across special-to-special
+/// transitions (e.g. minimized while its app is also hidden).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Restore {
+    Tiled,
+    Floating,
+}
+
+/// The three "special" placement states, in priority order — see
+/// `special_kind`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SpecialKind {
+    HiddenApplication,
+    Minimized,
+    NativeFullscreen,
+}
+
+/// A captured proportional floating geometry — see `PlacementKind::Floating`
+/// and Phase 3's `restore_floating_frame`. A unit struct for now (Phase 1
+/// only introduces the placement *shape*); Phase 3 gives it real fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FloatGeometry;
+
+/// Which special state (if any) a window's live AX/process flags put it in
+/// right now, checked in priority order: an app being hidden outranks the
+/// window itself being minimized, which outranks it being (natively)
+/// fullscreen — so e.g. minimizing a window in an already-hidden app still
+/// reports `HiddenApplication`, and un-hiding the app then correctly
+/// re-checks down to `Minimized` rather than jumping straight back to
+/// `Tiled`/`Floating`.
+fn special_kind(app_hidden: bool, minimized: bool, fullscreen: bool) -> Option<SpecialKind> {
+    if app_hidden {
+        Some(SpecialKind::HiddenApplication)
+    } else if minimized {
+        Some(SpecialKind::Minimized)
+    } else if fullscreen {
+        Some(SpecialKind::NativeFullscreen)
+    } else {
+        None
+    }
+}
+
+/// The `SpecialKind` a stored `PlacementKind` currently represents, if any —
+/// the inverse of `special_kind`'s classification, used to detect a change
+/// worth reconciling in `reconcile_existing_placement`.
+fn current_special(kind: &PlacementKind) -> Option<SpecialKind> {
+    match kind {
+        PlacementKind::HiddenApplication(_) => Some(SpecialKind::HiddenApplication),
+        PlacementKind::Minimized(_) => Some(SpecialKind::Minimized),
+        PlacementKind::NativeFullscreen(_) => Some(SpecialKind::NativeFullscreen),
+        PlacementKind::Tiled | PlacementKind::Floating { .. } | PlacementKind::Popup => None,
+    }
+}
+
+/// What a demoted window should be restored to once it leaves whichever
+/// special state it's currently in — `Tiled`/`Floating` carry it directly;
+/// a window already in a special state keeps whatever `Restore` it was
+/// demoted with; a `Popup` has no floating/tiled resting state of its own,
+/// so it falls back to `Tiled` (a corner case: a `Popup`-kind window being
+/// minimized/hidden/fullscreened at all is rare in practice).
+fn restore_for(kind: &PlacementKind) -> Restore {
+    match kind {
+        PlacementKind::Tiled | PlacementKind::Popup => Restore::Tiled,
+        PlacementKind::Floating { .. } => Restore::Floating,
+        PlacementKind::HiddenApplication(r)
+        | PlacementKind::Minimized(r)
+        | PlacementKind::NativeFullscreen(r) => *r,
+    }
+}
+
+/// Classifies a brand-new window's placement, in priority order:
+/// `HiddenApplication`, then `Minimized`, then `NativeFullscreen`, then
+/// `Popup` (kind), then `Floating` (a `Dialog`-kind window, or a
+/// `Standard`-kind one matching a floating rule — `floating_frame` is
+/// `Some` exactly when the latter applies, computed by the caller via
+/// `compute_floating_frame`), and finally `Tiled`.
+fn classify_new_window(
+    kind: tili_ax::WindowKind,
+    app_hidden: bool,
+    minimized: bool,
+    fullscreen: bool,
+    floating_frame: Option<Rect>,
+) -> PlacementKind {
+    let base_restore = if kind == tili_ax::WindowKind::Dialog || floating_frame.is_some() {
+        Restore::Floating
+    } else {
+        Restore::Tiled
+    };
+    if let Some(special) = special_kind(app_hidden, minimized, fullscreen) {
+        return match special {
+            SpecialKind::HiddenApplication => PlacementKind::HiddenApplication(base_restore),
+            SpecialKind::Minimized => PlacementKind::Minimized(base_restore),
+            SpecialKind::NativeFullscreen => PlacementKind::NativeFullscreen(base_restore),
+        };
+    }
+    match kind {
+        tili_ax::WindowKind::Popup => PlacementKind::Popup,
+        tili_ax::WindowKind::Dialog => PlacementKind::Floating { manual: None },
+        tili_ax::WindowKind::Standard if floating_frame.is_some() => {
+            PlacementKind::Floating { manual: None }
+        }
+        tili_ax::WindowKind::Standard => PlacementKind::Tiled,
+    }
+}
+
+fn placement_info(kind: &PlacementKind) -> tili_ipc::PlacementInfo {
+    match kind {
+        PlacementKind::Tiled => tili_ipc::PlacementInfo::Tiled,
+        PlacementKind::Floating { .. } => tili_ipc::PlacementInfo::Floating,
+        PlacementKind::NativeFullscreen(_) => tili_ipc::PlacementInfo::NativeFullscreen,
+        PlacementKind::Minimized(_) => tili_ipc::PlacementInfo::Minimized,
+        PlacementKind::HiddenApplication(_) => tili_ipc::PlacementInfo::HiddenApplication,
+        PlacementKind::Popup => tili_ipc::PlacementInfo::Popup,
+    }
 }
 
 /// A `tili_config::FloatingRule` with its title pattern pre-compiled —
@@ -156,29 +305,13 @@ impl WmState {
     /// refreshed. Re-lays-out the active workspace's tiled windows
     /// afterward.
     pub fn apply_windows_changed(&mut self, pid: i32, mut fresh: Vec<AxWindow>) {
-        eprintln!(
-            "DEBUG apply_windows_changed pid={pid} received={}",
-            fresh.len()
-        );
         // Zero-size entries are usually menu-extra/phantom AX windows, not
         // real user-facing ones — skip them rather than giving them tiled
         // screen real estate.
         fresh.retain(|w| {
             let frame = w.frame();
-            let keep = frame.width > 0.0 && frame.height > 0.0;
-            if !keep {
-                eprintln!(
-                    "DEBUG apply_windows_changed pid={pid} dropped zero-size id={} title={:?} frame={frame:?}",
-                    w.id(),
-                    w.title()
-                );
-            }
-            keep
+            frame.width > 0.0 && frame.height > 0.0
         });
-        eprintln!(
-            "DEBUG apply_windows_changed pid={pid} retained={}",
-            fresh.len()
-        );
         let fresh_ids: std::collections::HashSet<WindowId> =
             fresh.iter().map(AxWindow::id).collect();
 
@@ -194,9 +327,13 @@ impl WmState {
         }
 
         let active_workspace = self.active_workspace_name();
+        let app_hidden = tili_ax::is_app_hidden(pid);
         for window in fresh {
             let id = window.id();
             let is_new = !self.placements.contains_key(&id);
+            let kind = window.kind();
+            let minimized = window.minimized();
+            let fullscreen = window.fullscreen();
             let floating_frame = if is_new {
                 self.compute_floating_frame(&window)
             } else {
@@ -206,71 +343,178 @@ impl WmState {
             self.windows.insert(id, window);
 
             if !is_new {
-                // Parking is a one-shot nudge at the moment a workspace
-                // becomes inactive (see `park`/`switch_workspace`), not a
-                // continuously-enforced invariant — if the real window
-                // drifts back on screen afterward (some apps resist an
-                // off-screen move, or just re-notify without actually
-                // moving), nothing previously re-asserted it. Every
-                // refresh of an already-known window re-checks this
-                // instead. `park`'s target is idempotent (see
-                // `AxWindow::set_position`'s no-op-if-unchanged guard), so
-                // calling it redundantly here whenever the window truly is
-                // already parked costs nothing.
-                let needs_repark = self
-                    .placements
-                    .get(&id)
-                    .is_some_and(|p| !self.active_workspace.values().any(|w| w == &p.workspace));
-                if needs_repark {
-                    self.park(id, 0);
-                }
+                self.reconcile_existing_placement(id, app_hidden, minimized, fullscreen);
                 continue;
             }
-            eprintln!(
-                "DEBUG apply_windows_changed pid={pid} id={id} is_new floating={}",
-                floating_frame.is_some()
-            );
 
-            if let Some(frame) = floating_frame {
-                self.placements.insert(
-                    id,
-                    Placement {
-                        workspace: active_workspace.clone(),
-                        floating: true,
-                    },
-                );
-                if let Some(w) = self.windows.get_mut(&id) {
-                    self.frame_setter.set_frame(w, frame);
+            let placement_kind =
+                classify_new_window(kind, app_hidden, minimized, fullscreen, floating_frame);
+            match &placement_kind {
+                PlacementKind::Tiled => {
+                    let near = self.workspace_focus.get(&active_workspace).copied();
+                    let root_orientation = self.root_orientation_hint();
+                    let node = self
+                        .active_tree_mut()
+                        .insert_window(id, near, root_orientation);
+                    self.workspace_focus
+                        .entry(active_workspace.clone())
+                        .or_insert(node);
                 }
-            } else {
-                let near = self.workspace_focus.get(&active_workspace).copied();
+                PlacementKind::Floating { .. } => {
+                    if let Some(frame) = floating_frame
+                        && let Some(w) = self.windows.get_mut(&id)
+                    {
+                        self.frame_setter.set_frame(w, frame);
+                    }
+                }
+                PlacementKind::NativeFullscreen(_)
+                | PlacementKind::Minimized(_)
+                | PlacementKind::HiddenApplication(_)
+                | PlacementKind::Popup => {
+                    // Tracked but left exactly where/however it already is
+                    // — no tree insertion, no frame write.
+                }
+            }
+            self.placements.insert(
+                id,
+                Placement {
+                    workspace: active_workspace.clone(),
+                    kind: placement_kind,
+                },
+            );
+        }
+
+        if !self.mouse_button_down {
+            self.relayout_active();
+        }
+    }
+
+    /// Diffs an already-known window's live AX/process flags against its
+    /// stored `PlacementKind`, demoting it into (or promoting it out of) a
+    /// special state as needed, then — for whatever it ends up as — checks
+    /// whether it needs re-parking (only `Tiled`/`Floating` ever do; a
+    /// `Minimized`/`NativeFullscreen`/`HiddenApplication` window is never
+    /// force-moved, matching the design invariant that tili shouldn't fight
+    /// a state the user or another app put the window in deliberately).
+    fn reconcile_existing_placement(
+        &mut self,
+        id: WindowId,
+        app_hidden: bool,
+        minimized: bool,
+        fullscreen: bool,
+    ) {
+        let Some(kind) = self.placements.get(&id).map(|p| p.kind.clone()) else {
+            return;
+        };
+        let stored_special = current_special(&kind);
+        let live_special = special_kind(app_hidden, minimized, fullscreen);
+
+        if stored_special != live_special {
+            let restore = restore_for(&kind);
+            if stored_special.is_some() {
+                self.promote_from_special(id, restore);
+            }
+            if let Some(new_special) = live_special {
+                self.demote_to_special(id, new_special, restore);
+            }
+        }
+
+        let is_positionable = matches!(
+            self.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Tiled) | Some(PlacementKind::Floating { .. })
+        );
+        if is_positionable {
+            // Parking is a one-shot nudge at the moment a workspace becomes
+            // inactive (see `park`/`switch_workspace`), not a continuously-
+            // enforced invariant — if the real window drifts back on
+            // screen afterward (some apps resist an off-screen move, or
+            // just re-notify without actually moving), nothing previously
+            // re-asserted it. Every refresh of an already-known window
+            // re-checks this instead. `park`'s target is idempotent (see
+            // `AxWindow::set_position`'s no-op-if-unchanged guard), so
+            // calling it redundantly here whenever the window truly is
+            // already parked costs nothing.
+            let needs_repark = self
+                .placements
+                .get(&id)
+                .is_some_and(|p| !self.active_workspace.values().any(|w| w == &p.workspace));
+            if needs_repark {
+                self.park(id, 0);
+            }
+        }
+    }
+
+    /// Moves a window into a special (non-plain) placement state, removing
+    /// it from its workspace's tiled tree first if it was `Tiled` (a
+    /// minimized/hidden/fullscreen window has no business occupying a
+    /// tile) — `Floating` windows just get their kind swapped in place,
+    /// since they were never in a tree to begin with.
+    fn demote_to_special(&mut self, id: WindowId, special: SpecialKind, restore: Restore) {
+        let Some(workspace) = self.placements.get(&id).map(|p| p.workspace.clone()) else {
+            return;
+        };
+        let was_tiled = self
+            .placements
+            .get(&id)
+            .is_some_and(|p| matches!(p.kind, PlacementKind::Tiled));
+        if was_tiled {
+            self.remove_from_tree(id, &workspace);
+        }
+        let kind = match special {
+            SpecialKind::HiddenApplication => PlacementKind::HiddenApplication(restore),
+            SpecialKind::Minimized => PlacementKind::Minimized(restore),
+            SpecialKind::NativeFullscreen => PlacementKind::NativeFullscreen(restore),
+        };
+        self.placements.insert(id, Placement { workspace, kind });
+    }
+
+    /// Moves a window back out of a special placement state into whatever
+    /// `restore` says it should be — reinserting it into its workspace's
+    /// tiled tree (`Restore::Tiled`) or recomputing its floating frame
+    /// (`Restore::Floating`; Phase 3 layers a captured manual geometry on
+    /// top of this).
+    fn promote_from_special(&mut self, id: WindowId, restore: Restore) {
+        let Some(workspace) = self.placements.get(&id).map(|p| p.workspace.clone()) else {
+            return;
+        };
+        match restore {
+            Restore::Tiled => {
+                let near = self.workspace_focus.get(&workspace).copied();
                 let root_orientation = self.root_orientation_hint();
                 let node = self
-                    .active_tree_mut()
+                    .workspaces
+                    .entry(workspace.clone())
+                    .or_default()
                     .insert_window(id, near, root_orientation);
                 self.workspace_focus
-                    .entry(active_workspace.clone())
+                    .entry(workspace.clone())
                     .or_insert(node);
                 self.placements.insert(
                     id,
                     Placement {
-                        workspace: active_workspace.clone(),
-                        floating: false,
+                        workspace,
+                        kind: PlacementKind::Tiled,
                     },
                 );
             }
-        }
-
-        eprintln!(
-            "DEBUG apply_windows_changed pid={pid} mouse_button_down={} active_workspace={active_workspace}",
-            self.mouse_button_down
-        );
-        if !self.mouse_button_down {
-            self.relayout_active();
-        } else {
-            eprintln!(
-                "DEBUG apply_windows_changed pid={pid} skipped relayout_active (mouse button down)"
-            );
+            Restore::Floating => {
+                self.placements.insert(
+                    id,
+                    Placement {
+                        workspace,
+                        kind: PlacementKind::Floating { manual: None },
+                    },
+                );
+                let frame = self
+                    .windows
+                    .get(&id)
+                    .and_then(|w| self.compute_floating_frame(w));
+                if let Some(frame) = frame
+                    && let Some(w) = self.windows.get_mut(&id)
+                {
+                    self.frame_setter.set_frame(w, frame);
+                }
+            }
         }
     }
 
@@ -299,7 +543,11 @@ impl WmState {
                     id: w.id(),
                     pid: w.pid(),
                     title: w.title().to_string(),
-                    floating: self.placements.get(&w.id()).is_some_and(|p| p.floating),
+                    placement: self
+                        .placements
+                        .get(&w.id())
+                        .map(|p| placement_info(&p.kind))
+                        .unwrap_or(tili_ipc::PlacementInfo::Tiled),
                     frame: RectInfo {
                         x: frame.x,
                         y: frame.y,
@@ -823,7 +1071,7 @@ impl WmState {
             id,
             Placement {
                 workspace: target_name.to_string(),
-                floating: false,
+                kind: PlacementKind::Tiled,
             },
         );
 
@@ -864,35 +1112,43 @@ impl WmState {
     fn floating_windows_in(&self, workspace: &str) -> Vec<WindowId> {
         self.placements
             .iter()
-            .filter(|(_, p)| p.floating && p.workspace == workspace)
+            .filter(|(_, p)| {
+                matches!(p.kind, PlacementKind::Floating { .. }) && p.workspace == workspace
+            })
             .map(|(&id, _)| id)
             .collect()
     }
 
     /// Drops a window's placement entirely — from its workspace's `Tree`
-    /// if it was tiled, or just from `placements` if it was floating
-    /// (floating windows were never in a `Tree` to begin with).
+    /// if it was tiled (see `remove_from_tree`), or just from `placements`
+    /// otherwise (nothing else ever sat in a `Tree`).
     fn remove_placement(&mut self, id: WindowId) {
         let Some(placement) = self.placements.remove(&id) else {
             return;
         };
-        if placement.floating {
-            return;
+        if matches!(placement.kind, PlacementKind::Tiled) {
+            self.remove_from_tree(id, &placement.workspace);
         }
-        let Some(tree) = self.workspaces.get_mut(&placement.workspace) else {
+    }
+
+    /// Removes `id` from `workspace`'s tiled tree, reassigning that
+    /// workspace's remembered focus if `id` was it — without touching
+    /// `self.placements`, so callers that are about to overwrite the
+    /// placement with a new kind (`demote_to_special`) or drop it entirely
+    /// (`remove_placement`) both funnel through here.
+    fn remove_from_tree(&mut self, id: WindowId, workspace: &str) {
+        let Some(tree) = self.workspaces.get_mut(workspace) else {
             return;
         };
         let removed_leaf = tree.find_node(id);
         let suggested = tree.remove_window(id);
-        if removed_leaf.is_some()
-            && self.workspace_focus.get(&placement.workspace) == removed_leaf.as_ref()
-        {
+        if removed_leaf.is_some() && self.workspace_focus.get(workspace) == removed_leaf.as_ref() {
             match suggested {
                 Some(n) => {
-                    self.workspace_focus.insert(placement.workspace, n);
+                    self.workspace_focus.insert(workspace.to_string(), n);
                 }
                 None => {
-                    self.workspace_focus.remove(&placement.workspace);
+                    self.workspace_focus.remove(workspace);
                 }
             }
         }
@@ -985,14 +1241,8 @@ impl WmState {
         let bounds = tili_ax::combined_bounds(&self.monitors);
         let x = bounds.x + bounds.width + PARK_MARGIN + (offset_index as f64 * PARK_OFFSET_STEP);
         let y = bounds.y;
-        let current_frame = self.windows.get(&id).map(tili_ax::AxWindow::frame);
-        eprintln!(
-            "DEBUG park id={id} current_frame={current_frame:?} bounds={bounds:?} target=({x}, {y})"
-        );
         if let Some(window) = self.windows.get_mut(&id) {
             window.set_position(x, y);
-        } else {
-            eprintln!("DEBUG park id={id} not found in self.windows — nothing to move");
         }
     }
 
@@ -1031,35 +1281,19 @@ impl WmState {
     /// (see `reposition_floating_for_monitor`).
     fn relayout_monitor(&mut self, monitor_id: u32) {
         let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
-            eprintln!(
-                "DEBUG relayout_monitor monitor_id={monitor_id} no active workspace — skipped"
-            );
             return;
         };
         let Some(area) = self.monitor_frame(monitor_id) else {
-            eprintln!(
-                "DEBUG relayout_monitor monitor_id={monitor_id} workspace={name} no monitor frame — skipped"
-            );
             return;
         };
         let Some(tree) = self.workspaces.get(&name) else {
-            eprintln!(
-                "DEBUG relayout_monitor monitor_id={monitor_id} workspace={name} no tree entry — skipped"
-            );
             return;
         };
         let gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
         let placements = tree.layout(area, gaps, self.accordion_padding);
-        eprintln!(
-            "DEBUG relayout_monitor monitor_id={monitor_id} workspace={name} area={area:?} placements={placements:?}"
-        );
         for (id, rect) in placements {
             if let Some(window) = self.windows.get_mut(&id) {
                 self.frame_setter.set_frame(window, rect);
-            } else {
-                eprintln!(
-                    "DEBUG relayout_monitor monitor_id={monitor_id} id={id} not found in self.windows — nothing to move"
-                );
             }
         }
     }
@@ -1169,5 +1403,273 @@ fn to_tree_gaps(gaps: tili_config::Gaps) -> Gaps {
             f64::from(bottom),
             f64::from(left),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn special_kind_priority_order() {
+        assert_eq!(
+            special_kind(true, true, true),
+            Some(SpecialKind::HiddenApplication)
+        );
+        assert_eq!(
+            special_kind(false, true, true),
+            Some(SpecialKind::Minimized)
+        );
+        assert_eq!(
+            special_kind(false, false, true),
+            Some(SpecialKind::NativeFullscreen)
+        );
+        assert_eq!(special_kind(false, false, false), None);
+    }
+
+    #[test]
+    fn current_special_mirrors_special_kind() {
+        assert_eq!(
+            current_special(&PlacementKind::HiddenApplication(Restore::Tiled)),
+            Some(SpecialKind::HiddenApplication)
+        );
+        assert_eq!(
+            current_special(&PlacementKind::Minimized(Restore::Floating)),
+            Some(SpecialKind::Minimized)
+        );
+        assert_eq!(
+            current_special(&PlacementKind::NativeFullscreen(Restore::Tiled)),
+            Some(SpecialKind::NativeFullscreen)
+        );
+        assert_eq!(current_special(&PlacementKind::Tiled), None);
+        assert_eq!(
+            current_special(&PlacementKind::Floating { manual: None }),
+            None
+        );
+        assert_eq!(current_special(&PlacementKind::Popup), None);
+    }
+
+    #[test]
+    fn restore_for_carries_through_special_states() {
+        assert_eq!(restore_for(&PlacementKind::Tiled), Restore::Tiled);
+        assert_eq!(
+            restore_for(&PlacementKind::Floating { manual: None }),
+            Restore::Floating
+        );
+        assert_eq!(
+            restore_for(&PlacementKind::Minimized(Restore::Floating)),
+            Restore::Floating
+        );
+        assert_eq!(restore_for(&PlacementKind::Popup), Restore::Tiled);
+    }
+
+    #[test]
+    fn classify_new_window_priority_order() {
+        // HiddenApplication beats everything else, even a Standard window
+        // that would otherwise just be Tiled.
+        assert!(matches!(
+            classify_new_window(tili_ax::WindowKind::Standard, true, true, true, None),
+            PlacementKind::HiddenApplication(Restore::Tiled)
+        ));
+        // Minimized beats NativeFullscreen.
+        assert!(matches!(
+            classify_new_window(tili_ax::WindowKind::Standard, false, true, true, None),
+            PlacementKind::Minimized(Restore::Tiled)
+        ));
+        assert!(matches!(
+            classify_new_window(tili_ax::WindowKind::Standard, false, false, true, None),
+            PlacementKind::NativeFullscreen(Restore::Tiled)
+        ));
+    }
+
+    #[test]
+    fn classify_new_window_popup_kind_beats_floating_rule_match() {
+        let some_frame = Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        });
+        assert!(matches!(
+            classify_new_window(tili_ax::WindowKind::Popup, false, false, false, some_frame),
+            PlacementKind::Popup
+        ));
+    }
+
+    #[test]
+    fn classify_new_window_dialog_is_floating_even_without_a_rule_match() {
+        assert!(matches!(
+            classify_new_window(tili_ax::WindowKind::Dialog, false, false, false, None),
+            PlacementKind::Floating { manual: None }
+        ));
+    }
+
+    #[test]
+    fn classify_new_window_standard_follows_rule_match_else_tiled() {
+        let some_frame = Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        });
+        assert!(matches!(
+            classify_new_window(
+                tili_ax::WindowKind::Standard,
+                false,
+                false,
+                false,
+                some_frame
+            ),
+            PlacementKind::Floating { manual: None }
+        ));
+        assert!(matches!(
+            classify_new_window(tili_ax::WindowKind::Standard, false, false, false, None),
+            PlacementKind::Tiled
+        ));
+    }
+
+    #[test]
+    fn demote_to_special_removes_a_tiled_window_from_its_tree() {
+        let mut state = WmState::default();
+        let id: WindowId = 1;
+        let root_orientation = state.root_orientation_hint();
+        state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_window(id, None, root_orientation);
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+
+        state.demote_to_special(id, SpecialKind::Minimized, Restore::Tiled);
+
+        assert!(
+            state
+                .workspaces
+                .get(DEFAULT_WORKSPACE)
+                .unwrap()
+                .find_node(id)
+                .is_none()
+        );
+        assert!(matches!(
+            state.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Minimized(Restore::Tiled))
+        ));
+    }
+
+    #[test]
+    fn promote_from_special_reinserts_into_the_tree() {
+        let mut state = WmState::default();
+        let id: WindowId = 1;
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Minimized(Restore::Tiled),
+            },
+        );
+
+        state.promote_from_special(id, Restore::Tiled);
+
+        assert!(matches!(
+            state.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Tiled)
+        ));
+        assert!(
+            state
+                .workspaces
+                .get(DEFAULT_WORKSPACE)
+                .unwrap()
+                .find_node(id)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn reconcile_existing_placement_round_trips_tiled_through_minimized() {
+        let mut state = WmState::default();
+        let id: WindowId = 1;
+        let root_orientation = state.root_orientation_hint();
+        state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_window(id, None, root_orientation);
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+
+        // Goes minimized.
+        state.reconcile_existing_placement(id, false, true, false);
+        assert!(matches!(
+            state.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Minimized(Restore::Tiled))
+        ));
+        assert!(
+            state
+                .workspaces
+                .get(DEFAULT_WORKSPACE)
+                .unwrap()
+                .find_node(id)
+                .is_none()
+        );
+
+        // Un-minimizes — back to Tiled, reinserted into the tree.
+        state.reconcile_existing_placement(id, false, false, false);
+        assert!(matches!(
+            state.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Tiled)
+        ));
+        assert!(
+            state
+                .workspaces
+                .get(DEFAULT_WORKSPACE)
+                .unwrap()
+                .find_node(id)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn reconcile_existing_placement_no_change_is_a_no_op() {
+        let mut state = WmState::default();
+        let id: WindowId = 1;
+        let root_orientation = state.root_orientation_hint();
+        state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_window(id, None, root_orientation);
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+
+        state.reconcile_existing_placement(id, false, false, false);
+
+        assert!(matches!(
+            state.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Tiled)
+        ));
+        assert!(
+            state
+                .workspaces
+                .get(DEFAULT_WORKSPACE)
+                .unwrap()
+                .find_node(id)
+                .is_some()
+        );
     }
 }

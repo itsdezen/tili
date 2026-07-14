@@ -88,6 +88,19 @@ pub struct RectInfo {
     pub height: f64,
 }
 
+/// String-enum mirror of `tili-daemon`'s internal `PlacementKind`, so a
+/// `--json` consumer reading an unrecognized variant (from a newer daemon)
+/// degrades gracefully instead of failing to deserialize at all.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum PlacementInfo {
+    Tiled,
+    Floating,
+    NativeFullscreen,
+    Minimized,
+    HiddenApplication,
+    Popup,
+}
+
 /// A window as reported by `Command::ListWindows`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowInfo {
@@ -95,10 +108,10 @@ pub struct WindowInfo {
     pub id: u32,
     pub pid: i32,
     pub title: String,
-    /// Whether a floating rule matched this window (M8) — floating
-    /// windows are excluded from tiling and only positioned once, on
-    /// creation (or when their workspace becomes active again).
-    pub floating: bool,
+    /// Which of `tili-daemon`'s placement states this window is currently
+    /// in — see `PlacementInfo`. Replaces the old plain `floating: bool`
+    /// now that placement has more than two states.
+    pub placement: PlacementInfo,
     pub frame: RectInfo,
 }
 

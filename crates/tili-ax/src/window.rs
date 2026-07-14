@@ -1,8 +1,11 @@
 use axuielement::AXUIElement;
 use axuielement::ax_attribute::roles::AX_WINDOW_ROLE;
-use axuielement::ax_attribute::subroles::AX_STANDARD_WINDOW_SUBROLE;
+use axuielement::ax_attribute::subroles::{
+    AX_DIALOG_SUBROLE, AX_STANDARD_WINDOW_SUBROLE, AX_SYSTEM_DIALOG_SUBROLE,
+};
 use axuielement::ax_attribute::{
-    AX_FULL_SCREEN_BUTTON_ATTRIBUTE, AX_ROLE_ATTRIBUTE, AX_SUBROLE_ATTRIBUTE,
+    AX_FULL_SCREEN_BUTTON_ATTRIBUTE, AX_MINIMIZED_ATTRIBUTE, AX_ROLE_ATTRIBUTE,
+    AX_SUBROLE_ATTRIBUTE,
 };
 use axuielement::ffi::{
     AXUIElementRef, kAXFocusedAttribute, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
@@ -10,6 +13,40 @@ use axuielement::ffi::{
 };
 use axuielement::{AXPoint, AXSize};
 use tili_tree::{Rect, WindowId};
+
+/// The window's own fullscreen state (distinct from `AX_FULL_SCREEN_BUTTON_ATTRIBUTE`,
+/// which is just whether the button exists). Not exported as a constant by
+/// the `axuielement` crate, but it's a plain bool attribute name so no patch
+/// is needed to read/write it.
+const AX_FULL_SCREEN_ATTRIBUTE: &str = "AXFullScreen";
+
+/// A 3-way classification of what an `AXWindows`-attribute entry actually
+/// is, replacing the old binary "is this a real window" check. `Dialog` and
+/// `Popup` are both tracked (never dropped) — `Popup` just means "ambiguous,
+/// couldn't confirm `Standard` or `Dialog`," not "not a window."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowKind {
+    Standard,
+    Dialog,
+    Popup,
+}
+
+/// Pure decision function behind `WindowKind` classification — plain
+/// string/bool inputs so it's unit-testable without a real `AXUIElement`.
+/// Mirrors (a stripped-down version of) AeroSpace's window-vs-popup
+/// heuristic: a known dialog subrole is `Dialog`; the standard subrole is
+/// `Standard`; a missing subrole is tie-broken by presence of a fullscreen
+/// button (unchanged from the old binary check) since that's a reliable
+/// secondary signal AppKit only puts on ordinary top-level windows; anything
+/// else is `Popup`.
+fn classify_window_kind(subrole: Option<&str>, has_fullscreen_button: bool) -> WindowKind {
+    match subrole {
+        Some(s) if s == AX_DIALOG_SUBROLE || s == AX_SYSTEM_DIALOG_SUBROLE => WindowKind::Dialog,
+        Some(s) if s == AX_STANDARD_WINDOW_SUBROLE => WindowKind::Standard,
+        None if has_fullscreen_button => WindowKind::Standard,
+        _ => WindowKind::Popup,
+    }
+}
 
 // `_AXUIElementGetWindow` is undocumented but stable and widely relied upon
 // by macOS window managers — it's the only way to resolve the real
@@ -41,6 +78,9 @@ pub struct AxWindow {
     title: String,
     frame: Rect,
     element: AXUIElement,
+    kind: WindowKind,
+    minimized: bool,
+    fullscreen: bool,
 }
 
 impl AxWindow {
@@ -69,56 +109,33 @@ impl AxWindow {
         (status == 0).then_some(id)
     }
 
-    /// Whether `element` looks like a real, tileable window rather than a
-    /// transient popup/panel (autofill suggestions, IME candidate windows,
-    /// spellcheck bubbles, system dialogs) that `kAXWindowsAttribute`
-    /// sometimes includes alongside genuine windows. Mirrors (a stripped-down
-    /// version of) AeroSpace's own window-vs-popup heuristic — `AXRole`/
-    /// `AXSubrole` first, since that's the precise, standard signal AppKit
-    /// populates for ordinary `NSWindow`s; a missing `AXSubrole` is treated
-    /// as ambiguous rather than rejected outright (silently dropping a
-    /// legitimate window is worse than occasionally tiling a stray popup),
-    /// tie-broken by presence of a fullscreen button, the same secondary
-    /// signal AeroSpace falls back on for exactly this ambiguous case.
-    fn looks_like_a_real_window(element: &AXUIElement) -> bool {
-        let role = element.string_attribute(AX_ROLE_ATTRIBUTE).ok().flatten();
-        let subrole = element
-            .string_attribute(AX_SUBROLE_ATTRIBUTE)
-            .ok()
-            .flatten();
-        let result = if role.as_deref().is_some_and(|r| r != AX_WINDOW_ROLE) {
-            false
-        } else {
-            match &subrole {
-                Some(s) => s == AX_STANDARD_WINDOW_SUBROLE,
-                None => element
-                    .element_attribute(AX_FULL_SCREEN_BUTTON_ATTRIBUTE)
-                    .ok()
-                    .flatten()
-                    .is_some(),
-            }
-        };
-        eprintln!("DEBUG looks_like_a_real_window: role={role:?} subrole={subrole:?} -> {result}");
-        result
-    }
-
     /// Builds an `AxWindow` from an `AXUIElement` known to be a window
     /// (typically an entry from an application's `AXWindows` attribute).
     /// `bundle_id` is resolved once per process by the caller (see
     /// `enumerate::list_windows_for_pid`) rather than once per window, to
     /// avoid redundant `NSRunningApplication` lookups for apps with
-    /// multiple windows. Returns `None` if the private call can't resolve
-    /// a window id, or if `element` doesn't look like a real window (see
-    /// `looks_like_a_real_window`) — both cases mean "skip this element."
+    /// multiple windows. Returns `None` if the private call can't resolve a
+    /// window id, or if `AXRole` is present and isn't `AXWindow` at all
+    /// (genuinely not a window) — anything else is kept and classified via
+    /// `classify_window_kind` (`Dialog`/`Popup` are tracked too, never
+    /// dropped, unlike the old binary `looks_like_a_real_window` check).
     pub fn from_element(element: AXUIElement, pid: i32, bundle_id: Option<String>) -> Option<Self> {
-        if !Self::looks_like_a_real_window(&element) {
-            eprintln!("DEBUG from_element pid={pid}: rejected by looks_like_a_real_window");
+        let role = element.string_attribute(AX_ROLE_ATTRIBUTE).ok().flatten();
+        if role.as_deref().is_some_and(|r| r != AX_WINDOW_ROLE) {
             return None;
         }
-        let Some(id) = Self::resolve_window_id(&element) else {
-            eprintln!("DEBUG from_element pid={pid}: resolve_window_id failed");
-            return None;
-        };
+        let subrole = element
+            .string_attribute(AX_SUBROLE_ATTRIBUTE)
+            .ok()
+            .flatten();
+        let has_fullscreen_button = element
+            .element_attribute(AX_FULL_SCREEN_BUTTON_ATTRIBUTE)
+            .ok()
+            .flatten()
+            .is_some();
+        let kind = classify_window_kind(subrole.as_deref(), has_fullscreen_button);
+
+        let id = Self::resolve_window_id(&element)?;
         let title = element
             .string_attribute(kAXTitleAttribute)
             .ok()
@@ -140,6 +157,16 @@ impl AxWindow {
                 height: 0.0,
             },
         };
+        let minimized = element
+            .bool_attribute(AX_MINIMIZED_ATTRIBUTE)
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        let fullscreen = element
+            .bool_attribute(AX_FULL_SCREEN_ATTRIBUTE)
+            .ok()
+            .flatten()
+            .unwrap_or(false);
 
         Some(Self {
             id,
@@ -148,6 +175,9 @@ impl AxWindow {
             title,
             frame,
             element,
+            kind,
+            minimized,
+            fullscreen,
         })
     }
 
@@ -173,6 +203,18 @@ impl AxWindow {
 
     pub fn element(&self) -> &AXUIElement {
         &self.element
+    }
+
+    pub fn kind(&self) -> WindowKind {
+        self.kind
+    }
+
+    pub fn minimized(&self) -> bool {
+        self.minimized
+    }
+
+    pub fn fullscreen(&self) -> bool {
+        self.fullscreen
     }
 
     /// Sets the window's position + size via `AXUIElementSetAttributeValue`,
@@ -202,23 +244,19 @@ impl AxWindow {
         if frame_matches(self.frame, target) {
             return;
         }
-        let position_result = self.element.set_point_attribute(
+        let _ = self.element.set_point_attribute(
             kAXPositionAttribute,
             AXPoint {
                 x: target.x,
                 y: target.y,
             },
         );
-        let size_result = self.element.set_size_attribute(
+        let _ = self.element.set_size_attribute(
             kAXSizeAttribute,
             AXSize {
                 width: target.width,
                 height: target.height,
             },
-        );
-        eprintln!(
-            "DEBUG set_frame id={} target={target:?} position_result={position_result:?} size_result={size_result:?}",
-            self.id
         );
         self.frame = target;
     }
@@ -231,13 +269,9 @@ impl AxWindow {
         if (self.frame.x - x).abs() < FRAME_EPSILON && (self.frame.y - y).abs() < FRAME_EPSILON {
             return;
         }
-        let position_result = self
+        let _ = self
             .element
             .set_point_attribute(kAXPositionAttribute, AXPoint { x, y });
-        eprintln!(
-            "DEBUG set_position id={} target=({x}, {y}) position_result={position_result:?}",
-            self.id
-        );
         self.frame.x = x;
         self.frame.y = y;
     }
@@ -247,5 +281,48 @@ impl AxWindow {
     pub fn focus(&self) {
         let _ = self.element.set_bool_attribute(kAXFocusedAttribute, true);
         let _ = self.element.perform_action(kAXRaiseAction);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dialog_subrole_classifies_as_dialog() {
+        assert_eq!(
+            classify_window_kind(Some(AX_DIALOG_SUBROLE), false),
+            WindowKind::Dialog
+        );
+        assert_eq!(
+            classify_window_kind(Some(AX_SYSTEM_DIALOG_SUBROLE), true),
+            WindowKind::Dialog
+        );
+    }
+
+    #[test]
+    fn standard_subrole_classifies_as_standard() {
+        assert_eq!(
+            classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), false),
+            WindowKind::Standard
+        );
+    }
+
+    #[test]
+    fn missing_subrole_with_fullscreen_button_ties_break_to_standard() {
+        assert_eq!(classify_window_kind(None, true), WindowKind::Standard);
+    }
+
+    #[test]
+    fn missing_subrole_without_fullscreen_button_is_popup() {
+        assert_eq!(classify_window_kind(None, false), WindowKind::Popup);
+    }
+
+    #[test]
+    fn unrecognized_subrole_is_popup() {
+        assert_eq!(
+            classify_window_kind(Some("AXFloatingWindow"), false),
+            WindowKind::Popup
+        );
     }
 }

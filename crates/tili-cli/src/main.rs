@@ -2,7 +2,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use tili_ipc::{Command, Direction, LayoutKind, MonitorInfo, Response, WindowInfo, WorkspaceInfo};
+use tili_ipc::{
+    Command, Direction, LayoutKind, MonitorInfo, PlacementInfo, Response, WindowInfo, WorkspaceInfo,
+};
 
 #[derive(Parser)]
 #[command(name = "tili", about = "CLI for the tili tiling window manager daemon")]
@@ -210,7 +212,7 @@ fn print_windows(payload: serde_json::Value) {
         Ok(windows) if windows.is_empty() => println!("no windows found"),
         Ok(windows) => {
             for w in windows {
-                let placement = if w.floating { "float" } else { "tile " };
+                let placement = placement_label(w.placement);
                 println!(
                     "{:>10}  pid={:<8} {placement} {:.0}x{:.0}+{:.0}+{:.0}  {}",
                     w.id, w.pid, w.frame.width, w.frame.height, w.frame.x, w.frame.y, w.title
@@ -218,6 +220,17 @@ fn print_windows(payload: serde_json::Value) {
             }
         }
         Err(_) => println!("(response payload not recognized)"),
+    }
+}
+
+fn placement_label(placement: PlacementInfo) -> &'static str {
+    match placement {
+        PlacementInfo::Tiled => "tile ",
+        PlacementInfo::Floating => "float",
+        PlacementInfo::NativeFullscreen => "fullscr",
+        PlacementInfo::Minimized => "min  ",
+        PlacementInfo::HiddenApplication => "hidden",
+        PlacementInfo::Popup => "popup",
     }
 }
 
