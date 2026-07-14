@@ -82,6 +82,16 @@ pub fn bundle_id_for_pid(pid: i32) -> Option<String> {
     app.bundleIdentifier().map(|s| s.to_string())
 }
 
+/// Whether a process's app is currently hidden (Cmd-H / "Hide app-name"),
+/// via `NSRunningApplication.isHidden`. Called once per pid per refresh,
+/// same cost profile as `bundle_id_for_pid` — used to classify a process's
+/// windows as `PlacementKind::HiddenApplication` rather than trying to
+/// force them back on screen.
+pub fn is_app_hidden(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .is_some_and(|app| app.isHidden())
+}
+
 /// Extracts the launched/terminated app's pid and bundle id from a
 /// `NSWorkspaceDidLaunchApplicationNotification`/`DidTerminateApplication`'s
 /// `userInfo[NSWorkspaceApplicationKey]`.

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::mpsc::Sender;
 
@@ -114,6 +115,143 @@ pub fn combined_bounds(monitors: &[Monitor]) -> Rect {
     }
 }
 
+fn point_in_rect(x: f64, y: f64, rect: Rect) -> bool {
+    x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
+}
+
+/// Which corner of `combined_bounds` a parking origin was chosen at — only
+/// used to know which direction to push `margin` outward in.
+#[derive(Clone, Copy)]
+enum Corner {
+    BottomRight,
+    BottomLeft,
+    TopRight,
+    TopLeft,
+}
+
+/// Picks a corner of the connected monitors' combined bounds to park
+/// invisible/inactive-workspace windows beyond, then pushes `margin` units
+/// outward from it (in both axes) so the returned point is guaranteed clear
+/// of every connected monitor.
+///
+/// Checked in a fixed preference order — bottom-right, bottom-left,
+/// top-right, top-left — picking whichever corner point (the bounding box's
+/// actual corner, before pushing outward) is contained in the *fewest*
+/// connected monitors' frames; ties (including the common single/dual-
+/// monitor case, where every corner sits on some monitor equally) keep
+/// today's default of parking off the bottom-right. This matters for
+/// irregular (e.g. L-shaped) arrangements: a bounding-box corner that
+/// happens to coincide with a real monitor's own corner is a worse parking
+/// spot than one that falls in genuinely empty space no monitor reaches —
+/// e.g. three monitors arranged in an L leave one quadrant of their
+/// combined bounding box empty; parking there instead of hugging whichever
+/// monitor happens to own the bottom-right corner keeps parked windows
+/// further from anything the user might drag/Mission-Control near.
+pub fn choose_parking_corner(monitors: &[Monitor], margin: f64) -> (f64, f64) {
+    let bounds = combined_bounds(monitors);
+    let candidates = [
+        (
+            Corner::BottomRight,
+            bounds.x + bounds.width,
+            bounds.y + bounds.height,
+        ),
+        (Corner::BottomLeft, bounds.x, bounds.y + bounds.height),
+        (Corner::TopRight, bounds.x + bounds.width, bounds.y),
+        (Corner::TopLeft, bounds.x, bounds.y),
+    ];
+
+    let mut best = candidates[0];
+    let mut best_count = usize::MAX;
+    for &(corner, x, y) in &candidates {
+        let count = monitors
+            .iter()
+            .filter(|m| point_in_rect(x, y, m.frame))
+            .count();
+        if count < best_count {
+            best_count = count;
+            best = (corner, x, y);
+        }
+    }
+
+    let (corner, x, y) = best;
+    match corner {
+        Corner::BottomRight => (x + margin, y + margin),
+        Corner::BottomLeft => (x - margin, y + margin),
+        Corner::TopRight => (x + margin, y - margin),
+        Corner::TopLeft => (x - margin, y - margin),
+    }
+}
+
+/// How close two frame origins need to be (in points) to treat an old and a
+/// new monitor id as "the same physical display, just handed a new
+/// `CGDirectDisplayID`" — comfortably smaller than any realistic gap between
+/// two genuinely different, separately-arranged monitors.
+const RENAME_ORIGIN_THRESHOLD: f64 = 50.0;
+
+/// The result of diffing two `list_monitors()` snapshots — see
+/// `match_monitors`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorDiff {
+    /// (old id, new id) pairs whose frame origins matched within
+    /// `RENAME_ORIGIN_THRESHOLD` — treated as the same physical display
+    /// reassigned a new id (common across sleep/wake or some hot-plug
+    /// sequences), not a real disconnect+connect.
+    pub renamed: Vec<(u32, u32)>,
+    /// Old ids with no matching new one — genuinely disconnected.
+    pub disconnected: Vec<u32>,
+    /// New ids with no matching old one — genuinely connected.
+    pub connected: Vec<u32>,
+}
+
+fn origin_distance(a: Rect, b: Rect) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// Diffs two `list_monitors()` snapshots: ids present in both are left out
+/// entirely (unchanged), ids only in `old` or only in `new` are first
+/// tentatively "disconnected"/"connected," then greedily re-paired by
+/// nearest frame-origin distance (closest pair first, each id used at most
+/// once) into `renamed` wherever a pairing falls within
+/// `RENAME_ORIGIN_THRESHOLD` — true nearest-neighbor matching, not a
+/// same-index/array-position zip, so two monitors that happen to swap
+/// which physical slot they occupy (each ending up at the *other's* old
+/// origin) still match correctly to whichever one they actually are, not
+/// to whichever one `list_monitors` happened to enumerate first.
+pub fn match_monitors(old: &[Monitor], new: &[Monitor]) -> MonitorDiff {
+    let old_ids: HashSet<u32> = old.iter().map(|m| m.id).collect();
+    let new_ids: HashSet<u32> = new.iter().map(|m| m.id).collect();
+
+    let mut gone: Vec<&Monitor> = old.iter().filter(|m| !new_ids.contains(&m.id)).collect();
+    let mut arrived: Vec<&Monitor> = new.iter().filter(|m| !old_ids.contains(&m.id)).collect();
+
+    let mut renamed = Vec::new();
+    loop {
+        let mut best: Option<(usize, usize, f64)> = None;
+        for (gi, g) in gone.iter().enumerate() {
+            for (ai, a) in arrived.iter().enumerate() {
+                let dist = origin_distance(g.frame, a.frame);
+                if dist <= RENAME_ORIGIN_THRESHOLD
+                    && best.is_none_or(|(_, _, best_dist)| dist < best_dist)
+                {
+                    best = Some((gi, ai, dist));
+                }
+            }
+        }
+        let Some((gi, ai, _)) = best else {
+            break;
+        };
+        renamed.push((gone[gi].id, arrived[ai].id));
+        gone.remove(gi);
+        arrived.remove(ai);
+    }
+
+    MonitorDiff {
+        renamed,
+        disconnected: gone.into_iter().map(|m| m.id).collect(),
+        connected: arrived.into_iter().map(|m| m.id).collect(),
+    }
+}
+
 unsafe extern "C" fn reconfiguration_callback(
     _display: CGDirectDisplayID,
     _flags: u32,
@@ -208,5 +346,133 @@ mod tests {
         assert_eq!(bounds.x, 0.0);
         assert_eq!(bounds.width, 4480.0);
         assert_eq!(bounds.height, 1440.0);
+    }
+
+    fn monitor(id: u32, x: f64, y: f64, width: f64, height: f64) -> Monitor {
+        Monitor {
+            id,
+            frame: Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            is_main: id == 1,
+        }
+    }
+
+    #[test]
+    fn single_monitor_parks_bottom_right_beyond_it() {
+        let monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
+        let (x, y) = choose_parking_corner(&monitors, 100.0);
+        assert_eq!(x, 2020.0);
+        assert_eq!(y, 1180.0);
+    }
+
+    #[test]
+    fn side_by_side_equal_height_pair_ties_to_bottom_right() {
+        let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
+        ];
+        let (x, y) = choose_parking_corner(&monitors, 100.0);
+        assert_eq!(x, 3940.0);
+        assert_eq!(y, 1180.0);
+    }
+
+    #[test]
+    fn l_shaped_triple_prefers_the_uncovered_quadrant() {
+        // Top row spans both monitors; only the bottom-left is populated,
+        // leaving the combined bounds' bottom-right quadrant empty.
+        let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
+            monitor(3, 0.0, 1080.0, 1920.0, 1080.0),
+        ];
+        let (x, y) = choose_parking_corner(&monitors, 100.0);
+        assert_eq!(x, 3940.0);
+        assert_eq!(y, 2260.0);
+    }
+
+    #[test]
+    fn chooses_the_empty_quadrant_even_when_its_not_bottom_right() {
+        // Mirror image of the L above: the *top-left* quadrant is the one
+        // left empty, and no monitor's own corner sits there — proving
+        // this doesn't just always default to bottom-right.
+        let monitors = [
+            monitor(1, 1920.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 0.0, 1080.0, 1920.0, 1080.0),
+            monitor(3, 1920.0, 1080.0, 1920.0, 1080.0),
+        ];
+        let (x, y) = choose_parking_corner(&monitors, 100.0);
+        assert_eq!(x, -100.0);
+        assert_eq!(y, -100.0);
+    }
+
+    #[test]
+    fn same_origin_id_change_is_a_rename() {
+        let old = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
+        let new = [monitor(2, 0.0, 0.0, 1920.0, 1080.0)];
+        let diff = match_monitors(&old, &new);
+        assert_eq!(diff.renamed, vec![(1, 2)]);
+        assert!(diff.disconnected.is_empty());
+        assert!(diff.connected.is_empty());
+    }
+
+    #[test]
+    fn two_monitors_swapping_ids_are_matched_by_origin_not_array_position() {
+        let old = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
+        ];
+        // Deliberately listed in swapped order relative to `old`, so a
+        // naive same-index zip would wrongly pair id 1 with id 3 (whose
+        // origins are 1920 apart) instead of the true nearest match.
+        let new = [
+            monitor(3, 1920.0, 0.0, 1920.0, 1080.0),
+            monitor(4, 0.0, 0.0, 1920.0, 1080.0),
+        ];
+        let diff = match_monitors(&old, &new);
+        let mut renamed = diff.renamed;
+        renamed.sort_unstable();
+        assert_eq!(renamed, vec![(1, 4), (2, 3)]);
+        assert!(diff.disconnected.is_empty());
+        assert!(diff.connected.is_empty());
+    }
+
+    #[test]
+    fn unchanged_ids_are_not_reported_at_all() {
+        let old = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
+        let new = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
+        let diff = match_monitors(&old, &new);
+        assert!(diff.renamed.is_empty());
+        assert!(diff.disconnected.is_empty());
+        assert!(diff.connected.is_empty());
+    }
+
+    #[test]
+    fn a_genuinely_new_monitor_far_from_any_old_one_is_connected_not_renamed() {
+        let old = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
+        let new = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 5000.0, 5000.0, 1920.0, 1080.0),
+        ];
+        let diff = match_monitors(&old, &new);
+        assert!(diff.renamed.is_empty());
+        assert!(diff.disconnected.is_empty());
+        assert_eq!(diff.connected, vec![2]);
+    }
+
+    #[test]
+    fn a_genuinely_disconnected_monitor_with_no_replacement_stays_disconnected() {
+        let old = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
+        ];
+        let new = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
+        let diff = match_monitors(&old, &new);
+        assert!(diff.renamed.is_empty());
+        assert_eq!(diff.disconnected, vec![2]);
+        assert!(diff.connected.is_empty());
     }
 }

@@ -2,7 +2,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use tili_ipc::{Command, Direction, LayoutKind, MonitorInfo, Response, WindowInfo, WorkspaceInfo};
+use tili_ipc::{
+    Command, Direction, LayoutKind, MonitorInfo, PlacementInfo, Response, WindowInfo, WorkspaceInfo,
+};
 
 #[derive(Parser)]
 #[command(name = "tili", about = "CLI for the tili tiling window manager daemon")]
@@ -37,6 +39,18 @@ enum LayoutArg {
     Accordion,
     Horizontal,
     Vertical,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OnOffArg {
+    On,
+    Off,
+}
+
+impl From<OnOffArg> for bool {
+    fn from(state: OnOffArg) -> Self {
+        matches!(state, OnOffArg::On)
+    }
 }
 
 #[derive(Subcommand)]
@@ -85,6 +99,36 @@ enum Commands {
     FocusMonitor,
     /// List connected monitors, marking which one is focused.
     ListMonitors,
+    /// Reset every child weight of the focused window's parent container
+    /// (or the workspace root, if --root) evenly, undoing any manual
+    /// resizes.
+    Balance {
+        #[arg(long)]
+        root: bool,
+    },
+    /// Re-normalize the tree. A no-op today: Tree::normalize already runs
+    /// after every mutation and already collapses stray one-child
+    /// containers.
+    Flatten,
+    /// Toggle the focused window fullscreen.
+    Fullscreen {
+        /// Use macOS's own native fullscreen (a separate Space) instead of
+        /// tili's own tiled fullscreen.
+        #[arg(long)]
+        native: bool,
+    },
+    /// Close the focused window (best-effort AXCloseButton press).
+    Close,
+    /// Focus (and raise) the first known window whose title or bundle id
+    /// contains the given text.
+    Summon { query: String },
+    /// Move a workspace to a different monitor without switching focus to
+    /// it. Target is a monitor id, "next", or "main".
+    MoveWorkspaceToMonitor { workspace: String, target: String },
+    /// Switch back to whichever workspace was active before this one.
+    WorkspaceBack,
+    /// Toggle the focused window between tiled and floating at runtime.
+    SetFloating { state: OnOffArg },
 }
 
 /// What shape of payload to expect back, so the CLI doesn't have to guess
@@ -149,6 +193,29 @@ fn main() {
         }
         Commands::FocusMonitor => (Command::FocusMonitor, ExpectedPayload::None),
         Commands::ListMonitors => (Command::ListMonitors, ExpectedPayload::Monitors),
+        Commands::Balance { root } => (Command::BalanceSizes { root }, ExpectedPayload::None),
+        Commands::Flatten => (Command::Flatten, ExpectedPayload::None),
+        Commands::Fullscreen { native } => {
+            (Command::FullscreenToggle { native }, ExpectedPayload::None)
+        }
+        Commands::Close => (Command::Close, ExpectedPayload::None),
+        Commands::Summon { query } => (Command::Summon(query), ExpectedPayload::None),
+        Commands::MoveWorkspaceToMonitor { workspace, target } => {
+            let target = parse_monitor_target(&target).unwrap_or_else(|| {
+                eprintln!(
+                    "tili: invalid monitor target '{target}' (expected a monitor id, 'next', or 'main')"
+                );
+                std::process::exit(1);
+            });
+            (
+                Command::MoveWorkspaceToMonitor { workspace, target },
+                ExpectedPayload::None,
+            )
+        }
+        Commands::WorkspaceBack => (Command::WorkspaceBack, ExpectedPayload::None),
+        Commands::SetFloating { state } => {
+            (Command::SetFloating(state.into()), ExpectedPayload::None)
+        }
         Commands::Start => unreachable!("handled above before the socket connection"),
         Commands::Stop => unreachable!("handled above before the socket connection"),
         Commands::Status => unreachable!("handled above before the socket connection"),
@@ -210,7 +277,7 @@ fn print_windows(payload: serde_json::Value) {
         Ok(windows) if windows.is_empty() => println!("no windows found"),
         Ok(windows) => {
             for w in windows {
-                let placement = if w.floating { "float" } else { "tile " };
+                let placement = placement_label(w.placement);
                 println!(
                     "{:>10}  pid={:<8} {placement} {:.0}x{:.0}+{:.0}+{:.0}  {}",
                     w.id, w.pid, w.frame.width, w.frame.height, w.frame.x, w.frame.y, w.title
@@ -218,6 +285,17 @@ fn print_windows(payload: serde_json::Value) {
             }
         }
         Err(_) => println!("(response payload not recognized)"),
+    }
+}
+
+fn placement_label(placement: PlacementInfo) -> &'static str {
+    match placement {
+        PlacementInfo::Tiled => "tile ",
+        PlacementInfo::Floating => "float",
+        PlacementInfo::NativeFullscreen => "fullscr",
+        PlacementInfo::Minimized => "min  ",
+        PlacementInfo::HiddenApplication => "hidden",
+        PlacementInfo::Popup => "popup",
     }
 }
 
@@ -260,6 +338,16 @@ fn daemon_binary_path() -> std::path::PathBuf {
         .and_then(|p| p.parent().map(|dir| dir.join("tili-daemon")))
         .filter(|p| p.exists())
         .unwrap_or_else(|| std::path::PathBuf::from("tili-daemon"))
+}
+
+/// Parses `tili move-workspace-to-monitor <workspace> <target>`'s target
+/// argument — a monitor id, or the literal `next`/`main`.
+fn parse_monitor_target(s: &str) -> Option<tili_ipc::MonitorTarget> {
+    match s {
+        "next" => Some(tili_ipc::MonitorTarget::Next),
+        "main" => Some(tili_ipc::MonitorTarget::Main),
+        _ => s.parse::<u32>().ok().map(tili_ipc::MonitorTarget::Id),
+    }
 }
 
 /// `tili status` — same underlying check as `tili ping`, worded for a
