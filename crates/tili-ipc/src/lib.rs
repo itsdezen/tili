@@ -2,7 +2,7 @@ mod parse;
 
 use serde::{Deserialize, Serialize};
 
-pub use parse::parse;
+pub use parse::{parse, parse_with_target};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Direction {
@@ -24,6 +24,29 @@ pub enum LayoutKind {
 pub enum OrientationKind {
     Horizontal,
     Vertical,
+}
+
+/// Which connected monitor `Command::MoveWorkspaceToMonitor` targets.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MonitorTarget {
+    /// A specific `CGDirectDisplayID` (see `MonitorInfo::id`).
+    Id(u32),
+    /// Whichever monitor `Command::FocusMonitor` would cycle to next.
+    Next,
+    /// The main display.
+    Main,
+}
+
+/// Explicit target context for a command that would otherwise act on
+/// "whatever's currently focused" — resolved once by `dispatch()` per the
+/// blueprint's precedence (`window_id` > `workspace` > forwarded context >
+/// current focus). `window_id` uses a plain `u32` rather than
+/// `tili_tree::WindowId` since this crate doesn't depend on `tili-tree`
+/// (see `WindowInfo.id` for the same convention).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Target {
+    pub window_id: Option<u32>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +79,43 @@ pub enum Command {
     ModeExit,
     ListWindows,
     ListWorkspaces,
+    /// Resets every child weight of the focused window's parent container
+    /// (or the workspace root, if `root`) evenly — AeroSpace's
+    /// `balance-sizes`, see `Tree::balance_weights`.
+    BalanceSizes {
+        root: bool,
+    },
+    /// Re-runs the tree's own normalization pass and returns `Ok` — a
+    /// distinct `flatten` command has no additional effect to implement
+    /// since `Tree::normalize` already collapses one-child containers
+    /// after every mutation (see the refactor plan's rationale). Deliberately
+    /// a no-op placeholder: not wired into `dispatch()` yet.
+    Flatten,
+    /// Toggles the focused window fullscreen. `native` selects macOS's own
+    /// `AXFullScreen` (a separate Space) versus tili laying the window out
+    /// at the monitor's full frame while leaving the tree structurally
+    /// intact for restoration.
+    FullscreenToggle {
+        native: bool,
+    },
+    /// Closes the focused window (presses its `AXCloseButton`,
+    /// best-effort).
+    Close,
+    /// Focuses (and raises) the first window whose title or bundle id
+    /// matches `_0`, launching nothing if none is found.
+    Summon(String),
+    /// Moves an entire workspace to a different monitor without switching
+    /// focus to it.
+    MoveWorkspaceToMonitor {
+        workspace: String,
+        target: MonitorTarget,
+    },
+    /// Switches back to whichever workspace was active before the current
+    /// one — AeroSpace-style back-and-forth.
+    WorkspaceBack,
+    /// Toggles the focused window between tiled and floating at runtime
+    /// (independent of any `floating-rules` match at creation time).
+    SetFloating(bool),
     /// Cycles which connected monitor `Focus`/`Move`/`WorkspaceSwitch`/etc.
     /// operate on. A no-op with fewer than two monitors connected.
     FocusMonitor,
