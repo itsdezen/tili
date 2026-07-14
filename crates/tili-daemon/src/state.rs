@@ -41,7 +41,7 @@ const FLOAT_DRIFT_EPSILON: f64 = 0.5;
 /// that's actually still open. `WmState::removal_grace` starts at this
 /// value but is a field (not used directly) so tests can shrink it to zero
 /// instead of sleeping for real.
-const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(300);
+const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
 fn frames_match(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < FLOAT_DRIFT_EPSILON

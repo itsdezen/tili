@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use core_foundation::runloop::CFRunLoop;
 use core_graphics::event::{
@@ -11,6 +12,7 @@ use core_graphics::event::{
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     fn IOHIDCheckAccess(request_type: u32) -> u32;
+    fn IOHIDRequestAccess(request_type: u32) -> u8;
 }
 
 /// `kIOHIDRequestTypeListenEvent` from `<IOKit/hid/IOHIDLib.h>` — the only
@@ -20,15 +22,37 @@ const IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 0;
 /// `kIOHIDAccessTypeGranted`.
 const IOHID_ACCESS_TYPE_GRANTED: u32 = 0;
 
+/// How long `spawn_hotkey_tap` waits between retrying a failed
+/// `CGEventTap` install — e.g. Input Monitoring granted after the daemon
+/// already started. Bounded and infrequent enough not to be a busy-loop.
+const HOTKEY_TAP_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
 /// Checks Input Monitoring permission via the public (if under-documented)
 /// `IOHIDCheckAccess` API — `CGEventTap` needs this in addition to
-/// Accessibility on modern macOS, and unlike Accessibility there's no
-/// system prompt to trigger for it: the user has to grant it manually in
-/// System Settings > Privacy & Security > Input Monitoring.
+/// Accessibility on modern macOS. Never prompts; see
+/// `request_input_monitoring_permission` for the one that does.
 pub fn has_input_monitoring_permission() -> bool {
     // SAFETY: `IOHIDCheckAccess` takes a plain integer and returns one, no
     // pointers or lifetimes involved.
     unsafe { IOHIDCheckAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) == IOHID_ACCESS_TYPE_GRANTED }
+}
+
+/// Triggers the system Input Monitoring consent dialog via `IOHIDRequestAccess`
+/// (distinct from `IOHIDCheckAccess` above, which only checks without
+/// prompting) — blocks until the user responds, if a decision hasn't
+/// already been made for this exact binary/identity.
+///
+/// **Must be called before anything calls into Accessibility's
+/// `AXIsProcessTrustedWithOptions`** (i.e. before
+/// `ensure_accessibility_permission`/`has_accessibility_permission`
+/// anywhere in the process) — a long-standing macOS bug
+/// (rdar://7381305) means this dialog silently never appears if
+/// Accessibility's check has already run once in the same process. Don't
+/// reorder call sites without preserving this.
+pub fn request_input_monitoring_permission() -> bool {
+    // SAFETY: `IOHIDRequestAccess` takes a plain integer and returns a
+    // `Boolean` (`u8`), no pointers or lifetimes involved.
+    unsafe { IOHIDRequestAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) != 0 }
 }
 
 /// One key combo: modifier keys plus a base key's virtual keycode. Owns no
@@ -66,52 +90,66 @@ pub fn spawn_hotkey_tap(active_bindings: Arc<Mutex<HashSet<KeyCombo>>>) -> Recei
     let (tx, rx) = channel();
 
     std::thread::spawn(move || {
-        let result = CGEventTap::with_enabled(
-            CGEventTapLocation::Session,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            vec![CGEventType::KeyDown],
-            move |_proxy, _event_type, event| {
-                let flags = event.get_flags();
-                let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-                let combo = KeyCombo {
-                    cmd: flags.contains(CGEventFlags::CGEventFlagCommand),
-                    alt: flags.contains(CGEventFlags::CGEventFlagAlternate),
-                    ctrl: flags.contains(CGEventFlags::CGEventFlagControl),
-                    shift: flags.contains(CGEventFlags::CGEventFlagShift),
-                    keycode: keycode as u16,
-                };
+        let mut warned = false;
+        loop {
+            let active_bindings = active_bindings.clone();
+            let tx = tx.clone();
+            // `with_enabled` only ever returns on failure — on success it
+            // calls `CFRunLoop::run_current`, which blocks this thread
+            // forever pumping events. So this loop only re-attempts after
+            // an install failure; there's no "it succeeded" moment to log.
+            let result = CGEventTap::with_enabled(
+                CGEventTapLocation::Session,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::Default,
+                vec![CGEventType::KeyDown],
+                move |_proxy, _event_type, event| {
+                    let flags = event.get_flags();
+                    let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                    let combo = KeyCombo {
+                        cmd: flags.contains(CGEventFlags::CGEventFlagCommand),
+                        alt: flags.contains(CGEventFlags::CGEventFlagAlternate),
+                        ctrl: flags.contains(CGEventFlags::CGEventFlagControl),
+                        shift: flags.contains(CGEventFlags::CGEventFlagShift),
+                        keycode: keycode as u16,
+                    };
 
-                let is_bound = active_bindings
-                    .lock()
-                    .map(|set| set.contains(&combo))
-                    .unwrap_or(false);
+                    let is_bound = active_bindings
+                        .lock()
+                        .map(|set| set.contains(&combo))
+                        .unwrap_or(false);
 
-                if is_bound {
-                    let _ = tx.send(combo);
-                    CallbackResult::Drop
+                    if is_bound {
+                        let _ = tx.send(combo);
+                        CallbackResult::Drop
+                    } else {
+                        CallbackResult::Keep
+                    }
+                },
+                CFRunLoop::run_current,
+            );
+
+            if result.is_err() && !warned {
+                warned = true;
+                if has_input_monitoring_permission() {
+                    eprintln!(
+                        "tili-ax: failed to install the hotkey event tap even though Input \
+                         Monitoring looks granted — check Accessibility permission in System \
+                         Settings > Privacy & Security > Accessibility for the running \
+                         tili-daemon binary. Will keep retrying."
+                    );
                 } else {
-                    CallbackResult::Keep
+                    eprintln!(
+                        "tili-ax: failed to install the hotkey event tap — Input Monitoring \
+                         permission is missing. Grant it in System Settings > Privacy & \
+                         Security > Input Monitoring for the running tili-daemon binary; \
+                         hotkeys will start working automatically once granted, no restart \
+                         needed."
+                    );
                 }
-            },
-            CFRunLoop::run_current,
-        );
-
-        if result.is_err() {
-            if has_input_monitoring_permission() {
-                eprintln!(
-                    "tili-ax: failed to install the hotkey event tap even though Input \
-                     Monitoring looks granted — check Accessibility permission in System \
-                     Settings > Privacy & Security > Accessibility for the running \
-                     tili-daemon binary, then restart it"
-                );
-            } else {
-                eprintln!(
-                    "tili-ax: failed to install the hotkey event tap — Input Monitoring \
-                     permission is missing. Grant it in System Settings > Privacy & Security \
-                     > Input Monitoring for the running tili-daemon binary, then restart it"
-                );
             }
+
+            std::thread::sleep(HOTKEY_TAP_RETRY_INTERVAL);
         }
     });
 

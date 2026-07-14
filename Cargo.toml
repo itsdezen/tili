@@ -19,5 +19,5 @@ repository = "https://github.com/itsdezen/tili"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "sync", "time", "io-util", "signal"] }
 clap = { version = "4", features = ["derive"] }

@@ -1,5 +1,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use tili_ipc::{
@@ -7,10 +9,16 @@ use tili_ipc::{
 };
 
 #[derive(Parser)]
-#[command(name = "tili", about = "CLI for the tili tiling window manager daemon")]
+#[command(
+    name = "tili",
+    about = "CLI for the tili tiling window manager daemon",
+    version
+)]
 struct Cli {
+    /// Defaults to `start` when no subcommand is given, so plain `tili`
+    /// does the same thing as `tili start`.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -149,6 +157,8 @@ enum ExpectedPayload {
 
 fn main() {
     let cli = Cli::parse();
+    let defaulted_to_start = cli.command.is_none();
+    let command = cli.command.unwrap_or(Commands::Start);
 
     // None of these three go through the generic send()/print_response
     // path below: Start/Stop never talk to the socket at all (they manage
@@ -156,8 +166,14 @@ fn main() {
     // of the generic "couldn't reach daemon" error (which is a hard
     // failure for every other command, but an expected, calmly-reported
     // outcome here).
-    match &cli.command {
+    match &command {
         Commands::Start => {
+            // Only bare `tili` (no subcommand) needs confirming — an
+            // explicit `tili start` is already an unambiguous request.
+            if defaulted_to_start && !confirm_default_start() {
+                println!("tili: cancelled");
+                return;
+            }
             start_daemon();
             return;
         }
@@ -172,7 +188,7 @@ fn main() {
         _ => {}
     }
 
-    let (command, expected) = match cli.command {
+    let (command, expected) = match command {
         Commands::Ping => (Command::Ping, ExpectedPayload::None),
         Commands::ListWindows => (Command::ListWindows, ExpectedPayload::Windows),
         Commands::Focus { direction } => (Command::Focus(direction.into()), ExpectedPayload::None),
@@ -242,13 +258,28 @@ fn main() {
     }
 }
 
+/// How long `send()` waits for the daemon before giving up — generous for
+/// a one-shot interactive command (a healthy daemon responds near-
+/// instantly), but still bounded so a command never hangs forever.
+const SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Sends one length-prefixed JSON `Command` and reads back one
 /// length-prefixed JSON `Response`. Synchronous/blocking, matching the
 /// wire format documented on `tili_ipc::default_socket_path` — this CLI is
 /// a short-lived one-shot process, so plain `std::io` is simpler than
 /// pulling in an async runtime just to talk to the daemon.
+///
+/// A read/write timeout is required, not just nice-to-have: tili-daemon
+/// can legitimately have its socket bound but not yet accepting
+/// connections for up to a minute (waiting on a first-time Accessibility
+/// grant — see `tili-daemon/src/main.rs`), so a successful `connect()`
+/// doesn't guarantee a prompt response. Without a timeout, `read_exact`
+/// would block indefinitely in that window instead of failing fast.
 fn send(command: Command) -> io::Result<Response> {
     let mut stream = UnixStream::connect(tili_ipc::default_socket_path())?;
+    let timeout = Some(SOCKET_TIMEOUT);
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
 
     let payload = serde_json::to_vec(&command)?;
     let len = u32::try_from(payload.len())
@@ -359,15 +390,131 @@ fn parse_monitor_target(s: &str) -> Option<tili_ipc::MonitorTarget> {
 }
 
 /// `tili status` — same underlying check as `tili ping`, worded for a
-/// human glancing at it rather than for scripting.
+/// human glancing at it rather than for scripting. Distinguishes "not
+/// running at all" (connection refused/socket missing) from "running but
+/// hasn't finished starting yet" (connected, but timed out waiting for a
+/// response — e.g. still in the bounded Accessibility-grant wait) rather
+/// than reporting both the same way.
 fn print_status() {
     match send(Command::Ping) {
         Ok(_) => println!(
             "tili-daemon is running (socket: {})",
             tili_ipc::default_socket_path().display()
         ),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            println!(
+                "tili-daemon is running but hasn't finished starting yet (likely still \
+                 waiting on a permission grant) — try again in a moment, or check \
+                 ~/Library/Logs/tili/daemon.err.log"
+            );
+        }
         Err(_) => println!("tili-daemon is not running"),
     }
+}
+
+/// Guards against accidentally starting the daemon via a bare `tili` typo
+/// (e.g. meaning to type `tili status` or `tili stop`) — since bare `tili`
+/// now defaults to `start`, this requires an explicit Enter press first.
+/// Ctrl-C (SIGINT) or Ctrl-D (EOF, `read_line` returning `Ok(0)`) both
+/// cancel rather than proceed.
+fn confirm_default_start() -> bool {
+    print!("No subcommand given — press Enter to run `tili start` (Ctrl-C to cancel): ");
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    matches!(io::stdin().read_line(&mut input), Ok(n) if n > 0)
+}
+
+/// `launchctl load` only registers the job and returns — it says nothing
+/// about whether tili-daemon has actually finished its own startup
+/// sequence (Input Monitoring/Accessibility checks, potentially a bounded
+/// wait for a first-time Accessibility grant) and is reachable yet. Polls
+/// until the socket responds, or the LaunchAgent disappears (the daemon
+/// gave up waiting for permission and stopped itself — see
+/// `tili-daemon`'s `stop_self`), printing progress so the user isn't
+/// staring at a silent terminal.
+///
+/// Ctrl-C here deliberately stops the daemon too (via `stop_daemon`),
+/// rather than just abandoning this CLI-side wait — the daemon isn't
+/// meant to keep running/waiting unattended in the background just
+/// because this command was interrupted; not granting permission (or
+/// giving up on waiting for it) should mean tili isn't running at all.
+fn wait_for_daemon_ready() {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    {
+        let interrupted = interrupted.clone();
+        let _ = ctrlc::set_handler(move || interrupted.store(true, Ordering::SeqCst));
+    }
+
+    print!("tili: waiting for tili-daemon to finish starting");
+    let _ = io::stdout().flush();
+    loop {
+        if interrupted.load(Ordering::SeqCst) {
+            println!();
+            eprintln!("tili: interrupted — stopping tili-daemon.");
+            stop_daemon();
+            std::process::exit(130);
+        }
+        if daemon_is_reachable() {
+            println!(" running.");
+            return;
+        }
+        if !launch_agent_is_loaded() {
+            println!();
+            eprintln!(
+                "tili: tili-daemon stopped during startup (a permission grant likely timed \
+                 out, or was interrupted) — check ~/Library/Logs/tili/daemon.err.log, grant \
+                 the permission, then run `tili start` again."
+            );
+            return;
+        }
+        print!(".");
+        let _ = io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+fn launch_agent_is_loaded() -> bool {
+    std::process::Command::new("launchctl")
+        .args(["list", LAUNCH_AGENT_LABEL])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// A `Command::Ping` with short read/write timeouts, deliberately not
+/// reusing `send()` — that function has no timeout, which is correct for
+/// every other command (a real command should wait for its response), but
+/// wrong here: this is polled in a loop precisely because the daemon might
+/// not be accepting connections on the other end yet.
+fn daemon_is_reachable() -> bool {
+    let Ok(mut stream) = UnixStream::connect(tili_ipc::default_socket_path()) else {
+        return false;
+    };
+    let timeout = Some(std::time::Duration::from_millis(300));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+
+    let Ok(payload) = serde_json::to_vec(&Command::Ping) else {
+        return false;
+    };
+    let Ok(len) = u32::try_from(payload.len()) else {
+        return false;
+    };
+    if stream.write_all(&len.to_be_bytes()).is_err() || stream.write_all(&payload).is_err() {
+        return false;
+    }
+
+    let mut len_buf = [0_u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return false;
+    }
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut response_buf = vec![0_u8; len];
+    stream.read_exact(&mut response_buf).is_ok()
 }
 
 /// `tili start` — writes a LaunchAgent plist and `launchctl load`s it, so
@@ -425,10 +572,8 @@ fn start_daemon() {
         .status()
     {
         Ok(status) if status.success() => {
-            println!(
-                "tili: daemon started (LaunchAgent installed at {})",
-                plist_path.display()
-            );
+            println!("tili: LaunchAgent installed at {}", plist_path.display());
+            wait_for_daemon_ready();
         }
         Ok(status) => {
             eprintln!("tili: `launchctl load` exited with {status}");

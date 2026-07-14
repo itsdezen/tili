@@ -63,12 +63,20 @@ brew install itsdezen/tap/tili
 tili start
 ```
 
-That's it — `tili start` installs and starts tili-daemon as a background
-LaunchAgent: it starts running immediately, restarts itself if it ever
-crashes, and starts automatically at every future login too. First run:
-- Triggers the **Accessibility permission** prompt (add `tili-daemon`
-  manually in *System Settings → Privacy & Security → Accessibility* if
-  you miss it).
+That's it — `tili start` installs a background LaunchAgent (auto-restart,
+auto-start at login) and then **waits** for tili-daemon to actually finish
+starting before returning — it doesn't just report success the instant
+the LaunchAgent is registered. (Running plain `tili` with no subcommand
+does the same thing — it just asks you to press Enter first, so a typo
+can't silently start the daemon.) Press Ctrl-C any time to stop waiting
+without affecting the daemon itself, which keeps running/waiting
+independently under launchd either way. First run:
+- Triggers the **Accessibility permission** prompt, then the **Input
+  Monitoring** one — grant both whenever you get to it; tili waits (up to
+  a minute) and reports "running" the moment you do, no restart needed. If
+  you don't grant Accessibility within that minute (or interrupt the wait
+  yourself), the daemon stops itself cleanly and `tili start` reports
+  that — just run it again once you're ready.
 - Writes a starter config to `~/.config/tili/tili.kdl` if none exists yet
   — edit it and save, no restart needed, changes hot-reload. See
   [`example/tili.kdl`](example/tili.kdl) for the full commented version.
@@ -76,7 +84,9 @@ crashes, and starts automatically at every future login too. First run:
 Use the keybindings from your config (or the `tili` CLI directly — see
 [Commands](#commands) below) to focus/move/tile windows. Run `tili stop`
 to stop it and remove the LaunchAgent (so it stays stopped until you run
-`tili start` again), and `tili status` to check whether it's running.
+`tili start` again), `tili status` to check whether it's running, and
+`tili --version`/`tili help` for the installed version and full command
+list.
 
 ## Other ways to install
 
@@ -149,10 +159,13 @@ keybindings in your config resolve to (e.g. `bind "alt-h" "focus left"`).
 
 | Command | What it does |
 |---|---|
+| `tili` (no subcommand) | Same as `tili start`, after an Enter-key confirmation |
 | `tili start` | Install and start tili-daemon as a background LaunchAgent (auto-restart, auto-start at login) |
 | `tili stop` | Stop tili-daemon and remove its LaunchAgent |
 | `tili status` | Report whether the daemon is running |
 | `tili ping` | Check the daemon is reachable (scripting-friendly; see `status`) |
+| `tili --version`/`-V` | Print the installed version |
+| `tili help` | Print the full command list (same as `--help`/`-h`) |
 | `tili focus <left\|right\|up\|down>` | Move focus to the window in that direction |
 | `tili move <left\|right\|up\|down>` | Move the focused window one step in that direction, re-parenting it through the tree |
 | `tili join <left\|right\|up\|down>` | Wrap the focused window and its neighbor into a new, perpendicular container |

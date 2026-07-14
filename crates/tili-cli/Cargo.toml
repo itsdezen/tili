@@ -11,3 +11,4 @@ path = "src/main.rs"
 tili-ipc = { path = "../tili-ipc" }
 clap.workspace = true
 serde_json.workspace = true
+ctrlc = "3"

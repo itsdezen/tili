@@ -43,6 +43,11 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
   proportionally taken from its siblings.
 - `gaps.accordion` and `settings.default-root-orientation`
   (`"auto"`, `"horizontal"`, or `"vertical"`) config settings.
+- Bare `tili` (no subcommand) now defaults to `tili start` — prompts for an
+  Enter-key confirmation first, so a typo doesn't silently start the
+  daemon (an explicit `tili start` still runs immediately, no prompt).
+  `tili --version`/`-V` and the `tili help` subcommand are also available
+  now.
 
 ### Fixed
 
@@ -58,6 +63,39 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
   commands resolving to a dead node. This is very likely the root cause of
   reported "everything is broken" workspace/tiling breakage, since
   Accordion is one keypress away (`alt-slash` in the default config).
+- `tili-daemon` no longer needs a manual `tili stop`/`tili start` cycle
+  after granting permissions on a fresh install. Input Monitoring is now
+  requested via `IOHIDRequestAccess` (before any Accessibility check —
+  a macOS ordering bug, rdar://7381305, otherwise silently suppresses this
+  prompt), and the hotkey tap retries installing itself every few seconds
+  instead of giving up after one failed attempt. Startup now blocks
+  waiting for a first-time Accessibility grant (up to 60s) before doing
+  any window enumeration, instead of proceeding regardless and only ever
+  picking up already-open windows on a subsequent restart; if Accessibility
+  isn't granted within that minute — or the wait is interrupted via Ctrl-C
+  or the terminal closing (SIGHUP), when running `tili-daemon` directly
+  rather than through the LaunchAgent `tili start` installs — the daemon
+  stops itself cleanly (same end-state as `tili stop`) rather than
+  lingering half-broken. Revoking-then-re-granting a permission while the
+  daemon is already running (not at fresh startup) is unaffected by this
+  fix.
+- `tili start` (and bare `tili`) no longer reports "started" the instant
+  `launchctl load` returns — that only means the job was registered, not
+  that tili-daemon finished its own startup (which can now include the
+  bounded Accessibility wait above). It polls until the socket responds,
+  or the LaunchAgent disappears (the daemon gave up and stopped itself),
+  and reports whichever actually happened. Ctrl-C now also stops
+  tili-daemon (equivalent to `tili stop`) instead of only abandoning the
+  CLI's own wait — the daemon was never meant to keep running/waiting
+  unattended just because this command was interrupted.
+- `send()` (used by every socket command, including `tili status`/`ping`)
+  now has a read/write timeout. It never needed one before — a successful
+  `connect()` used to always mean an almost-immediate response — but
+  tili-daemon can now legitimately have its socket bound without yet
+  accepting connections for up to a minute, which used to make any command
+  issued during that window hang forever. `tili status` also now
+  distinguishes "not running at all" from "running but hasn't finished
+  starting yet" instead of reporting both the same way.
 
 ### Changed
 

@@ -3,6 +3,7 @@ mod socket;
 mod state;
 
 use std::collections::HashSet;
+use std::os::unix::process::CommandExt;
 use std::sync::{Arc, Mutex};
 
 use dispatch::dispatch;
@@ -10,27 +11,114 @@ use state::WmState;
 use tili_ax::WmEvent;
 use tili_ipc::{Command, Response};
 
+/// How long `main` waits for a first-time Accessibility grant before
+/// giving up and fully stopping itself (`stop_self`) — bounded so a user
+/// who never grants it doesn't end up with the daemon stuck running in the
+/// same half-broken state (no window watching, ever) this whole startup
+/// sequence exists to avoid falling into.
+const ACCESSIBILITY_GRANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often `main` re-execs itself while waiting for a first-time
+/// Accessibility grant. Deliberately *not* a poll of
+/// `has_accessibility_permission()` in place — empirically, checking trust
+/// status from *within* a process that was already running when permission
+/// was granted does not reliably observe the change, no matter which
+/// Accessibility API is used or how often it's polled. A **freshly started**
+/// process's own check at the top of `main`, by contrast, reliably reflects
+/// current reality. So instead of polling in place, this just periodically
+/// restarts — the moment permission is actually granted, the very next
+/// restart's fresh check sees it immediately and this whole wait block is
+/// skipped entirely in that new instance.
+const ACCESSIBILITY_RESTART_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// Carries the wall-clock time this wait originally started across
+/// self-restarts (`Instant` can't cross a process boundary, so this uses a
+/// Unix timestamp instead) — without it, every restart would reset its own
+/// elapsed-time clock to zero and `ACCESSIBILITY_GRANT_TIMEOUT` would never
+/// actually elapse.
+const ACCESSIBILITY_WAIT_STARTED_ENV: &str = "TILI_ACCESSIBILITY_WAIT_STARTED_AT";
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    if !tili_ax::ensure_accessibility_permission() {
-        eprintln!(
-            "tili-daemon: waiting for Accessibility permission — grant it in \
-             System Settings > Privacy & Security > Accessibility, then restart tili-daemon."
-        );
-    }
-    if !tili_ax::has_input_monitoring_permission() {
-        eprintln!(
-            "tili-daemon: Input Monitoring permission not granted — hotkeys won't work until \
-             you grant it in System Settings > Privacy & Security > Input Monitoring, then \
-             restart tili-daemon."
-        );
-    }
+    // IOHIDRequestAccess (Input Monitoring) must run before anything calls
+    // into Accessibility's AXIsProcessTrustedWithOptions in this process's
+    // lifetime — rdar://7381305: once Accessibility's check has run once,
+    // Input Monitoring's prompt silently stops appearing for a first-time
+    // grant. Don't reorder this below ensure_accessibility_permission()/
+    // has_accessibility_permission(), and don't add any AX call before it.
+    tili_ax::request_input_monitoring_permission();
 
     let listener = socket::bind()?;
     println!(
         "tili-daemon: listening on {}",
         tili_ipc::default_socket_path().display()
     );
+
+    if !tili_ax::ensure_accessibility_permission() {
+        let wait_started = accessibility_wait_started();
+        eprintln!(
+            "tili-daemon: waiting for Accessibility permission — grant it in System Settings \
+             > Privacy & Security > Accessibility (giving up {}s after the first attempt if \
+             not granted).",
+            ACCESSIBILITY_GRANT_TIMEOUT.as_secs()
+        );
+        // Only relevant when tili-daemon is run directly in a terminal
+        // (not via the LaunchAgent `tili start` installs) — Ctrl-C or the
+        // terminal closing are just as much "not granting permission" as
+        // the timeout below, and should stop cleanly the same way rather
+        // than leaving the process to die from the default signal
+        // disposition without ever reaching `stop_self`.
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+        loop {
+            if elapsed_since(wait_started) >= ACCESSIBILITY_GRANT_TIMEOUT {
+                eprintln!(
+                    "tili-daemon: Accessibility permission not granted within {}s — stopping. \
+                     Run `tili start` again after granting it.",
+                    ACCESSIBILITY_GRANT_TIMEOUT.as_secs()
+                );
+                stop_self();
+                return Ok(());
+            }
+            tokio::select! {
+                () = tokio::time::sleep(ACCESSIBILITY_RESTART_INTERVAL) => {
+                    // Unconditional: a fresh process's own check at the top
+                    // of `main` is what reliably reflects reality, not
+                    // polling in place — see `ACCESSIBILITY_RESTART_INTERVAL`'s
+                    // doc comment. If permission was granted since this
+                    // process started, the next instance sees it
+                    // immediately and skips this whole block entirely; if
+                    // not, `exec` never returns here either way, so falling
+                    // through to retry only happens when the restart
+                    // itself failed to launch.
+                    let err = restart_self(Some(wait_started));
+                    eprintln!("tili-daemon: failed to restart while waiting for permission: {err}");
+                }
+                _ = sigint.recv() => {
+                    eprintln!(
+                        "tili-daemon: interrupted while waiting for Accessibility permission — \
+                         stopping."
+                    );
+                    stop_self();
+                    return Ok(());
+                }
+                _ = sighup.recv() => {
+                    eprintln!(
+                        "tili-daemon: terminal closed while waiting for Accessibility \
+                         permission — stopping."
+                    );
+                    stop_self();
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    if !tili_ax::has_input_monitoring_permission() {
+        eprintln!(
+            "tili-daemon: Input Monitoring permission not granted yet — hotkeys will start \
+             working automatically once you grant it in System Settings > Privacy & Security \
+             > Input Monitoring, no restart needed."
+        );
+    }
 
     let mut events = tili_ax::spawn_event_watcher();
     let mut config_updates = spawn_config_reload_bridge();
@@ -165,6 +253,90 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Re-executes this exact binary with the same arguments, replacing the
+/// current process image in place (same pid — `execve` under the hood, not
+/// an exit-and-respawn) — called periodically while waiting for a
+/// first-time Accessibility grant (see `ACCESSIBILITY_RESTART_INTERVAL`).
+///
+/// Empirically, macOS does not reliably activate full AX capabilities
+/// (`AXObserver` notifications in particular — window-created/destroyed
+/// events observed to be missed or delayed) for a process that was already
+/// running at the moment permission was granted, even though
+/// permission-check APIs correctly report it as trusted afterward — only a
+/// process that *launches* after the grant behaves reliably. Self-restarting
+/// is what makes "grant permission, then it just works" true without the
+/// user ever running `tili stop`/`start` by hand. Same pid means launchd's
+/// `KeepAlive` tracking is completely undisturbed by this.
+///
+/// `wait_started`, if given, is propagated to the new process via
+/// `ACCESSIBILITY_WAIT_STARTED_ENV` so `accessibility_wait_started` in the
+/// new instance resumes the same overall countdown rather than restarting
+/// a fresh `ACCESSIBILITY_GRANT_TIMEOUT` budget on every restart.
+///
+/// Only returns on failure (a successful `exec` never returns — the
+/// process becomes the new instance); the caller falls back to continuing
+/// in this same process rather than getting stuck.
+fn restart_self(wait_started: Option<std::time::SystemTime>) -> std::io::Error {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => return e,
+    };
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut command = std::process::Command::new(exe);
+    command.args(args);
+    if let Some(started) = wait_started {
+        let secs = started
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        command.env(ACCESSIBILITY_WAIT_STARTED_ENV, secs.to_string());
+    }
+    command.exec()
+}
+
+/// The wall-clock time the current Accessibility-grant wait originally
+/// started — read from `ACCESSIBILITY_WAIT_STARTED_ENV` if this process was
+/// itself the result of a `restart_self` (so the overall
+/// `ACCESSIBILITY_GRANT_TIMEOUT` countdown survives across restarts),
+/// otherwise `SystemTime::now()` for a genuinely first attempt.
+fn accessibility_wait_started() -> std::time::SystemTime {
+    std::env::var(ACCESSIBILITY_WAIT_STARTED_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap_or_else(std::time::SystemTime::now)
+}
+
+fn elapsed_since(started: std::time::SystemTime) -> std::time::Duration {
+    std::time::SystemTime::now()
+        .duration_since(started)
+        .unwrap_or_default()
+}
+
+/// Unloads and removes this daemon's own LaunchAgent, the same end-state as
+/// running `tili stop` — called when `main` gives up waiting for
+/// Accessibility permission, so a timed-out daemon doesn't linger in a
+/// half-broken state that only a manual restart could fix, and so the next
+/// `tili start` is a clean retry. Mirrors `tili-cli`'s `stop_daemon`/
+/// `launch_agent_path` (`crates/tili-cli/src/main.rs`) — duplicated rather
+/// than shared, since it's a handful of lines; keep the plist path/label in
+/// sync with that file if either changes. Best-effort: `launchctl unload`
+/// may terminate this very process before it returns, so there's no
+/// meaningful error handling to add beyond letting each step fail silently.
+fn stop_self() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let plist_path = std::path::PathBuf::from(home)
+        .join("Library/LaunchAgents")
+        .join("com.tili.daemon.plist");
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w"])
+        .arg(&plist_path)
+        .status();
+    let _ = std::fs::remove_file(&plist_path);
+}
+
 /// M10: a brand-new install has no `~/.config/tili/tili.kdl` yet — without
 /// this, a first run silently applies `Config::default()` (no workspaces,
 /// no keybindings, nothing to edit) with no clue that a starter file
@@ -213,6 +385,13 @@ fn handle_event(state: &mut WmState, pending_pids: &mut HashSet<i32>, event: WmE
         WmEvent::AppLaunched { .. } => {
             // No-op: the watcher always follows this with a WindowsChanged
             // for the same pid once it has windows to report.
+        }
+        WmEvent::WindowFocused { .. } => {
+            // No-op for now: nothing about the window set changed, so no
+            // rescan/relayout is needed. `WmState`'s own focus tracking is
+            // driven entirely by explicit focus/move commands, not synced
+            // from real OS focus changes — this is exposed for a future
+            // "follow the user's manual clicks" feature, not acted on yet.
         }
     }
 }

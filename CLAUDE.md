@@ -347,7 +347,17 @@ preference):
   `_AXUIElementGetWindow` call in `tili-ax/src/window.rs`.
 - No polling — the daemon reacts to AXObserver/NSWorkspace/display
   notifications (`tili-ax`'s `watch.rs`/`workspace.rs`), it doesn't loop and
-  check state.
+  check state. Two sanctioned, narrowly-scoped exceptions, both about
+  macOS permission grants (there's no notification for "permission was
+  just granted"): `tili-daemon/src/main.rs`'s startup sequence polls
+  `tili_ax::has_accessibility_permission()` in a bounded loop (max 60s,
+  once, before the daemon does anything else — gives up and stops itself
+  rather than polling forever) while waiting for a first-time Accessibility
+  grant; and `tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap` retries installing
+  the `CGEventTap` every few seconds for the process's whole lifetime,
+  since Input Monitoring can be granted at any point after the daemon
+  starts with no accompanying event to react to. Don't add a third
+  polling loop without a similarly hard constraint forcing it.
 - All real window-frame mutations go through `WindowFrameSetter`, never a
   direct AX API call from daemon/tree code.
 - Hotkey-triggered and socket-triggered commands both go through

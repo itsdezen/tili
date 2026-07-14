@@ -4,7 +4,10 @@ use std::sync::mpsc::Sender;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{
+    NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication,
+    NSWorkspace,
+};
 use objc2_foundation::{NSNotification, NSOperationQueue};
 
 unsafe extern "C" {
@@ -70,6 +73,26 @@ pub fn spawn_workspace_watcher(tx: Sender<AppEvent>) {
             CFRunLoopRun();
         }
     });
+}
+
+/// Every currently running "regular" (Dock-visible) application's pid,
+/// regardless of whether it has any on-screen window right now — unlike
+/// `enumerate::onscreen_owner_pids`, which only sees apps with a window
+/// open at this exact moment. An app that's still running with zero
+/// windows (e.g. the user closed all of its windows without quitting it)
+/// never fires `NSWorkspaceDidLaunchApplicationNotification` again when it
+/// later opens a *new* window — its process never actually launches afresh
+/// — so it needs a `watch_app` subscription set up proactively, before
+/// that happens, or its first new window has nothing watching for it.
+pub fn all_regular_app_pids() -> Vec<i32> {
+    let workspace = NSWorkspace::sharedWorkspace();
+    workspace
+        .runningApplications()
+        .to_vec()
+        .into_iter()
+        .filter(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular)
+        .map(|app| app.processIdentifier())
+        .collect()
 }
 
 /// Resolves a running process's bundle identifier (e.g.
