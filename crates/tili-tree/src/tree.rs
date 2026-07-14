@@ -594,6 +594,35 @@ impl Tree {
         true
     }
 
+    /// Resets every child weight of the target container back to `1.0`,
+    /// undoing any manual `resize_weight` calls — matches AeroSpace's
+    /// `balance-sizes`. Same dual-target split as `set_orientation`/
+    /// `set_root_orientation`: `root` targets the workspace's root
+    /// container directly, otherwise it's `from`'s immediate parent.
+    /// Returns `false` if there's no such container (a lone root window
+    /// either way, or an empty tree when `root` is set).
+    pub fn balance_weights(&mut self, from: NodeId, root: bool) -> bool {
+        let target = if root {
+            self.root
+        } else {
+            self.parents.get(&from).copied()
+        };
+        let Some(container) = target else {
+            return false;
+        };
+        self.apply_balance(container)
+    }
+
+    fn apply_balance(&mut self, container: NodeId) -> bool {
+        match self.nodes.get_mut(container) {
+            Some(Node::Container { weights, .. }) => {
+                weights.iter_mut().for_each(|w| *w = 1.0);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Walks up from `from` to the nearest ancestor container whose
     /// orientation matches `dir`'s axis and where `from` isn't already the
     /// boundary child, then descends into the neighboring branch's MRU
@@ -1112,6 +1141,10 @@ mod tests {
         layout.iter().find(|(w, _)| *w == window).unwrap().1.width
     }
 
+    fn height_of(layout: &[(WindowId, Rect)], window: WindowId) -> f64 {
+        layout.iter().find(|(w, _)| *w == window).unwrap().1.height
+    }
+
     #[test]
     fn empty_tree_has_no_root() {
         let tree = Tree::new();
@@ -1475,6 +1508,96 @@ mod tests {
         let mut tree = Tree::new();
         let only = insert(&mut tree, 1, None);
         assert!(!tree.resize_weight(only, 0.1));
+    }
+
+    #[test]
+    fn balance_weights_resets_parent_container_after_resize() {
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(a));
+        assert!(tree.resize_weight(a, 0.3));
+
+        let skewed = width_of(&tree.layout(area(), Gaps::default(), 0.0), 1);
+        assert!(tree.balance_weights(a, false));
+        let after = tree.layout(area(), Gaps::default(), 0.0);
+        let w1 = width_of(&after, 1);
+        let w2 = width_of(&after, 2);
+        assert!((w1 - w2).abs() < 0.01, "balanced siblings are equal width");
+        assert!(
+            w1 < skewed,
+            "resize had actually skewed w1 wider before balancing"
+        );
+    }
+
+    #[test]
+    fn balance_weights_root_targets_root_even_when_from_is_nested() {
+        // root(h) = [1, joined-container(v) = [2, 3]] — the nested
+        // container splits its two children by *height* (its own
+        // orientation is Vertical), so both share whatever *width* the
+        // root's split gives the nested branch as a whole.
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        insert(&mut tree, 3, Some(w2));
+        assert!(tree.join_with(w2, Direction::Right));
+        assert!(tree.resize_weight(w1, 0.3));
+
+        let skewed = tree.layout(area(), Gaps::default(), 0.0);
+        assert!(
+            (width_of(&skewed, 1) - width_of(&skewed, 2)).abs() > 1.0,
+            "resize actually skewed the root split before balancing"
+        );
+
+        // `root: true` balances the outer root container (w1 vs the nested
+        // pair), not w2's own immediate (nested) parent.
+        assert!(tree.balance_weights(w2, true));
+        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let w1_width = width_of(&layout, 1);
+        assert!((w1_width - width_of(&layout, 2)).abs() < 0.01);
+        assert!((w1_width - width_of(&layout, 3)).abs() < 0.01);
+    }
+
+    #[test]
+    fn balance_weights_does_not_touch_nested_containers_children() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        insert(&mut tree, 3, Some(w2));
+        assert!(tree.join_with(w2, Direction::Right)); // nests 2,3 under w2, vertically
+        assert!(tree.resize_weight(w2, 0.3)); // skews the nested pair's heights, not the root
+
+        let before = tree.layout(area(), Gaps::default(), 0.0);
+        let w2_height_before = height_of(&before, 2);
+        let w3_height_before = height_of(&before, 3);
+        assert!(
+            (w2_height_before - w3_height_before).abs() > 1.0,
+            "resize actually skewed the nested pair"
+        );
+
+        // Balancing the root (from == w1, root == true) must not reset the
+        // nested container's own weights.
+        assert!(tree.balance_weights(w1, true));
+        let after = tree.layout(area(), Gaps::default(), 0.0);
+        assert_eq!(height_of(&after, 2), w2_height_before);
+        assert_eq!(height_of(&after, 3), w3_height_before);
+    }
+
+    #[test]
+    fn balance_weights_on_lone_root_window_is_a_no_op() {
+        let mut tree = Tree::new();
+        let only = insert(&mut tree, 1, None);
+        assert!(!tree.balance_weights(only, false));
+        assert!(!tree.balance_weights(only, true));
+    }
+
+    #[test]
+    fn balance_weights_on_empty_tree_is_a_no_op() {
+        let mut scratch = Tree::new();
+        let stray = insert(&mut scratch, 1, None);
+
+        let mut tree = Tree::new();
+        assert!(!tree.balance_weights(stray, true));
+        assert!(!tree.balance_weights(stray, false));
     }
 
     #[test]
