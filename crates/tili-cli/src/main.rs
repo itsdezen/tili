@@ -431,18 +431,16 @@ fn confirm_default_start() -> bool {
 
 /// `launchctl load` only registers the job and returns — it says nothing
 /// about whether tili-daemon has actually finished its own startup
-/// sequence (Input Monitoring/Accessibility checks, potentially a bounded
-/// wait for a first-time Accessibility grant) and is reachable yet. Polls
-/// until the socket responds, or the LaunchAgent disappears (the daemon
-/// gave up waiting for permission and stopped itself — see
+/// sequence (Input Monitoring/Accessibility checks) and is reachable yet.
+/// Polls until the socket responds, or the LaunchAgent disappears (the
+/// daemon found Accessibility not granted and stopped itself — see
 /// `tili-daemon`'s `stop_self`), printing progress so the user isn't
 /// staring at a silent terminal.
 ///
 /// Ctrl-C here deliberately stops the daemon too (via `stop_daemon`),
 /// rather than just abandoning this CLI-side wait — the daemon isn't
-/// meant to keep running/waiting unattended in the background just
-/// because this command was interrupted; not granting permission (or
-/// giving up on waiting for it) should mean tili isn't running at all.
+/// meant to keep running unattended in the background just because this
+/// command was interrupted.
 fn wait_for_daemon_ready() {
     let interrupted = Arc::new(AtomicBool::new(false));
     {
@@ -466,9 +464,10 @@ fn wait_for_daemon_ready() {
         if !launch_agent_is_loaded() {
             println!();
             eprintln!(
-                "tili: tili-daemon stopped during startup (a permission grant likely timed \
-                 out, or was interrupted) — check ~/Library/Logs/tili/daemon.err.log, grant \
-                 the permission, then run `tili start` again."
+                "tili: tili-daemon stopped during startup (Accessibility permission is likely \
+                 not granted yet) — check ~/Library/Logs/tili/daemon.err.log, grant the \
+                 permission in System Settings > Privacy & Security > Accessibility, then run \
+                 `tili start` again."
             );
             return;
         }

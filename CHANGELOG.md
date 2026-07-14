@@ -63,39 +63,48 @@ that don't add new milestone scope. This resets to standard SemVer at v1.0.
   commands resolving to a dead node. This is very likely the root cause of
   reported "everything is broken" workspace/tiling breakage, since
   Accordion is one keypress away (`alt-slash` in the default config).
-- `tili-daemon` no longer needs a manual `tili stop`/`tili start` cycle
-  after granting permissions on a fresh install. Input Monitoring is now
-  requested via `IOHIDRequestAccess` (before any Accessibility check —
-  a macOS ordering bug, rdar://7381305, otherwise silently suppresses this
-  prompt), and the hotkey tap retries installing itself every few seconds
-  instead of giving up after one failed attempt. Startup now blocks
-  waiting for a first-time Accessibility grant (up to 60s) before doing
-  any window enumeration, instead of proceeding regardless and only ever
-  picking up already-open windows on a subsequent restart; if Accessibility
-  isn't granted within that minute — or the wait is interrupted via Ctrl-C
-  or the terminal closing (SIGHUP), when running `tili-daemon` directly
-  rather than through the LaunchAgent `tili start` installs — the daemon
-  stops itself cleanly (same end-state as `tili stop`) rather than
-  lingering half-broken. Revoking-then-re-granting a permission while the
-  daemon is already running (not at fresh startup) is unaffected by this
-  fix.
+- Input Monitoring is now requested via `IOHIDRequestAccess` (before any
+  Accessibility check — a macOS ordering bug, rdar://7381305, otherwise
+  silently suppresses this prompt), and the hotkey tap retries installing
+  itself every few seconds instead of giving up after one failed attempt
+  — hotkeys now start working on their own once Input Monitoring is
+  granted, no restart needed.
+- Accessibility permission is checked once at startup; if it isn't
+  granted yet, `tili-daemon` unloads its own LaunchAgent and exits
+  immediately with a message to grant it and run `tili start` again,
+  instead of proceeding regardless and silently running with no window
+  watching, ever, until a manual `tili stop`/`tili start`. This isn't a
+  wait/retry loop — after trying several different in-process detection
+  mechanisms (plain polling, a run-loop-serviced polling thread, and
+  re-testing with a stable, non-ad-hoc signing identity), all were
+  confirmed on real hardware to never observe a grant made after the
+  process started; only a freshly launched process's own check reflects
+  reality, so the daemon asks once, stops cleanly, and leaves the next
+  `tili start` (a genuinely fresh process) to pick up the grant
+  correctly. `tccutil reset Accessibility` also runs once before stopping,
+  clearing any stale TCC record a previous dev rebuild might have left
+  behind (the same fix a mature Swift tiling WM, AeroSpace, uses).
 - `tili start` (and bare `tili`) no longer reports "started" the instant
   `launchctl load` returns — that only means the job was registered, not
-  that tili-daemon finished its own startup (which can now include the
-  bounded Accessibility wait above). It polls until the socket responds,
-  or the LaunchAgent disappears (the daemon gave up and stopped itself),
-  and reports whichever actually happened. Ctrl-C now also stops
-  tili-daemon (equivalent to `tili stop`) instead of only abandoning the
-  CLI's own wait — the daemon was never meant to keep running/waiting
-  unattended just because this command was interrupted.
+  that tili-daemon finished its own startup. It polls until the socket
+  responds, or the LaunchAgent disappears (the daemon found Accessibility
+  not granted and stopped itself), and reports whichever actually
+  happened. Ctrl-C now also stops tili-daemon (equivalent to `tili stop`)
+  instead of only abandoning the CLI's own wait.
 - `send()` (used by every socket command, including `tili status`/`ping`)
   now has a read/write timeout. It never needed one before — a successful
   `connect()` used to always mean an almost-immediate response — but
   tili-daemon can now legitimately have its socket bound without yet
-  accepting connections for up to a minute, which used to make any command
-  issued during that window hang forever. `tili status` also now
+  accepting connections for a brief moment, which used to make any
+  command issued during that window hang forever. `tili status` also now
   distinguishes "not running at all" from "running but hasn't finished
   starting yet" instead of reporting both the same way.
+- `tili-ax`'s window-watcher resync backstop no longer re-signals
+  `WindowsChanged` for every on-screen pid on a fixed ~10s cadence
+  regardless of activity. It now debounces since the last real app
+  launch/terminate event (2s quiet period), capped at a 20s maximum, so a
+  burst of real activity doesn't also pay for a redundant blind sweep on
+  top of it.
 
 ### Changed
 

@@ -347,17 +347,32 @@ preference):
   `_AXUIElementGetWindow` call in `tili-ax/src/window.rs`.
 - No polling — the daemon reacts to AXObserver/NSWorkspace/display
   notifications (`tili-ax`'s `watch.rs`/`workspace.rs`), it doesn't loop and
-  check state. Two sanctioned, narrowly-scoped exceptions, both about
-  macOS permission grants (there's no notification for "permission was
-  just granted"): `tili-daemon/src/main.rs`'s startup sequence polls
-  `tili_ax::has_accessibility_permission()` in a bounded loop (max 60s,
-  once, before the daemon does anything else — gives up and stops itself
-  rather than polling forever) while waiting for a first-time Accessibility
-  grant; and `tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap` retries installing
-  the `CGEventTap` every few seconds for the process's whole lifetime,
-  since Input Monitoring can be granted at any point after the daemon
-  starts with no accompanying event to react to. Don't add a third
-  polling loop without a similarly hard constraint forcing it.
+  check state. Two sanctioned, narrowly-scoped exceptions:
+  `tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap` retries installing the
+  `CGEventTap` every few seconds for the process's whole lifetime, since
+  Input Monitoring can be granted at any point after the daemon starts
+  with no accompanying event to react to; and `tili-ax/src/watch.rs`'s
+  window/app-watcher resync backstop — a cheap 250ms tick (attach/detach
+  watchers, no relayout) plus a debounced-since-quiet full-window resync
+  capped at 20s (`FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL`) — since
+  `NSWorkspace` launch/terminate notifications and `AXObserver`
+  window-level notifications have both been observed to occasionally
+  never fire. Don't add a third polling loop without a similarly hard
+  constraint forcing it.
+
+  Accessibility permission deliberately has **no** in-process wait/poll of
+  any kind, despite being a permission grant with no accompanying
+  notification either — confirmed on real hardware, across three
+  different mechanisms (plain sleep-based polling, a run-loop-serviced
+  polling thread, and a stable non-ad-hoc signing identity), that an
+  already-running process never reliably observes a grant made after it
+  started; only a freshly launched process's own check reflects reality.
+  `tili-daemon/src/main.rs` checks once at startup and, if not granted,
+  unloads its own LaunchAgent (`stop_self`) and tells the user to run
+  `tili start` again after granting it — no restart loop, no wait, no
+  fourth polling exception. Don't reintroduce an in-process
+  wait/retry/restart for this specific permission without new evidence
+  that changes the above.
 - All real window-frame mutations go through `WindowFrameSetter`, never a
   direct AX API call from daemon/tree code.
 - Hotkey-triggered and socket-triggered commands both go through

@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axuielement::AXUIElement;
 use axuielement::async_api::AXNotificationStream;
@@ -54,7 +54,7 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
 /// the tree after it quit (a "ghost gap"), for the rest of the daemon's
 /// life. Kept short (250ms) since a missed launch/quit should feel close
 /// to instant, not just "eventually correct" — cheap to do this often
-/// because this tick, unlike `WINDOW_RESYNC_EVERY`'s, never triggers a
+/// because this tick, unlike the full-window resync below, never triggers a
 /// relayout: it's just pid enumeration plus attaching/detaching watchers.
 ///
 /// Deliberately *doesn't* also re-signal `WindowsChanged` for every
@@ -63,7 +63,8 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
 /// workspace at the end regardless of whether anything for that pid
 /// actually changed — with several on-screen apps, firing all of them
 /// back-to-back every tick caused a visible relayout stutter for no
-/// reason. See `WINDOW_RESYNC_EVERY` for that much rarer sweep.
+/// reason. See `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` for that
+/// much rarer sweep.
 ///
 /// This is the third sanctioned exception to "no polling" (see
 /// `tili-daemon/src/main.rs`'s Accessibility-grant wait and
@@ -71,18 +72,26 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
 /// documented in `CLAUDE.md`.
 const RESYNC_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Every `WINDOW_RESYNC_EVERY`th `RESYNC_INTERVAL` tick (~10s wall-clock,
-/// at the 250ms `RESYNC_INTERVAL` above), additionally re-signals
-/// `WindowsChanged` for every on-screen pid — a rare safety net
-/// for a missed `AXObserver` window-level notification (created/destroyed/
-/// moved/resized), which empirically fires reliably in the common case
-/// (unlike the app-level launch/terminate notifications `RESYNC_INTERVAL`
-/// itself guards against), so this doesn't need to run anywhere near as
-/// often. `apply_windows_changed` diffs against its cache and is a no-op if
+/// How much a genuine `AppEvent` (app launch/terminate) pushes back the next
+/// expensive full-window resync (see `FULL_RESYNC_MAX_INTERVAL`) — real
+/// activity means the cheap tick and push notifications are already
+/// actively reconciling state, so the expensive sweep can afford to wait a
+/// couple seconds rather than firing immediately in the middle of a burst.
+const FULL_RESYNC_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Hard cap on how long the expensive full-window resync (re-signaling
+/// `WindowsChanged` for every on-screen pid — a rare safety net for a
+/// missed `AXObserver` window-level notification, which empirically fires
+/// reliably in the common case, unlike the app-level launch/terminate
+/// notifications `RESYNC_INTERVAL` itself guards against) can be deferred.
+/// Every genuine `AppEvent` pushes the deadline forward by
+/// `FULL_RESYNC_DEBOUNCE`, but this cap guarantees a sweep still happens on
+/// an otherwise-quiet system rather than deferring forever.
+/// `apply_windows_changed` diffs against its cache and is a no-op if
 /// nothing actually changed, but its unconditional relayout at the end
 /// still costs a real pass over the active workspace, hence keeping this
-/// infrequent.
-const WINDOW_RESYNC_EVERY: u32 = 40;
+/// infrequent rather than running it every `RESYNC_INTERVAL` tick.
+const FULL_RESYNC_MAX_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Something the daemon should react to. `WindowsChanged` is deliberately
 /// coarse-grained: it doesn't say *what* changed about a process's windows
@@ -122,7 +131,14 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
     seed_watchers(&rt, &event_tx, &mut watched);
 
     std::thread::spawn(move || {
-        let mut tick: u32 = 0;
+        // Debounce-since-quiet with a hard cap: a burst of real `AppEvent`s
+        // pushes `debounce_deadline` 2s past the *last* one (so the cheap
+        // tick + push notifications get first crack at reconciling state
+        // before paying for a full sweep), but `last_full_resync` bounds
+        // that indefinitely — a quiet system still gets swept at least
+        // every `FULL_RESYNC_MAX_INTERVAL`.
+        let mut last_full_resync = Instant::now();
+        let mut debounce_deadline: Option<Instant> = None;
         loop {
             match app_rx.recv_timeout(RESYNC_INTERVAL) {
                 Ok(AppEvent::Launched { pid, bundle_id }) => {
@@ -131,6 +147,7 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
                         watched.insert(pid, handle);
                     }
                     let _ = event_tx.send(WmEvent::WindowsChanged { pid });
+                    debounce_deadline = Some(Instant::now() + FULL_RESYNC_DEBOUNCE);
                 }
                 Ok(AppEvent::Terminated { pid }) => {
                     let _ = event_tx.send(WmEvent::AppTerminated { pid });
@@ -140,10 +157,18 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
                         // axuielement's `ObserverThreadHandle::drop`).
                         handle.abort();
                     }
+                    debounce_deadline = Some(Instant::now() + FULL_RESYNC_DEBOUNCE);
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    tick = tick.wrapping_add(1);
-                    let full_window_resync = tick.is_multiple_of(WINDOW_RESYNC_EVERY);
+                    let now = Instant::now();
+                    let debounce_ready = debounce_deadline.is_some_and(|due| now >= due);
+                    let cap_exceeded =
+                        now.duration_since(last_full_resync) >= FULL_RESYNC_MAX_INTERVAL;
+                    let full_window_resync = debounce_ready || cap_exceeded;
+                    if full_window_resync {
+                        last_full_resync = now;
+                        debounce_deadline = None;
+                    }
                     resync_watchers(&rt, &event_tx, &mut watched, full_window_resync);
                 }
                 Err(RecvTimeoutError::Disconnected) => break,

@@ -29,21 +29,15 @@ pub use workspace::{AppEvent, bundle_id_for_pid, is_app_hidden, spawn_workspace_
 ///
 /// Must be called *after* `request_input_monitoring_permission` — see that
 /// function's doc comment for why the order matters (rdar://7381305).
+///
+/// There is deliberately no non-prompting/polling variant of this check —
+/// confirmed on real hardware, across several different mechanisms (plain
+/// sleep-based polling, a run-loop-serviced polling thread, and re-testing
+/// with a stable non-ad-hoc signing identity), that an already-running
+/// process never reliably observes a grant made after it started. Only a
+/// freshly launched process's own check reflects reality, so the daemon
+/// doesn't try to wait/retry in place at all — see the call site in
+/// `tili-daemon/src/main.rs`.
 pub fn ensure_accessibility_permission() -> bool {
     axuielement::is_process_trusted_with_prompt()
-}
-
-/// Non-prompting Accessibility check, for polling whether a previously
-/// missing grant has since been made — `ensure_accessibility_permission`
-/// only needs calling once to trigger the dialog; this is what a caller
-/// polls afterward without re-triggering it.
-///
-/// Deliberately goes through `AXIsProcessTrustedWithOptions` (with the
-/// prompt option off) rather than the older, simpler `AXIsProcessTrusted`
-/// (`axuielement::is_process_trusted`) — the latter is known to return a
-/// stale/cached result within an already-running process instead of
-/// re-querying TCC live, which would make a polling loop never notice a
-/// permission granted after the process started.
-pub fn has_accessibility_permission() -> bool {
-    axuielement::is_process_trusted_with_options(axuielement::ProcessTrustOptions::new())
 }

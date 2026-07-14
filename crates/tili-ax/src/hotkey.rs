@@ -44,8 +44,8 @@ pub fn has_input_monitoring_permission() -> bool {
 ///
 /// **Must be called before anything calls into Accessibility's
 /// `AXIsProcessTrustedWithOptions`** (i.e. before
-/// `ensure_accessibility_permission`/`has_accessibility_permission`
-/// anywhere in the process) — a long-standing macOS bug
+/// `ensure_accessibility_permission` anywhere in the process) — a
+/// long-standing macOS bug
 /// (rdar://7381305) means this dialog silently never appears if
 /// Accessibility's check has already run once in the same process. Don't
 /// reorder call sites without preserving this.
