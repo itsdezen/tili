@@ -8,19 +8,10 @@ workspaces {
     workspace "entertain"
     workspace "random"
 
-    // Numbered workspaces alongside the named ones above, for alt-1..9
-    // switching — declared (and therefore persistent, never garbage-
-    // collected) up front, same as any other workspace. Delete whichever
-    // ones you don't want.
-    workspace "1"
-    workspace "2"
-    workspace "3"
-    workspace "4"
-    workspace "5"
-    workspace "6"
-    workspace "7"
-    workspace "8"
-    workspace "9"
+    // Workspace names are arbitrary strings — nothing stops you from
+    // declaring "1" through "9" here instead (or alongside these) for
+    // numbered switching; just add your own alt-1.."9" binds below if you
+    // do. Switching only ever works for a workspace declared here.
 }
 
 gaps {
@@ -43,6 +34,10 @@ settings {
     // KDL v2 booleans are `#true`/`#false` (note the `#` — bare `true`/
     // `false` is a parse error, unlike KDL v1 or most other config formats).
     auto-reload #true
+
+    // Which declared workspace is active at daemon startup. Falls back to
+    // the alphabetically-first declared workspace if omitted.
+    default-workspace "entertain"
 
     // Warps the cursor to the newly-focused window (M10). Off by default.
     mouse-follows-focus #false
@@ -84,25 +79,9 @@ keybindings mode="main" {
     bind "alt-e" "workspace entertain"
     bind "alt-r" "workspace random"
 
-    // Numbered workspace switching / move-with-window.
-    bind "alt-1" "workspace 1"
-    bind "alt-2" "workspace 2"
-    bind "alt-3" "workspace 3"
-    bind "alt-4" "workspace 4"
-    bind "alt-5" "workspace 5"
-    bind "alt-6" "workspace 6"
-    bind "alt-7" "workspace 7"
-    bind "alt-8" "workspace 8"
-    bind "alt-9" "workspace 9"
-    bind "alt-shift-1" "move-node-to-workspace 1"
-    bind "alt-shift-2" "move-node-to-workspace 2"
-    bind "alt-shift-3" "move-node-to-workspace 3"
-    bind "alt-shift-4" "move-node-to-workspace 4"
-    bind "alt-shift-5" "move-node-to-workspace 5"
-    bind "alt-shift-6" "move-node-to-workspace 6"
-    bind "alt-shift-7" "move-node-to-workspace 7"
-    bind "alt-shift-8" "move-node-to-workspace 8"
-    bind "alt-shift-9" "move-node-to-workspace 9"
+    bind "alt-shift-w" "move-node-to-workspace work"
+    bind "alt-shift-e" "move-node-to-workspace entertain"
+    bind "alt-shift-r" "move-node-to-workspace random"
 
     // Switches back to whichever workspace was active before this one.
     bind "alt-tab" "workspace-back"
