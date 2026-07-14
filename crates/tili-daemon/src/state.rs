@@ -1019,24 +1019,34 @@ impl WmState {
     }
 
     /// Re-enumerates connected monitors in response to a hot-plug/unplug
-    /// signal from `tili_ax::spawn_display_watcher`. A disconnected
-    /// monitor's active workspace is parked (its windows aren't lost, just
-    /// no longer shown anywhere, exactly like switching away from it); a
-    /// newly connected monitor gets a fresh, empty workspace. Every
-    /// still-visible workspace is re-laid-out afterward since frames may
-    /// have changed even for monitors that stayed connected (resolution or
-    /// arrangement change).
+    /// signal from `tili_ax::spawn_display_watcher`, diffing via
+    /// `tili_ax::match_monitors` rather than a plain id set-diff — an id
+    /// that changed but whose frame origin didn't (common across sleep/
+    /// wake) is a `renamed` pair, remapped in place with no park/unpark
+    /// churn, since that display never actually went anywhere. A genuinely
+    /// disconnected monitor's active workspace is parked (its windows
+    /// aren't lost, just no longer shown anywhere, exactly like switching
+    /// away from it); a genuinely newly connected monitor gets a fresh,
+    /// empty workspace. Every still-visible workspace is re-laid-out
+    /// afterward since frames may have changed even for monitors that
+    /// stayed connected (resolution or arrangement change).
     pub fn on_displays_changed(&mut self) {
         let new_monitors = tili_ax::list_monitors();
-        let new_ids: HashSet<u32> = new_monitors.iter().map(|m| m.id).collect();
-        let old_ids: HashSet<u32> = self.monitors.iter().map(|m| m.id).collect();
-        let disconnected: Vec<u32> = old_ids.difference(&new_ids).copied().collect();
-        let connected: Vec<u32> = new_ids.difference(&old_ids).copied().collect();
+        let diff = tili_ax::match_monitors(&self.monitors, &new_monitors);
 
         self.monitors = new_monitors;
         self.parking_origin = tili_ax::choose_parking_corner(&self.monitors, PARK_MARGIN);
 
-        for id in disconnected {
+        for (old_id, new_id) in diff.renamed {
+            if let Some(name) = self.active_workspace.remove(&old_id) {
+                self.active_workspace.insert(new_id, name);
+            }
+            if self.focused_monitor == old_id {
+                self.focused_monitor = new_id;
+            }
+        }
+
+        for id in diff.disconnected {
             if let Some(name) = self.active_workspace.remove(&id) {
                 let outgoing: Vec<WindowId> = self
                     .workspaces
@@ -1056,7 +1066,7 @@ impl WmState {
             self.focused_monitor = self.monitors.first().map(|m| m.id).unwrap_or(0);
         }
 
-        for id in connected {
+        for id in diff.connected {
             let name = format!("monitor-{id}");
             self.workspaces.entry(name.clone()).or_default();
             self.active_workspace.insert(id, name);
