@@ -91,8 +91,8 @@ enum Commands {
     Layout {
         mode: LayoutArg,
         /// Target the workspace's root container instead of the focused
-        /// window's immediate parent (matches AeroSpace's `layout --root`;
-        /// still one container, not applied to every container at once).
+        /// window's immediate parent — still one container, not applied to
+        /// every container at once.
         #[arg(long)]
         root: bool,
     },
@@ -124,8 +124,14 @@ enum Commands {
     /// contains the given text.
     Summon { query: String },
     /// Move a workspace to a different monitor without switching focus to
-    /// it. Target is a monitor id, "next", or "main".
-    MoveWorkspaceToMonitor { workspace: String, target: String },
+    /// it. Target is a monitor id, "next", or "main". Defaults to whatever
+    /// workspace is currently active on the focused monitor; pass
+    /// `--workspace` to name a different (possibly parked) one.
+    MoveWorkspaceToMonitor {
+        target: String,
+        #[arg(long)]
+        workspace: Option<String>,
+    },
     /// Switch back to whichever workspace was active before this one.
     WorkspaceBack,
     /// Toggle the focused window between tiled and floating at runtime.

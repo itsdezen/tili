@@ -57,7 +57,7 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
         Command::Close => result_response(state.close_focused()),
         Command::Summon(query) => result_response(state.summon(&query)),
         Command::MoveWorkspaceToMonitor { workspace, target } => {
-            result_response(state.move_workspace_to_monitor(&workspace, target))
+            result_response(state.move_workspace_to_monitor(workspace.as_deref(), target))
         }
         Command::WorkspaceBack => result_response(state.switch_to_previous_workspace()),
         Command::SetFloating(floating) => result_response(state.set_floating(floating)),
@@ -312,7 +312,7 @@ mod tests {
         let response = dispatch(
             &mut state,
             Command::MoveWorkspaceToMonitor {
-                workspace: "nope".to_string(),
+                workspace: Some("nope".to_string()),
                 target: tili_ipc::MonitorTarget::Main,
             },
         );

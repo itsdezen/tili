@@ -29,8 +29,7 @@ pub fn warp_cursor_to(x: f64, y: f64) {
 /// `THROTTLE`; `ButtonDown`/`ButtonUp` are reported immediately (there's
 /// only ever one down and one up per drag, so no throttling is needed) —
 /// used to debounce the flurry of `AXWindowResized` notifications a
-/// drag-resize fires, the same way AeroSpace's `isLeftMouseButtonDown`
-/// debounces window-move handling (`MacApp.swift`).
+/// drag-resize fires.
 pub enum MouseSignal {
     Moved(f64, f64),
     ButtonDown,

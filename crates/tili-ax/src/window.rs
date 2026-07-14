@@ -33,8 +33,7 @@ pub enum WindowKind {
 
 /// Pure decision function behind `WindowKind` classification — plain
 /// string/bool inputs so it's unit-testable without a real `AXUIElement`.
-/// Mirrors (a stripped-down version of) AeroSpace's window-vs-popup
-/// heuristic: a known dialog subrole is `Dialog`; the standard subrole is
+/// A known dialog subrole is `Dialog`; the standard subrole is
 /// `Standard`; a missing subrole is tie-broken by presence of a fullscreen
 /// button (unchanged from the old binary check) since that's a reliable
 /// secondary signal AppKit only puts on ordinary top-level windows; anything

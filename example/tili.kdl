@@ -7,13 +7,32 @@ workspaces {
     workspace "work"
     workspace "entertain"
     workspace "random"
+
+    // Numbered workspaces alongside the named ones above, for alt-1..9
+    // switching — declared (and therefore persistent, never garbage-
+    // collected) up front, same as any other workspace. Delete whichever
+    // ones you don't want.
+    workspace "1"
+    workspace "2"
+    workspace "3"
+    workspace "4"
+    workspace "5"
+    workspace "6"
+    workspace "7"
+    workspace "8"
+    workspace "9"
 }
 
 gaps {
     inner 4
     outer 8 8 8 8
 
-    // Per-workspace override — anything not listed here uses the gaps above.
+    // How many points of a non-visible accordion sibling peek out from
+    // behind the active one. 0 collapses every child to the same full frame.
+    accordion 30
+
+    // Per-workspace override — anything not listed here uses this block's
+    // own defaults, not whatever's set above.
     workspace "random" {
         inner 0
         outer 0
@@ -31,10 +50,6 @@ settings {
     // Moving the cursor onto a different monitor focuses it, same as the
     // `focus-monitor` command (M10). Off by default.
     focus-follows-monitor #false
-
-    // How many points of a non-visible accordion sibling peek out from
-    // behind the active one. 0 collapses every child to the same full frame.
-    accordion-padding 30
 
     // Orientation a workspace's root container gets when it's created for
     // its second window: "auto" (derive from the monitor's aspect ratio),
@@ -69,6 +84,33 @@ keybindings mode="main" {
     bind "alt-e" "workspace entertain"
     bind "alt-r" "workspace random"
 
+    // Numbered workspace switching / move-with-window.
+    bind "alt-1" "workspace 1"
+    bind "alt-2" "workspace 2"
+    bind "alt-3" "workspace 3"
+    bind "alt-4" "workspace 4"
+    bind "alt-5" "workspace 5"
+    bind "alt-6" "workspace 6"
+    bind "alt-7" "workspace 7"
+    bind "alt-8" "workspace 8"
+    bind "alt-9" "workspace 9"
+    bind "alt-shift-1" "move-node-to-workspace 1"
+    bind "alt-shift-2" "move-node-to-workspace 2"
+    bind "alt-shift-3" "move-node-to-workspace 3"
+    bind "alt-shift-4" "move-node-to-workspace 4"
+    bind "alt-shift-5" "move-node-to-workspace 5"
+    bind "alt-shift-6" "move-node-to-workspace 6"
+    bind "alt-shift-7" "move-node-to-workspace 7"
+    bind "alt-shift-8" "move-node-to-workspace 8"
+    bind "alt-shift-9" "move-node-to-workspace 9"
+
+    // Switches back to whichever workspace was active before this one.
+    bind "alt-tab" "workspace-back"
+
+    // Moves the current workspace to the next connected monitor — a no-op
+    // with only one monitor.
+    bind "alt-shift-tab" "move-workspace-to-monitor next"
+
     bind "alt-slash" "layout toggle"
 
     // Flips the focused container's split axis between horizontal and
@@ -76,7 +118,7 @@ keybindings mode="main" {
     bind "alt-shift-slash" "layout toggle-orientation"
 
     // Grows/shrinks the focused window's share of its nearest tiled
-    // container — AeroSpace's convention for these two keys.
+    // container.
     bind "alt-shift-minus" "resize -0.1"
     bind "alt-shift-equal" "resize 0.1"
 
@@ -87,6 +129,10 @@ keybindings mode="main" {
     // Enter a submode — its own keybindings block takes over until it
     // exits back to "main".
     bind "alt-shift-semicolon" "mode resize"
+
+    // One-shot mode: fires a single bound command, then returns to "main"
+    // automatically (see the "manage" mode below).
+    bind "alt-shift-s" "mode manage"
 }
 
 keybindings mode="resize" {
@@ -98,6 +144,18 @@ keybindings mode="resize" {
 
     bind "escape" "mode main"
     bind "enter" "mode main"
+}
+
+// `auto-exit` (#true) makes this a one-shot mode: any bound command fires
+// and then returns to "main" automatically, with no explicit exit bind
+// needed.
+keybindings mode="manage" auto-exit=#true {
+    bind "escape" "reload-config"
+    bind "r" "flatten"
+    bind "alt-shift-h" "join left"
+    bind "alt-shift-j" "join down"
+    bind "alt-shift-k" "join up"
+    bind "alt-shift-l" "join right"
 }
 
 // Windows matching one of these float instead of tiling, and are

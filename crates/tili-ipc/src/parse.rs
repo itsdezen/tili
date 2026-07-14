@@ -55,10 +55,17 @@ fn parse_tokens(tokens: &[&str]) -> Command {
         ["workspace", name] => Command::WorkspaceSwitch((*name).to_string()),
         ["workspace-back"] => Command::WorkspaceBack,
         ["move-node-to-workspace", name] => Command::MoveNodeToWorkspace((*name).to_string()),
+        ["move-workspace-to-monitor", target] => monitor_target(target).map_or_else(
+            || raw(tokens),
+            |target| Command::MoveWorkspaceToMonitor {
+                workspace: None,
+                target,
+            },
+        ),
         ["move-workspace-to-monitor", workspace, target] => monitor_target(target).map_or_else(
             || raw(tokens),
             |target| Command::MoveWorkspaceToMonitor {
-                workspace: (*workspace).to_string(),
+                workspace: Some((*workspace).to_string()),
                 target,
             },
         ),
@@ -268,17 +275,42 @@ mod tests {
         assert!(matches!(
             parse("move-workspace-to-monitor work next"),
             Command::MoveWorkspaceToMonitor { workspace, target: MonitorTarget::Next }
-                if workspace == "work"
+                if workspace == Some("work".to_string())
         ));
         assert!(matches!(
             parse("move-workspace-to-monitor work main"),
             Command::MoveWorkspaceToMonitor { workspace, target: MonitorTarget::Main }
-                if workspace == "work"
+                if workspace == Some("work".to_string())
         ));
         assert!(matches!(
             parse("move-workspace-to-monitor work 3"),
             Command::MoveWorkspaceToMonitor { workspace, target: MonitorTarget::Id(3) }
-                if workspace == "work"
+                if workspace == Some("work".to_string())
+        ));
+    }
+
+    #[test]
+    fn parses_move_workspace_to_monitor_without_an_explicit_workspace() {
+        assert!(matches!(
+            parse("move-workspace-to-monitor next"),
+            Command::MoveWorkspaceToMonitor {
+                workspace: None,
+                target: MonitorTarget::Next
+            }
+        ));
+        assert!(matches!(
+            parse("move-workspace-to-monitor main"),
+            Command::MoveWorkspaceToMonitor {
+                workspace: None,
+                target: MonitorTarget::Main
+            }
+        ));
+        assert!(matches!(
+            parse("move-workspace-to-monitor 3"),
+            Command::MoveWorkspaceToMonitor {
+                workspace: None,
+                target: MonitorTarget::Id(3)
+            }
         ));
     }
 

@@ -328,6 +328,12 @@ pub struct WmState {
     /// mode name -> (key combo -> command), built fresh from config's
     /// `keybindings` on every `apply_config`.
     mode_bindings: HashMap<String, HashMap<KeyCombo, Command>>,
+    /// Modes whose `auto_exit` config flag is set — dispatching any command
+    /// bound while `current_mode` is one of these should be followed by an
+    /// automatic `exit_mode()`, giving a one-shot mode that returns to
+    /// `main` after firing a single bound command, without inventing
+    /// multi-command-per-key syntax.
+    auto_exit_modes: HashSet<String>,
     /// Matched in order — first match wins.
     floating_rules: Vec<CompiledFloatingRule>,
     floating_defaults: tili_config::FloatingDefaults,
@@ -349,9 +355,6 @@ pub struct WmState {
     /// drag and flashes the screen. `on_mouse_button_up` relays out once
     /// to snap back to the tiled layout when the drag ends.
     mouse_button_down: bool,
-    /// How many points of a non-visible `Accordion` sibling peek out from
-    /// behind the active one — see `tili_config::Settings::accordion_padding`.
-    accordion_padding: f64,
     /// Orientation a workspace root gets when created for its second
     /// window — `None` means "auto" (derive from the target monitor's
     /// aspect ratio in `root_orientation_hint`).
@@ -399,13 +402,13 @@ impl Default for WmState {
             workspace_gaps: HashMap::new(),
             current_mode: DEFAULT_MODE.to_string(),
             mode_bindings: HashMap::new(),
+            auto_exit_modes: HashSet::new(),
             floating_rules: Vec::new(),
             floating_defaults: tili_config::FloatingDefaults::default(),
             mouse_follows_focus: false,
             focus_follows_monitor: false,
             config_loaded_once: false,
             mouse_button_down: false,
-            accordion_padding: 30.0,
             default_root_orientation: None,
             fullscreen_focus: HashMap::new(),
             previous_workspace: None,
@@ -921,6 +924,13 @@ impl WmState {
             self.current_mode = DEFAULT_MODE.to_string();
         }
 
+        self.auto_exit_modes = config
+            .keybindings
+            .iter()
+            .filter(|mode| mode.auto_exit)
+            .map(|mode| mode.name.clone())
+            .collect();
+
         self.floating_rules = config
             .floating_rules
             .iter()
@@ -951,7 +961,6 @@ impl WmState {
 
         self.mouse_follows_focus = config.settings.mouse_follows_focus;
         self.focus_follows_monitor = config.settings.focus_follows_monitor;
-        self.accordion_padding = f64::from(config.settings.accordion_padding);
         self.default_root_orientation = match config.settings.default_root_orientation.as_str() {
             "horizontal" => Some(tili_tree::Orientation::Horizontal),
             "vertical" => Some(tili_tree::Orientation::Vertical),
@@ -975,6 +984,11 @@ impl WmState {
 
     pub fn exit_mode(&mut self) {
         self.current_mode = DEFAULT_MODE.to_string();
+    }
+
+    /// Whether `current_mode` is a one-shot mode — see `auto_exit_modes`.
+    pub fn current_mode_auto_exits(&self) -> bool {
+        self.auto_exit_modes.contains(&self.current_mode)
     }
 
     /// Looks up the `Command` bound to `combo` in the current mode, if any
@@ -1143,7 +1157,7 @@ impl WmState {
     }
 
     /// Wraps the focused window and its neighbor in `dir` into a new,
-    /// perpendicular container — AeroSpace's `join-with`.
+    /// perpendicular container.
     pub fn join(&mut self, dir: Direction) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
         if self.active_tree_mut().join_with(current, dir) {
@@ -1168,8 +1182,7 @@ impl WmState {
     }
 
     /// Sets the focused window's parent container's orientation (or the
-    /// workspace root's, if `root`) — matches AeroSpace's `layout
-    /// horizontal`/`layout vertical` (optionally `--root`).
+    /// workspace root's, if `root`).
     pub fn set_orientation(
         &mut self,
         orientation: tili_tree::Orientation,
@@ -1213,10 +1226,9 @@ impl WmState {
     /// Toggles a container between `Split` (tiled) and `Accordion`
     /// (stacked, one visible at a time) — the focused window's immediate
     /// parent, or (`root: true`) the workspace's root container instead
-    /// (matches AeroSpace's `layout --root`; see `Tree::toggle_root_layout`
-    /// — still a single container, not a recursive apply-to-everything).
-    /// Errors if nothing's focused, or if the target container is a lone
-    /// window with no container to toggle.
+    /// (see `Tree::toggle_root_layout` — still a single container, not a
+    /// recursive apply-to-everything). Errors if nothing's focused, or if
+    /// the target container is a lone window with no container to toggle.
     pub fn toggle_layout(&mut self, root: bool) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
         let toggled = if root {
@@ -1263,8 +1275,8 @@ impl WmState {
 
     /// Resets every child weight of the focused window's parent container
     /// (or the workspace root, if `root`) evenly, undoing any manual
-    /// `resize_weight` calls — AeroSpace's `balance-sizes`. Same dual-target
-    /// split as `set_orientation`/`toggle_layout`.
+    /// `resize_weight` calls. Same dual-target split as
+    /// `set_orientation`/`toggle_layout`.
     pub fn balance_sizes(&mut self, root: bool) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
         if self.active_tree_mut().balance_weights(current, root) {
@@ -1330,9 +1342,8 @@ impl WmState {
     /// Focuses (and raises) the first known window whose title or bundle id
     /// contains `query`, switching that window's workspace onto
     /// `focused_monitor` first if it isn't currently visible anywhere (or
-    /// onto whatever monitor already shows it, if any) — AeroSpace-style
-    /// `summon`. Errors (rather than launching anything) if no window
-    /// matches.
+    /// onto whatever monitor already shows it, if any). Errors (rather than
+    /// launching anything) if no window matches.
     pub fn summon(&mut self, query: &str) -> Result<(), String> {
         let id = self
             .windows
@@ -1386,12 +1397,15 @@ impl WmState {
     /// already showing gets displaced (swapped onto `workspace`'s old
     /// monitor if it was visible anywhere, parked otherwise), mirroring
     /// `switch_workspace`'s own "two monitors never show the same
-    /// workspace" invariant.
+    /// workspace" invariant. `workspace: None` means whatever's currently
+    /// active on `focused_monitor`, rather than requiring an explicit name.
     pub fn move_workspace_to_monitor(
         &mut self,
-        workspace: &str,
+        workspace: Option<&str>,
         target: tili_ipc::MonitorTarget,
     ) -> Result<(), String> {
+        let active_name = self.active_workspace_name();
+        let workspace = workspace.unwrap_or(&active_name);
         if !self.workspaces.contains_key(workspace) {
             return Err(format!("workspace '{workspace}' isn't declared in config"));
         }
@@ -1624,8 +1638,8 @@ impl WmState {
     }
 
     /// Switches back to whichever workspace was active on `focused_monitor`
-    /// immediately before its last switch — AeroSpace-style back-and-forth.
-    /// Goes through `switch_workspace` itself, so it updates
+    /// immediately before its last switch (back-and-forth toggle). Goes
+    /// through `switch_workspace` itself, so it updates
     /// `previous_workspace` again in turn (to whatever's active right now),
     /// making repeated calls toggle between the two rather than only ever
     /// working once.
@@ -1927,7 +1941,7 @@ impl WmState {
         }
 
         let gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
-        let placements = tree.layout(area, gaps, self.accordion_padding);
+        let placements = tree.layout(area, gaps);
         for (id, rect) in placements {
             if let Some(window) = self.windows.get_mut(&id) {
                 self.frame_setter.set_frame(window, rect);
@@ -2056,6 +2070,7 @@ fn to_tree_gaps(gaps: tili_config::Gaps) -> Gaps {
             f64::from(bottom),
             f64::from(left),
         ),
+        accordion: f64::from(gaps.accordion),
     }
 }
 
@@ -2733,6 +2748,48 @@ mod tests {
     }
 
     #[test]
+    fn current_mode_auto_exits_reflects_config() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            keybindings mode="main" {
+                bind "alt-shift-s" "mode manage"
+            }
+            keybindings mode="manage" auto-exit=#true {
+                bind "escape" "mode main"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        assert!(!state.current_mode_auto_exits());
+
+        state.enter_mode("manage").unwrap();
+        assert!(state.current_mode_auto_exits());
+
+        state.exit_mode();
+        assert!(!state.current_mode_auto_exits());
+    }
+
+    #[test]
+    fn current_mode_auto_exits_defaults_false_when_flag_omitted() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            keybindings mode="resize" {
+                bind "escape" "mode main"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        state.enter_mode("resize").unwrap();
+        assert!(!state.current_mode_auto_exits());
+    }
+
+    #[test]
     fn balance_sizes_resets_skewed_weights() {
         let mut state = floating_test_state();
         let root_orientation = state.root_orientation_hint();
@@ -2753,7 +2810,7 @@ mod tests {
             width: 1000.0,
             height: 1000.0,
         };
-        let layout = tree.layout(area, Gaps::default(), 0.0);
+        let layout = tree.layout(area, Gaps::default());
         let w1 = layout.iter().find(|(id, _)| *id == 1).unwrap().1.width;
         let w2 = layout.iter().find(|(id, _)| *id == 2).unwrap().1.width;
         assert!((w1 - w2).abs() < 0.01);
@@ -2914,7 +2971,7 @@ mod tests {
 
         assert!(
             state
-                .move_workspace_to_monitor("a", tili_ipc::MonitorTarget::Id(2))
+                .move_workspace_to_monitor(Some("a"), tili_ipc::MonitorTarget::Id(2))
                 .is_ok()
         );
 
@@ -2956,7 +3013,7 @@ mod tests {
 
         assert!(
             state
-                .move_workspace_to_monitor("parked", tili_ipc::MonitorTarget::Id(2))
+                .move_workspace_to_monitor(Some("parked"), tili_ipc::MonitorTarget::Id(2))
                 .is_ok()
         );
 
@@ -2969,9 +3026,52 @@ mod tests {
         let mut state = WmState::default();
         assert!(
             state
-                .move_workspace_to_monitor("nope", tili_ipc::MonitorTarget::Main)
+                .move_workspace_to_monitor(Some("nope"), tili_ipc::MonitorTarget::Main)
                 .is_err()
         );
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn move_workspace_to_monitor_with_no_name_targets_the_current_workspace() {
+        let mut state = WmState::default();
+        state.monitors = vec![
+            Monitor {
+                id: 1,
+                frame: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: true,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect {
+                    x: 1920.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+            },
+        ];
+        state.workspaces.insert("a".to_string(), Tree::new());
+        state.workspaces.insert("b".to_string(), Tree::new());
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "a".to_string());
+        state.active_workspace.insert(2, "b".to_string());
+        state.focused_monitor = 1;
+
+        assert!(
+            state
+                .move_workspace_to_monitor(None, tili_ipc::MonitorTarget::Id(2))
+                .is_ok()
+        );
+
+        assert_eq!(state.active_workspace.get(&2), Some(&"a".to_string()));
+        assert_eq!(state.active_workspace.get(&1), Some(&"b".to_string()));
     }
 
     #[test]

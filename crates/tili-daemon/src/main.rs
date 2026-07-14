@@ -128,7 +128,14 @@ async fn main() -> std::io::Result<()> {
                         println!("tili-daemon: shutting down (hotkey)");
                         break;
                     }
+                    // Captured before dispatch: the mode the key was
+                    // pressed in, not whatever it becomes after (e.g. a
+                    // bind that itself switches modes).
+                    let auto_exits = state.current_mode_auto_exits();
                     let _ = dispatch(&mut state, command);
+                    if auto_exits {
+                        state.exit_mode();
+                    }
                 }
                 sync_active_combos(&active_combos, &state);
             }

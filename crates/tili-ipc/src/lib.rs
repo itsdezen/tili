@@ -54,14 +54,13 @@ pub enum Command {
     Focus(Direction),
     Move(Direction),
     /// Wraps the focused window and its neighbor in `dir` into a new,
-    /// perpendicular container — AeroSpace's `join-with`.
+    /// perpendicular container.
     Join(Direction),
     WorkspaceSwitch(String),
     MoveNodeToWorkspace(String),
     /// `root: true` targets the workspace's root tiling container instead
-    /// of the focused window's immediate parent — matches AeroSpace's
-    /// `layout --root` flag. Still a single-container operation either way,
-    /// not a recursive apply-to-every-container.
+    /// of the focused window's immediate parent. Still a single-container
+    /// operation either way, not a recursive apply-to-every-container.
     LayoutSet(LayoutKind, bool),
     LayoutToggle(bool),
     /// Sets the focused window's parent container's orientation (or the
@@ -85,8 +84,7 @@ pub enum Command {
     ListWindows,
     ListWorkspaces,
     /// Resets every child weight of the focused window's parent container
-    /// (or the workspace root, if `root`) evenly — AeroSpace's
-    /// `balance-sizes`, see `Tree::balance_weights`.
+    /// (or the workspace root, if `root`) evenly — see `Tree::balance_weights`.
     BalanceSizes {
         root: bool,
     },
@@ -110,13 +108,14 @@ pub enum Command {
     /// matches `_0`, launching nothing if none is found.
     Summon(String),
     /// Moves an entire workspace to a different monitor without switching
-    /// focus to it.
+    /// focus to it. `workspace: None` means whatever's currently active on
+    /// the focused monitor, rather than requiring an explicit name.
     MoveWorkspaceToMonitor {
-        workspace: String,
+        workspace: Option<String>,
         target: MonitorTarget,
     },
     /// Switches back to whichever workspace was active before the current
-    /// one — AeroSpace-style back-and-forth.
+    /// one (back-and-forth toggle).
     WorkspaceBack,
     /// Toggles the focused window between tiled and floating at runtime
     /// (independent of any `floating-rules` match at creation time).

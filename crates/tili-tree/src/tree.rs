@@ -29,8 +29,8 @@ pub enum Direction {
 }
 
 /// Which of a container's two rendering modes is active — orthogonal to
-/// `Orientation` (a container has both, independently, matching AeroSpace's
-/// model: "Every container has two properties: Layout ... Orientation").
+/// `Orientation` (a container has both, independently: layout and
+/// orientation vary separately).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     Tiles,
@@ -38,11 +38,15 @@ pub enum Layout {
 }
 
 /// Spacing applied during layout — config-driven from M5 on. `outer` is
-/// CSS-shorthand ordered: (top, right, bottom, left).
+/// CSS-shorthand ordered: (top, right, bottom, left). `accordion` is how
+/// much of each non-focused `Accordion` sibling peeks out from behind the
+/// active one, on the side(s) where a sibling exists — `0.0` collapses
+/// every child to the exact same full frame.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Gaps {
     pub inner: f64,
     pub outer: (f64, f64, f64, f64),
+    pub accordion: f64,
 }
 
 new_key_type! { pub struct NodeId; }
@@ -58,8 +62,7 @@ pub type WindowId = u32;
 /// total). `mru` ("most recently used") is the index of whichever child
 /// was most recently focused/moved-to: it doubles as both "which child is
 /// visible" for `Accordion` and "which child navigation descends into" for
-/// `Tiles` (matching AeroSpace's `mostRecentChild`, which unifies the two
-/// concepts rather than tracking them separately).
+/// `Tiles`, unifying the two concepts rather than tracking them separately.
 #[derive(Debug, Clone)]
 pub enum Node {
     Container {
@@ -142,8 +145,8 @@ impl Tree {
     }
 
     /// Inserts a new window as a sibling of `near`, in `near`'s own parent
-    /// container (i3/AeroSpace-style flat insertion — never wraps `near` in
-    /// a fresh 2-child container the way a binary-tree insert would), or as
+    /// container (i3-style flat insertion — never wraps `near` in a fresh
+    /// 2-child container the way a binary-tree insert would), or as
     /// the sole root if the tree is empty. `root_orientation` only matters
     /// the one time this call is what turns a lone-window root into an
     /// actual container (the tree's second-ever window) — every other call
@@ -406,9 +409,8 @@ impl Tree {
     }
 
     /// Same conversion as `toggle_layout`, but always targets the
-    /// workspace's root container — matches AeroSpace's `layout --root`
-    /// flag. Returns `false` if the tree is empty or the root itself is a
-    /// lone window (nothing to toggle).
+    /// workspace's root container. Returns `false` if the tree is empty or
+    /// the root itself is a lone window (nothing to toggle).
     pub fn toggle_root_layout(&mut self) -> bool {
         let Some(root) = self.root else {
             return false;
@@ -440,8 +442,8 @@ impl Tree {
         self.apply_orientation(parent, orientation)
     }
 
-    /// Root-container analogue of `set_orientation` — matches AeroSpace's
-    /// `layout --root` flag applied to `horizontal`/`vertical`.
+    /// Root-container analogue of `set_orientation`, applying
+    /// `horizontal`/`vertical` to the workspace root instead.
     pub fn set_root_orientation(&mut self, orientation: Orientation) -> bool {
         let Some(root) = self.root else {
             return false;
@@ -462,12 +464,11 @@ impl Tree {
 
     /// Wraps `from` and its neighbor in `dir` (within `from`'s own parent
     /// container — this doesn't escalate up the tree the way `move` does)
-    /// into a brand-new container, orientation perpendicular to `dir` —
-    /// matches AeroSpace's `join-with` (preferred over i3-style `split`,
-    /// since `split` on its own would create a 1-child container that
-    /// `normalize` would immediately flatten right back away). Returns
-    /// `false` if `from`'s parent orientation doesn't match `dir`'s axis or
-    /// there's no neighbor there.
+    /// into a brand-new container, orientation perpendicular to `dir`
+    /// (preferred over i3-style `split`, since `split` on its own would
+    /// create a 1-child container that `normalize` would immediately
+    /// flatten right back away). Returns `false` if `from`'s parent
+    /// orientation doesn't match `dir`'s axis or there's no neighbor there.
     pub fn join_with(&mut self, from: NodeId, dir: Direction) -> bool {
         let axis = axis_for(dir);
         let forward = matches!(dir, Direction::Right | Direction::Down);
@@ -595,10 +596,10 @@ impl Tree {
     }
 
     /// Resets every child weight of the target container back to `1.0`,
-    /// undoing any manual `resize_weight` calls — matches AeroSpace's
-    /// `balance-sizes`. Same dual-target split as `set_orientation`/
-    /// `set_root_orientation`: `root` targets the workspace's root
-    /// container directly, otherwise it's `from`'s immediate parent.
+    /// undoing any manual `resize_weight` calls. Same dual-target split as
+    /// `set_orientation`/`set_root_orientation`: `root` targets the
+    /// workspace's root container directly, otherwise it's `from`'s
+    /// immediate parent.
     /// Returns `false` if there's no such container (a lone root window
     /// either way, or an empty tree when `root` is set).
     pub fn balance_weights(&mut self, from: NodeId, root: bool) -> bool {
@@ -672,8 +673,7 @@ impl Tree {
     }
 
     /// Moves `from` one step in `dir`, re-parenting it through the tree
-    /// (not just swapping which window sits where) — ported from
-    /// AeroSpace's `MoveCommand`:
+    /// (not just swapping which window sits where):
     /// - Same-axis neighbor is a window: the two trade positions (and thus
     ///   footprints) within their shared parent.
     /// - Same-axis neighbor is a container: `from` moves into it, landing
@@ -682,8 +682,8 @@ impl Tree {
     ///   nearest ancestor whose orientation matches, landing next to the
     ///   branch `from` climbed out of.
     /// - No such ancestor exists anywhere up to the root: wrap the whole
-    ///   tree in a brand-new root container along `dir`'s axis (AeroSpace's
-    ///   "implicit container" at the workspace boundary).
+    ///   tree in a brand-new root container along `dir`'s axis (an implicit
+    ///   container at the workspace boundary).
     ///
     /// Returns `false` if `from` is the tree's only window (nothing to
     /// move relative to).
@@ -842,12 +842,11 @@ impl Tree {
     }
 
     /// Computes each window's frame within `area` by recursively dividing
-    /// it per the tree's containers, applying `gaps` (outer padding around
-    /// the whole area, inner spacing between `Tiles` siblings) and
-    /// `accordion_padding` (how much of each non-focused `Accordion`
-    /// sibling peeks out from behind the active one — `0.0` collapses every
-    /// child to the exact same full frame).
-    pub fn layout(&self, area: Rect, gaps: Gaps, accordion_padding: f64) -> Vec<(WindowId, Rect)> {
+    /// it per the tree's containers, applying `gaps` — outer padding around
+    /// the whole area, inner spacing between `Tiles` siblings, and
+    /// `accordion` peek padding for non-focused `Accordion` siblings (see
+    /// the `Gaps` struct doc comment).
+    pub fn layout(&self, area: Rect, gaps: Gaps) -> Vec<(WindowId, Rect)> {
         let mut out = Vec::new();
         if let Some(root) = self.root {
             let (top, right, bottom, left) = gaps.outer;
@@ -857,7 +856,7 @@ impl Tree {
                 width: (area.width - left - right).max(0.0),
                 height: (area.height - top - bottom).max(0.0),
             };
-            self.layout_node(root, padded, gaps.inner, accordion_padding, &mut out);
+            self.layout_node(root, padded, gaps.inner, gaps.accordion, &mut out);
         }
         out
     }
@@ -1150,7 +1149,7 @@ mod tests {
         let tree = Tree::new();
         assert_eq!(tree.root(), None);
         assert!(tree.is_empty());
-        assert!(tree.layout(area(), Gaps::default(), 0.0).is_empty());
+        assert!(tree.layout(area(), Gaps::default()).is_empty());
     }
 
     #[test]
@@ -1165,7 +1164,7 @@ mod tests {
             "lone window has no parent container"
         );
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout, vec![(1, area())]);
     }
 
@@ -1175,7 +1174,7 @@ mod tests {
         let first = insert(&mut tree, 1, None);
         insert(&mut tree, 2, Some(first));
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout.len(), 2);
 
         let total_width: f64 = layout.iter().map(|(_, r)| r.width).sum();
@@ -1197,7 +1196,7 @@ mod tests {
         let w2 = insert(&mut tree, 2, Some(w1));
         insert(&mut tree, 3, Some(w2));
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout.len(), 3);
         let w1_width = width_of(&layout, 1);
         let w2_width = width_of(&layout, 2);
@@ -1216,7 +1215,7 @@ mod tests {
         tree.insert_window(2, Some(w1), Orientation::Vertical);
         assert_eq!(tree.root_orientation(), Some(Orientation::Vertical));
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         for (_, rect) in &layout {
             assert_eq!(
                 rect.width,
@@ -1235,8 +1234,9 @@ mod tests {
         let gaps = Gaps {
             inner: 10.0,
             outer: (20.0, 20.0, 20.0, 20.0),
+            accordion: 0.0,
         };
-        let layout = tree.layout(area(), gaps, 0.0);
+        let layout = tree.layout(area(), gaps);
         assert_eq!(layout.len(), 2);
 
         let leftmost = layout
@@ -1268,12 +1268,12 @@ mod tests {
         // zero padding, every accordion child gets the exact same frame, so
         // this really just checks both windows still exist and layout
         // didn't blow up on the layout-kind flip.
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout.len(), 2);
 
         assert!(tree.toggle_layout(a));
         assert!(!tree.is_accordion_container(a));
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout.len(), 2, "back to Tiles, both windows tile again");
     }
 
@@ -1338,7 +1338,7 @@ mod tests {
         assert!(tree.set_orientation(w2, Orientation::Horizontal));
         assert_eq!(tree.orientation_of(w2), tree.orientation_of(w1));
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout.len(), 3);
         let w1_width = width_of(&layout, 1);
         let w2_width = width_of(&layout, 2);
@@ -1359,7 +1359,7 @@ mod tests {
         assert_eq!(tree.orientation_of(w1), Some(Orientation::Vertical));
         assert_eq!(tree.orientation_of(w2), Some(Orientation::Vertical));
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         for (_, rect) in &layout {
             assert_eq!(rect.width, area().width, "joined pair stacks full-width");
         }
@@ -1428,7 +1428,7 @@ mod tests {
         let a = insert(&mut tree, 1, None);
         let b = insert(&mut tree, 2, Some(a));
 
-        let before = tree.layout(area(), Gaps::default(), 0.0);
+        let before = tree.layout(area(), Gaps::default());
         let a_rect_before = *before.iter().find(|(w, _)| *w == 1).unwrap();
         let b_rect_before = *before.iter().find(|(w, _)| *w == 2).unwrap();
 
@@ -1436,7 +1436,7 @@ mod tests {
         assert_eq!(tree.window_at(a), Some(1));
         assert_eq!(tree.window_at(b), Some(2));
 
-        let after = tree.layout(area(), Gaps::default(), 0.0);
+        let after = tree.layout(area(), Gaps::default());
         let a_rect_after = *after.iter().find(|(w, _)| *w == 1).unwrap();
         let b_rect_after = *after.iter().find(|(w, _)| *w == 2).unwrap();
         assert_eq!(a_rect_after.1, b_rect_before.1);
@@ -1484,9 +1484,9 @@ mod tests {
         let a = insert(&mut tree, 1, None);
         insert(&mut tree, 2, Some(a));
 
-        let before = width_of(&tree.layout(area(), Gaps::default(), 0.0), 1);
+        let before = width_of(&tree.layout(area(), Gaps::default()), 1);
         assert!(tree.resize_weight(a, 0.2));
-        let after = width_of(&tree.layout(area(), Gaps::default(), 0.0), 1);
+        let after = width_of(&tree.layout(area(), Gaps::default()), 1);
         assert!(after > before);
     }
 
@@ -1497,7 +1497,7 @@ mod tests {
         insert(&mut tree, 2, Some(a));
 
         assert!(tree.resize_weight(a, -100.0));
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         for (_, rect) in &layout {
             assert!(rect.width > 0.0, "clamped weight must stay positive");
         }
@@ -1517,9 +1517,9 @@ mod tests {
         insert(&mut tree, 2, Some(a));
         assert!(tree.resize_weight(a, 0.3));
 
-        let skewed = width_of(&tree.layout(area(), Gaps::default(), 0.0), 1);
+        let skewed = width_of(&tree.layout(area(), Gaps::default()), 1);
         assert!(tree.balance_weights(a, false));
-        let after = tree.layout(area(), Gaps::default(), 0.0);
+        let after = tree.layout(area(), Gaps::default());
         let w1 = width_of(&after, 1);
         let w2 = width_of(&after, 2);
         assert!((w1 - w2).abs() < 0.01, "balanced siblings are equal width");
@@ -1542,7 +1542,7 @@ mod tests {
         assert!(tree.join_with(w2, Direction::Right));
         assert!(tree.resize_weight(w1, 0.3));
 
-        let skewed = tree.layout(area(), Gaps::default(), 0.0);
+        let skewed = tree.layout(area(), Gaps::default());
         assert!(
             (width_of(&skewed, 1) - width_of(&skewed, 2)).abs() > 1.0,
             "resize actually skewed the root split before balancing"
@@ -1551,7 +1551,7 @@ mod tests {
         // `root: true` balances the outer root container (w1 vs the nested
         // pair), not w2's own immediate (nested) parent.
         assert!(tree.balance_weights(w2, true));
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         let w1_width = width_of(&layout, 1);
         assert!((w1_width - width_of(&layout, 2)).abs() < 0.01);
         assert!((w1_width - width_of(&layout, 3)).abs() < 0.01);
@@ -1566,7 +1566,7 @@ mod tests {
         assert!(tree.join_with(w2, Direction::Right)); // nests 2,3 under w2, vertically
         assert!(tree.resize_weight(w2, 0.3)); // skews the nested pair's heights, not the root
 
-        let before = tree.layout(area(), Gaps::default(), 0.0);
+        let before = tree.layout(area(), Gaps::default());
         let w2_height_before = height_of(&before, 2);
         let w3_height_before = height_of(&before, 3);
         assert!(
@@ -1577,7 +1577,7 @@ mod tests {
         // Balancing the root (from == w1, root == true) must not reset the
         // nested container's own weights.
         assert!(tree.balance_weights(w1, true));
-        let after = tree.layout(area(), Gaps::default(), 0.0);
+        let after = tree.layout(area(), Gaps::default());
         assert_eq!(height_of(&after, 2), w2_height_before);
         assert_eq!(height_of(&after, 3), w3_height_before);
     }
@@ -1608,7 +1608,13 @@ mod tests {
         insert(&mut tree, 3, Some(w2)); // chained near, so children stay flat [1, 2, 3]
         assert!(tree.toggle_root_layout());
 
-        let layout = tree.layout(area(), Gaps::default(), 30.0);
+        let layout = tree.layout(
+            area(),
+            Gaps {
+                accordion: 30.0,
+                ..Gaps::default()
+            },
+        );
         assert_eq!(layout.len(), 3);
         let first = layout.iter().find(|(w, _)| *w == 1).unwrap().1;
         let last = layout.iter().find(|(w, _)| *w == 3).unwrap().1;
@@ -1635,7 +1641,13 @@ mod tests {
         insert(&mut tree2, 20, Some(a));
         assert!(tree2.toggle_root_layout());
         tree2.remove_window(20);
-        let layout = tree2.layout(area(), Gaps::default(), 30.0);
+        let layout = tree2.layout(
+            area(),
+            Gaps {
+                accordion: 30.0,
+                ..Gaps::default()
+            },
+        );
         assert_eq!(layout, vec![(10, area())]);
         let _ = tree;
     }
@@ -1647,7 +1659,7 @@ mod tests {
         insert(&mut tree, 2, Some(w1));
         assert!(tree.toggle_root_layout());
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         for (_, rect) in &layout {
             assert_eq!(*rect, area());
         }
@@ -1665,7 +1677,7 @@ mod tests {
         assert_eq!(tree.window_at(tree.root().unwrap()), Some(2));
         assert_eq!(tree.orientation_of(tree.root().unwrap()), None);
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout, vec![(2, area())]);
     }
 
@@ -1678,7 +1690,7 @@ mod tests {
 
         tree.remove_window(2);
         assert_eq!(tree.window_ids().len(), 2);
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         let w1_width = width_of(&layout, 1);
         let w3_width = width_of(&layout, 3);
         assert!((w1_width - w3_width).abs() < 0.01);
@@ -1697,7 +1709,7 @@ mod tests {
         assert_eq!(tree.window_at(next_focus.unwrap()), Some(2));
         assert_eq!(tree.window_at(tree.root().unwrap()), Some(2));
 
-        let layout = tree.layout(area(), Gaps::default(), 0.0);
+        let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout, vec![(2, area())]);
     }
 

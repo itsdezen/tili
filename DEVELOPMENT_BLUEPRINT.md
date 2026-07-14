@@ -111,7 +111,7 @@ Resize changes only valid siblings in the matching `tiles` orientation; normaliz
 
 ### Accordion
 
-Children overlap; the MRU/active child occupies almost the whole area. Other children leave an `accordion_padding` reveal strip on both sides of the orientation axis to indicate ordering. Navigation along the accordion axis cycles and wraps siblings and changes the active child; always relayout after focus because visible frames change. Perpendicular navigation leaves the container through normal spatial rules.
+Children overlap; the MRU/active child occupies almost the whole area. Other children leave a `gaps.accordion` reveal strip on both sides of the orientation axis to indicate ordering. Navigation along the accordion axis cycles and wraps siblings and changes the active child; always relayout after focus because visible frames change. Perpendicular navigation leaves the container through normal spatial rules.
 
 `layout toggle/set` must retain the focused child as active after conversion to accordion. `set` must be idempotent and distinct from `toggle`.
 
@@ -225,7 +225,7 @@ Configuration needs a schema version, path-aware parser diagnostics, migration/d
 
 Do not silently ignore unknown keys in production config: a forward-compatible namespace is acceptable, but warn so typos cannot disappear. KDL booleans are `#true`/`#false`; tests must guard this common mistake.
 
-Keybindings are mode-based. The event tap synchronously decides consume/pass using a snapshot `Arc<Mutex<HashSet<KeyCombo>>>`; the daemon remains the authority that resolves combo → command in the current mode and updates the snapshot immediately after a mode/config change. Unbound keys pass through. Secure Input can disable hotkeys: expose a state/diagnostic rather than retrying in a loop.
+Keybindings are mode-based. The event tap synchronously decides consume/pass using a snapshot `Arc<Mutex<HashSet<KeyCombo>>>`; the daemon remains the authority that resolves combo → command in the current mode and updates the snapshot immediately after a mode/config change. Unbound keys pass through. Secure Input can disable hotkeys: expose a state/diagnostic rather than retrying in a loop. A mode may be declared `auto-exit`, making it one-shot: dispatching any command bound while that mode is active is immediately followed by an automatic return to the default mode, without a dedicated exit bind.
 
 Window rules/callbacks run in order. The first matching rule may stop processing; a `continue` flag enables layering (for example, float then move workspace). Conditions are command exit statuses, not a separate boolean parser. Callbacks run with dedicated window/workspace context; focus callbacks must be recursion-resistant so focus performed by a callback cannot retrigger indefinitely. Do not promise ordering between different callback types.
 
@@ -243,7 +243,7 @@ The execution environment supports opt-in/out inheritance, overrides, and `${VAR
 | `workspace` | Create dynamically only when policy permits; a declared-workspace policy should reject typos/undeclared names. Back-and-forth remembers the actual previous workspace. |
 | `summon` | Bring a workspace to the focused monitor, swapping the currently visible workspace when necessary. |
 | `move-node-to-workspace` | Keep target context stable; immediately park a hidden destination or relayout a visible one. |
-| `move-workspace-to-monitor` | Validate assignment/pinning and never duplicate workspace visibility. |
+| `move-workspace-to-monitor` | Validate assignment/pinning and never duplicate workspace visibility; an omitted workspace name targets whatever's currently active on the focused monitor. |
 | `close` | Send AX close then reconcile; never assume a destroy notification is immediate. |
 | native minimize/fullscreen | Change OS state, then move to/reconcile the special container; never force tile during transition. |
 
