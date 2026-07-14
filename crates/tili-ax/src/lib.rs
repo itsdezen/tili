@@ -8,7 +8,8 @@ pub mod window;
 pub mod workspace;
 
 pub use display::{
-    Monitor, combined_bounds, list_monitors, main_display_frame, spawn_display_watcher,
+    Monitor, choose_parking_corner, combined_bounds, list_monitors, main_display_frame,
+    spawn_display_watcher,
 };
 pub use enumerate::{list_windows, list_windows_for_pid};
 pub use frame_setter::{InstantFrameSetter, WindowFrameSetter};

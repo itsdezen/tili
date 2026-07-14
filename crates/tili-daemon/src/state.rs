@@ -220,6 +220,12 @@ pub struct WmState {
     workspaces: HashMap<String, Tree>,
     workspace_focus: HashMap<String, NodeId>,
     monitors: Vec<Monitor>,
+    /// Where `park` targets, beyond every connected monitor — recomputed
+    /// via `tili_ax::choose_parking_corner` whenever `monitors` changes
+    /// (`Default::default`, `on_displays_changed`) rather than on every
+    /// `park` call, since it only depends on the current monitor
+    /// arrangement, not on which window is being parked.
+    parking_origin: (f64, f64),
     active_workspace: HashMap<u32, String>,
     focused_monitor: u32,
     frame_setter: Box<dyn WindowFrameSetter>,
@@ -265,6 +271,7 @@ impl Default for WmState {
         workspaces.insert(DEFAULT_WORKSPACE.to_string(), Tree::new());
 
         let monitors = tili_ax::list_monitors();
+        let parking_origin = tili_ax::choose_parking_corner(&monitors, PARK_MARGIN);
         let focused_monitor = monitors.first().map(|m| m.id).unwrap_or(0);
         let mut active_workspace = HashMap::new();
         active_workspace.insert(focused_monitor, DEFAULT_WORKSPACE.to_string());
@@ -275,6 +282,7 @@ impl Default for WmState {
             workspaces,
             workspace_focus: HashMap::new(),
             monitors,
+            parking_origin,
             active_workspace,
             focused_monitor,
             frame_setter: Box::new(InstantFrameSetter),
@@ -783,6 +791,7 @@ impl WmState {
         let connected: Vec<u32> = new_ids.difference(&old_ids).copied().collect();
 
         self.monitors = new_monitors;
+        self.parking_origin = tili_ax::choose_parking_corner(&self.monitors, PARK_MARGIN);
 
         for id in disconnected {
             if let Some(name) = self.active_workspace.remove(&id) {
@@ -1238,9 +1247,9 @@ impl WmState {
     /// parked windows apart so they don't all land on the exact same
     /// off-screen coordinate.
     fn park(&mut self, id: WindowId, offset_index: usize) {
-        let bounds = tili_ax::combined_bounds(&self.monitors);
-        let x = bounds.x + bounds.width + PARK_MARGIN + (offset_index as f64 * PARK_OFFSET_STEP);
-        let y = bounds.y;
+        let (origin_x, origin_y) = self.parking_origin;
+        let x = origin_x + (offset_index as f64 * PARK_OFFSET_STEP);
+        let y = origin_y;
         if let Some(window) = self.windows.get_mut(&id) {
             window.set_position(x, y);
         }
