@@ -8,6 +8,29 @@ use core_graphics::event::{
     CGEventType, CallbackResult, EventField, KeyCode,
 };
 
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOHIDCheckAccess(request_type: u32) -> u32;
+}
+
+/// `kIOHIDRequestTypeListenEvent` from `<IOKit/hid/IOHIDLib.h>` — the only
+/// request type relevant here, since tili only ever listens for key/mouse
+/// events, never synthesizes them (`kIOHIDRequestTypePostEvent`).
+const IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 0;
+/// `kIOHIDAccessTypeGranted`.
+const IOHID_ACCESS_TYPE_GRANTED: u32 = 0;
+
+/// Checks Input Monitoring permission via the public (if under-documented)
+/// `IOHIDCheckAccess` API — `CGEventTap` needs this in addition to
+/// Accessibility on modern macOS, and unlike Accessibility there's no
+/// system prompt to trigger for it: the user has to grant it manually in
+/// System Settings > Privacy & Security > Input Monitoring.
+pub fn has_input_monitoring_permission() -> bool {
+    // SAFETY: `IOHIDCheckAccess` takes a plain integer and returns one, no
+    // pointers or lifetimes involved.
+    unsafe { IOHIDCheckAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) == IOHID_ACCESS_TYPE_GRANTED }
+}
+
 /// One key combo: modifier keys plus a base key's virtual keycode. Owns no
 /// macOS-API types in its public shape — `core_graphics::event::CGEventFlags`
 /// stays an implementation detail of this module.
@@ -75,10 +98,20 @@ pub fn spawn_hotkey_tap(active_bindings: Arc<Mutex<HashSet<KeyCombo>>>) -> Recei
         );
 
         if result.is_err() {
-            eprintln!(
-                "tili-ax: failed to install the hotkey event tap — check that Accessibility \
-                 (and on some macOS versions, Input Monitoring) permission is granted"
-            );
+            if has_input_monitoring_permission() {
+                eprintln!(
+                    "tili-ax: failed to install the hotkey event tap even though Input \
+                     Monitoring looks granted — check Accessibility permission in System \
+                     Settings > Privacy & Security > Accessibility for the running \
+                     tili-daemon binary, then restart it"
+                );
+            } else {
+                eprintln!(
+                    "tili-ax: failed to install the hotkey event tap — Input Monitoring \
+                     permission is missing. Grant it in System Settings > Privacy & Security \
+                     > Input Monitoring for the running tili-daemon binary, then restart it"
+                );
+            }
         }
     });
 

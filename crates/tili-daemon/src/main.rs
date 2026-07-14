@@ -18,6 +18,13 @@ async fn main() -> std::io::Result<()> {
              System Settings > Privacy & Security > Accessibility, then restart tili-daemon."
         );
     }
+    if !tili_ax::has_input_monitoring_permission() {
+        eprintln!(
+            "tili-daemon: Input Monitoring permission not granted — hotkeys won't work until \
+             you grant it in System Settings > Privacy & Security > Input Monitoring, then \
+             restart tili-daemon."
+        );
+    }
 
     let listener = socket::bind()?;
     println!(
