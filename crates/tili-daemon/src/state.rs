@@ -304,6 +304,12 @@ pub struct WmState {
     /// `REMOVAL_GRACE_PERIOD`; a field rather than using the constant
     /// directly so tests can shrink it to zero instead of sleeping for real.
     removal_grace: Duration,
+    /// Test-only instrumentation: how many times `relayout_monitor` actually
+    /// proceeded to a real layout pass (not an early no-op return). Lets
+    /// tests assert "a relayout happened" without needing a real `AxWindow`
+    /// to observe a frame change through — compiled out of non-test builds.
+    #[cfg(test)]
+    relayout_calls: std::cell::Cell<u32>,
     workspaces: HashMap<String, Tree>,
     workspace_focus: HashMap<String, NodeId>,
     monitors: Vec<Monitor>,
@@ -380,6 +386,8 @@ impl Default for WmState {
             placements: HashMap::new(),
             pending_removal: HashMap::new(),
             removal_grace: REMOVAL_GRACE_PERIOD,
+            #[cfg(test)]
+            relayout_calls: std::cell::Cell::new(0),
             workspaces,
             workspace_focus: HashMap::new(),
             monitors,
@@ -422,11 +430,20 @@ impl WmState {
             .filter(|&(_, &since)| now.duration_since(since) >= grace)
             .map(|(&id, _)| id)
             .collect();
+        if expired.is_empty() {
+            return;
+        }
         for id in expired {
             self.pending_removal.remove(&id);
             self.windows.remove(&id);
             self.remove_placement(id);
         }
+        // A finalized removal changes which windows the tree lays out —
+        // without this, survivors keep their pre-removal frames and the
+        // closed window's slot stays an empty gap. `relayout_all_visible`,
+        // not just the focused monitor: the removed window's workspace may
+        // be visible on a different one.
+        self.relayout_all_visible();
     }
 
     /// Replaces one process's windows with a freshly-scanned set, in
@@ -1172,6 +1189,27 @@ impl WmState {
         }
     }
 
+    /// Flips the focused window's parent container's orientation between
+    /// horizontal and vertical (or the workspace root's, if `root`) — same
+    /// contract as `set_orientation`, but reads the current axis instead of
+    /// requiring the caller to name one explicitly. A lone window/root has
+    /// no orientation yet, so that case defaults to flipping away from
+    /// `Horizontal` (i.e. to `Vertical`), matching `root_orientation_hint`'s
+    /// existing default-to-horizontal convention for a fresh root.
+    pub fn toggle_orientation(&mut self, root: bool) -> Result<(), String> {
+        let current = self.focused_node().ok_or("no window is focused")?;
+        let existing = if root {
+            self.active_tree().root_orientation()
+        } else {
+            self.active_tree().orientation_of(current)
+        };
+        let next = match existing.unwrap_or(tili_tree::Orientation::Horizontal) {
+            tili_tree::Orientation::Horizontal => tili_tree::Orientation::Vertical,
+            tili_tree::Orientation::Vertical => tili_tree::Orientation::Horizontal,
+        };
+        self.set_orientation(next, root)
+    }
+
     /// Toggles a container between `Split` (tiled) and `Accordion`
     /// (stacked, one visible at a time) — the focused window's immediate
     /// parent, or (`root: true`) the workspace's root container instead
@@ -1876,6 +1914,8 @@ impl WmState {
         let Some(tree) = self.workspaces.get(&name) else {
             return;
         };
+        #[cfg(test)]
+        self.relayout_calls.set(self.relayout_calls.get() + 1);
 
         if let Some(&fullscreen_node) = self.fullscreen_focus.get(&name) {
             if let Some(id) = tree.window_at(fullscreen_node)
@@ -2615,6 +2655,81 @@ mod tests {
 
         assert!(state.placements.contains_key(&id));
         assert!(state.pending_removal.contains_key(&id));
+    }
+
+    #[test]
+    fn finalize_expired_removals_relayouts_the_survivors() {
+        let mut state = WmState {
+            removal_grace: Duration::ZERO,
+            ..WmState::default()
+        };
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let a = tree.insert_window(1, None, root_orientation);
+        tree.insert_window(2, Some(a), root_orientation);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.pending_removal.insert(1, Instant::now());
+
+        state.finalize_expired_removals();
+
+        assert!(!state.placements.contains_key(&1));
+        assert!(state.placements.contains_key(&2));
+        assert!(
+            state.relayout_calls.get() > 0,
+            "closing a tiled window must trigger a relayout so the survivor fills the freed space"
+        );
+    }
+
+    #[test]
+    fn finalize_expired_removals_skips_relayout_when_nothing_expired() {
+        let mut state = WmState {
+            removal_grace: Duration::from_secs(3600),
+            ..WmState::default()
+        };
+        state.pending_removal.insert(1, Instant::now());
+
+        state.finalize_expired_removals();
+
+        assert_eq!(state.relayout_calls.get(), 0);
+    }
+
+    #[test]
+    fn toggle_orientation_flips_between_horizontal_and_vertical() {
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let a = tree.insert_window(1, None, root_orientation);
+        tree.insert_window(2, Some(a), root_orientation);
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), a);
+
+        let before = state.active_tree().orientation_of(a);
+        assert!(state.toggle_orientation(false).is_ok());
+        let after = state.active_tree().orientation_of(a);
+        assert_ne!(before, after);
+
+        assert!(state.toggle_orientation(false).is_ok());
+        assert_eq!(state.active_tree().orientation_of(a), before);
+    }
+
+    #[test]
+    fn toggle_orientation_errors_when_nothing_is_focused() {
+        let mut state = WmState::default();
+        assert!(state.toggle_orientation(false).is_err());
     }
 
     #[test]

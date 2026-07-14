@@ -18,6 +18,7 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
         Command::OrientationSet(kind, root) => {
             result_response(state.set_orientation(to_tree_orientation(kind), root))
         }
+        Command::OrientationToggle(root) => result_response(state.toggle_orientation(root)),
         Command::ListWorkspaces => match serde_json::to_value(state.list_workspaces()) {
             Ok(payload) => Response::OkWithPayload(payload),
             Err(e) => Response::Err {

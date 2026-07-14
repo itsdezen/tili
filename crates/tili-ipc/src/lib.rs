@@ -68,6 +68,11 @@ pub enum Command {
     /// workspace root's, if the bool is `true` — same `--root` convention
     /// as `LayoutSet`/`LayoutToggle`).
     OrientationSet(OrientationKind, bool),
+    /// Flips the focused window's parent container's orientation between
+    /// horizontal and vertical (or the workspace root's, if the bool is
+    /// `true` — same `--root` convention as `OrientationSet`), instead of
+    /// requiring two separate binds for each explicit direction.
+    OrientationToggle(bool),
     /// Grows (positive) or shrinks (negative) the focused window's share of
     /// its nearest tiled container, taken from its siblings. `amount` is in
     /// the same weight-space as `tili_tree`'s container weights, not
