@@ -8,6 +8,40 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-16
+
+A fix release addressing two issues found after `v0.1.2`, plus a small menu
+bar polish.
+
+### Fixed
+
+- **A resolution-only display change (no monitor plugged/unplugged) never
+  triggered a relayout.** `CGDisplayRegisterReconfigurationCallback`
+  reliably fires for hot-plug/unplug and sleep/wake, but confirmed on real
+  hardware to never fire for a pure resolution change in this process
+  (`tili-daemon` has no `NSApplication`/UI-session-activation context).
+  `spawn_display_watcher` now also bounds its run loop into 1-second
+  chunks and re-diffs `list_monitors()` after every wake, catching the
+  resolution change within about a second — the third documented,
+  narrowly-scoped exception to the "no polling" invariant (see
+  `CLAUDE.md`).
+- **Switching to a workspace with no windows could silently revert back to
+  the previous one a moment later.** Parking a still-real-macOS-frontmost
+  window into its barely-on-screen corner sliver made
+  `frontmost_app_pid()` transiently read `None` for one 250ms tick, even
+  though no other app actually took focus. That `None` was overwriting the
+  tracker `FrontmostAppChanged` compares against, so the very next tick
+  reading the same (never-actually-changed) app looked like a fresh
+  Cmd-Tab and fired the event again — which reveals a parked workspace,
+  yanking the display right back. The tracker is now only ever updated on
+  an actual resolved frontmost app, so a transient `None` can no longer
+  reset the baseline a real app-to-app switch is compared against.
+
+### Changed
+
+- The menu bar's active-workspace indicator is now a leading "•" instead
+  of a native checkmark, and "Quit" now reads "Quit tili" for clarity.
+
 ## [0.1.2] - 2026-07-15
 
 A fix release addressing one issue found after `v0.1.1`.
