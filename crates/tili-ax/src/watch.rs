@@ -108,6 +108,18 @@ pub enum WmEvent {
     AppTerminated { pid: i32 },
     WindowsChanged { pid: i32 },
     WindowFocused { pid: i32 },
+    /// The system-wide frontmost application changed to a *different* pid —
+    /// checked on the same `RESYNC_INTERVAL` tick as `resync_watchers`
+    /// (`workspace::frontmost_app_pid`, a direct AX query, not a
+    /// notification). This is the only signal that catches Cmd-Tab or a
+    /// Mission Control/Control Center click switching to an app whose
+    /// window lives in a currently-parked workspace — neither
+    /// `NSWorkspaceDidActivateApplicationNotification` (dead for this
+    /// process, see `workspace::frontmost_app_pid`'s doc comment) nor the
+    /// per-window `WindowFocused` event above reacts to a pure OS-level
+    /// frontmost change that doesn't also move focus within an already
+    /// on-screen app.
+    FrontmostAppChanged { pid: i32 },
 }
 
 /// Starts watching for window/app lifecycle events and returns a channel
@@ -149,6 +161,12 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
         // every `FULL_RESYNC_MAX_INTERVAL`.
         let mut last_full_resync = Instant::now();
         let mut debounce_deadline: Option<Instant> = None;
+        // Edge-triggered: only `Some(pid)` values that actually differ from
+        // the last tick emit `FrontmostAppChanged`, so revealing a parked
+        // workspace (which ends by raising/focusing the same pid already
+        // recorded here) doesn't cause the very next tick to re-detect a
+        // "change" and loop.
+        let mut last_frontmost_pid: Option<i32> = None;
         loop {
             match app_rx.recv_timeout(RESYNC_INTERVAL) {
                 Ok(AppEvent::Launched { pid, bundle_id }) => {
@@ -192,6 +210,14 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
                         &mut unwatchable,
                         full_window_resync,
                     );
+
+                    let frontmost = workspace::frontmost_app_pid();
+                    if let Some(pid) = frontmost
+                        && last_frontmost_pid != Some(pid)
+                    {
+                        let _ = event_tx.send(WmEvent::FrontmostAppChanged { pid });
+                    }
+                    last_frontmost_pid = frontmost;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -294,7 +320,7 @@ fn resync_watchers(
     }
 
     watched.retain(|&pid, handle| {
-        if current.contains(&pid) {
+        if current.contains(&pid) && !pid_is_dead(pid) {
             true
         } else {
             // The pid is gone but no `AppTerminated` ever arrived (the same
@@ -307,7 +333,7 @@ fn resync_watchers(
         }
     });
     unwatchable.retain(|&pid| {
-        if current.contains(&pid) {
+        if current.contains(&pid) && !pid_is_dead(pid) {
             true
         } else {
             // Mirrors `watched.retain` above — a pid whose AXObserver
@@ -324,6 +350,24 @@ fn resync_watchers(
             false
         }
     });
+}
+
+/// Kernel-level liveness check, independent of `NSWorkspace` — `kill(pid,
+/// 0)` sends no signal, just checks whether the pid still refers to a live
+/// process (`ESRCH` means it doesn't). This exists because `current`
+/// (`watchable_pids()`) is itself partly sourced from
+/// `workspace::all_regular_app_pids()`, i.e. `NSWorkspace.runningApplications()`
+/// — the very subsystem whose termination notification this whole resync
+/// loop is a backstop for. A backgrounded, windowless pre-existing app can
+/// have both its primary termination notification *and* this NSWorkspace-
+/// derived liveness read go stale together, since they share one underlying
+/// source — leaving a permanent ghost tile behind with no path to ever
+/// synthesize `AppTerminated`. This check gives `resync_watchers` a second,
+/// genuinely independent signal for that case.
+fn pid_is_dead(pid: i32) -> bool {
+    // SAFETY: signal 0 sends nothing and only checks process existence/
+    // permission; passing a plain pid is always sound.
+    unsafe { libc::kill(pid, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
 }
 
 /// Subscribes to one app's window lifecycle notifications and forwards a

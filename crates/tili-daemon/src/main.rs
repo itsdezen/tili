@@ -378,6 +378,13 @@ fn handle_event(state: &mut WmState, pending_pids: &mut HashSet<i32>, event: WmE
             // two. Reacting to this event too would be redundant with that
             // synchronous resync, not a fallback for it.
         }
+        WmEvent::FrontmostAppChanged { pid } => {
+            // Unlike `WindowFocused` above, this fires for a pure OS-level
+            // frontmost-app change (Cmd-Tab, Mission Control/Control Center)
+            // that never routes through `dispatch()` at all — the only
+            // place that reveals a parked workspace.
+            state.reveal_frontmost(pid);
+        }
     }
 }
 

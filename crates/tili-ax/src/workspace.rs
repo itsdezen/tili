@@ -148,6 +148,18 @@ pub fn is_app_hidden(pid: i32) -> bool {
         .is_some_and(|app| app.isHidden())
 }
 
+/// Whether a process's `NSApplication.ActivationPolicy` is `.regular` (Dock
+/// icon + Cmd-Tab visible) as opposed to `.accessory`/`.prohibited` — used
+/// alongside close-button existence in `window.rs::classify_window_kind` to
+/// filter out transient system-UI chrome (context menus, thumbnail
+/// previews, authorization prompts). A process defaults to "not regular"
+/// (`false`) if it can't be resolved at all, matching the conservative
+/// default `all_regular_app_pids`'s own filter already takes.
+pub fn is_regular_app(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .is_some_and(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular)
+}
+
 /// Extracts the launched/terminated app's pid and bundle id from a
 /// `NSWorkspaceDidLaunchApplicationNotification`/`DidTerminateApplication`'s
 /// `userInfo[NSWorkspaceApplicationKey]`.

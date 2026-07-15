@@ -227,6 +227,34 @@ fn restore_for(kind: &PlacementKind) -> Restore {
     }
 }
 
+/// Bundle ids of macOS shell/system-UI processes whose windows are always
+/// transient chrome (context menus, thumbnail previews, toolbars,
+/// authorization prompts) rather than real user-facing windows — forced to
+/// `FloatingRuleMode::Ignore` regardless of `tili_ax::WindowKind`'s AX
+/// classification. A second, belt-and-suspenders layer on top of
+/// `classify_window_kind`'s own general
+/// `!is_regular_app && !has_close_button` gate (`tili-ax/src/window.rs` —
+/// ported from AeroSpace's `isWindowHeuristic`), which should already catch
+/// all of these structurally; kept as a guaranteed fix for the *specific*
+/// cases below in case that general signal ever doesn't apply (e.g. a
+/// future macOS version reports one of these processes as `.regular`
+/// activation policy) — confirmed in practice for the Dock's right-click
+/// context menu and the floating thumbnail preview shown after taking a
+/// screenshot (both misclassified `Standard` -> tiled) and
+/// `SecurityAgent`'s keychain-unlock prompt (misclassified `Dialog` ->
+/// re-centered/resized as a floating window instead of left exactly where
+/// macOS placed it). Extend only when a *specific* reported system surface
+/// is observed getting moved/resized, not preemptively.
+const SYSTEM_UI_BUNDLE_IDS: &[&str] = &[
+    "com.apple.dock",
+    "com.apple.screencaptureui",
+    "com.apple.SecurityAgent",
+];
+
+fn is_system_ui_bundle(bundle_id: Option<&str>) -> bool {
+    bundle_id.is_some_and(|id| SYSTEM_UI_BUNDLE_IDS.contains(&id))
+}
+
 /// What a brand-new window's placement disposition should be: an explicit
 /// floating-rule `mode` match always wins; otherwise falls back to the
 /// kind-based default that predates per-rule modes — `Popup`
@@ -544,7 +572,11 @@ impl WmState {
             // window lands on has nothing to do with whether it tiles or
             // floats.
             let rule_mode = if is_new {
-                self.matching_floating_rule(&window).map(|r| r.mode)
+                if is_system_ui_bundle(window.bundle_id().as_deref()) {
+                    Some(tili_config::FloatingRuleMode::Ignore)
+                } else {
+                    self.matching_floating_rule(&window).map(|r| r.mode)
+                }
             } else {
                 None
             };
@@ -1524,6 +1556,51 @@ impl WmState {
         Ok(())
     }
 
+    /// Reveals whatever window `pid` currently has AX-focused, in response
+    /// to `WmEvent::FrontmostAppChanged` (Cmd-Tab, or clicking another app
+    /// via Mission Control/Control Center — pure OS-level frontmost changes
+    /// that never otherwise route through `dispatch()`). Mirrors `summon`'s
+    /// body exactly, just resolving the target window via
+    /// `AxWindow::focused_id_for_pid` instead of a title/bundle-id text
+    /// query — same "switch onto whichever monitor already shows it, or
+    /// reveal it on `focused_monitor` if it's parked" behavior. A silent
+    /// no-op if the pid has no focused window or that window has no
+    /// placement (e.g. it's a `Popup`-classified element) — unlike `summon`,
+    /// there's no user-facing error to report this to.
+    pub fn reveal_frontmost(&mut self, pid: i32) {
+        let Some(id) = AxWindow::focused_id_for_pid(pid) else {
+            return;
+        };
+        let Some(placement) = self.placements.get(&id) else {
+            return;
+        };
+        let workspace = placement.workspace.clone();
+        let is_tiled = matches!(placement.kind, PlacementKind::Tiled);
+
+        let visible_on = self
+            .active_workspace
+            .iter()
+            .find(|(_, w)| **w == workspace)
+            .map(|(&mid, _)| mid);
+        match visible_on {
+            Some(monitor_id) => self.focused_monitor = monitor_id,
+            None => {
+                if self.switch_workspace(&workspace).is_err() {
+                    return;
+                }
+            }
+        }
+
+        if is_tiled
+            && let Some(tree) = self.workspaces.get(&workspace)
+            && let Some(node) = tree.find_node(id)
+        {
+            self.set_focused_node(node);
+        }
+
+        self.raise_focused_window(id);
+    }
+
     /// Raises/focuses `id` directly (not through `focused_node()` — used by
     /// `summon`, which may target a `Floating` window that has no tracked
     /// tree focus at all).
@@ -2251,6 +2328,19 @@ impl WmState {
     /// actually clamped. The one place every floating-placement call site
     /// should go through, rather than calling `frame_setter.set_frame`
     /// directly.
+    ///
+    /// Note: this window is never inserted into a `tili_tree::Tree` (see
+    /// `place_new_window`'s `Floating` arm), so it structurally can never be
+    /// given a tiled frame by `relayout_active`/`relayout_monitor` — the
+    /// only frame this function or its caller ever writes is the floating
+    /// one computed here. A brief visible flash of the app/OS's own default
+    /// frame *before* this runs (i.e. before tili's `WindowsChanged` event
+    /// for the new window is even dispatched) is a separate, accepted
+    /// architectural limitation: reacting after window creation via AX
+    /// notifications has no way to intercept the very first paint, and
+    /// there's no reliable public-API way to hide a single window (only a
+    /// whole app) to mask it. Don't mistake the tree-insertion guarantee
+    /// above for "therefore no flicker is possible."
     fn place_floating_window(&mut self, id: WindowId, area: Rect) {
         let Some(window) = self.windows.get(&id) else {
             return;

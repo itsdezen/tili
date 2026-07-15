@@ -4,8 +4,8 @@ use axuielement::ax_attribute::subroles::{
     AX_DIALOG_SUBROLE, AX_STANDARD_WINDOW_SUBROLE, AX_SYSTEM_DIALOG_SUBROLE,
 };
 use axuielement::ax_attribute::{
-    AX_CLOSE_BUTTON_ATTRIBUTE, AX_FULL_SCREEN_BUTTON_ATTRIBUTE, AX_MINIMIZED_ATTRIBUTE,
-    AX_ROLE_ATTRIBUTE, AX_SUBROLE_ATTRIBUTE,
+    AX_CLOSE_BUTTON_ATTRIBUTE, AX_FULL_SCREEN_BUTTON_ATTRIBUTE, AX_MINIMIZE_BUTTON_ATTRIBUTE,
+    AX_MINIMIZED_ATTRIBUTE, AX_ROLE_ATTRIBUTE, AX_SUBROLE_ATTRIBUTE, AX_ZOOM_BUTTON_ATTRIBUTE,
 };
 use axuielement::ffi::{
     AXUIElementRef, kAXFocusedAttribute, kAXPositionAttribute, kAXPressAction, kAXRaiseAction,
@@ -33,16 +33,38 @@ pub enum WindowKind {
 
 /// Pure decision function behind `WindowKind` classification — plain
 /// string/bool inputs so it's unit-testable without a real `AXUIElement`.
-/// A known dialog subrole is `Dialog`; the standard subrole is
-/// `Standard`; a missing subrole is tie-broken by presence of a fullscreen
-/// button (unchanged from the old binary check) since that's a reliable
-/// secondary signal AppKit only puts on ordinary top-level windows; anything
-/// else is `Popup`.
-fn classify_window_kind(subrole: Option<&str>, has_fullscreen_button: bool) -> WindowKind {
+///
+/// Checked first, ahead of subrole: a non-regular-activation-policy process
+/// (`.accessory`/`.prohibited` — system-UI helpers like the Dock,
+/// `SecurityAgent`, or the screenshot toolbar, none of which show a Dock
+/// icon or appear in Cmd-Tab) presenting a window with no close button is
+/// essentially always transient chrome, not a real user-facing window —
+/// this is the one general, broadly-applicable heuristic AeroSpace's own
+/// `isWindowHeuristic` uses unconditionally (`activationPolicy ==
+/// .accessory && closeButton == nil`), ported here because it replaces an
+/// open-ended per-bundle-id denylist with a single structural check. A
+/// regular app's own dialogs/popups still fall through to the subrole logic
+/// below unaffected, since `is_regular_app` is `true` for them.
+///
+/// Below that: a known dialog subrole is `Dialog`; the standard subrole is
+/// `Standard`; a missing/ambiguous subrole falls back to whether the window
+/// has *any* window-chrome button (close/fullscreen/zoom/minimize) — a
+/// window with none of them and an ambiguous subrole is essentially always
+/// a tooltip/context-menu/popover rather than a real top-level window
+/// (mirrors AeroSpace's `isWindowHeuristicOld`'s "no buttons at all" gate).
+fn classify_window_kind(
+    subrole: Option<&str>,
+    has_any_chrome_button: bool,
+    has_close_button: bool,
+    is_regular_app: bool,
+) -> WindowKind {
+    if !is_regular_app && !has_close_button {
+        return WindowKind::Popup;
+    }
     match subrole {
         Some(s) if s == AX_DIALOG_SUBROLE || s == AX_SYSTEM_DIALOG_SUBROLE => WindowKind::Dialog,
         Some(s) if s == AX_STANDARD_WINDOW_SUBROLE => WindowKind::Standard,
-        None if has_fullscreen_button => WindowKind::Standard,
+        None if has_any_chrome_button => WindowKind::Standard,
         _ => WindowKind::Popup,
     }
 }
@@ -174,7 +196,30 @@ impl AxWindow {
             .ok()
             .flatten()
             .is_some();
-        let kind = classify_window_kind(subrole.as_deref(), has_fullscreen_button);
+        let has_close_button = element
+            .element_attribute(AX_CLOSE_BUTTON_ATTRIBUTE)
+            .ok()
+            .flatten()
+            .is_some();
+        let has_any_chrome_button = has_fullscreen_button
+            || has_close_button
+            || element
+                .element_attribute(AX_ZOOM_BUTTON_ATTRIBUTE)
+                .ok()
+                .flatten()
+                .is_some()
+            || element
+                .element_attribute(AX_MINIMIZE_BUTTON_ATTRIBUTE)
+                .ok()
+                .flatten()
+                .is_some();
+        let is_regular_app = crate::workspace::is_regular_app(pid);
+        let kind = classify_window_kind(
+            subrole.as_deref(),
+            has_any_chrome_button,
+            has_close_button,
+            is_regular_app,
+        );
 
         let id = Self::resolve_window_id(&element)?;
         let title = element
@@ -360,11 +405,11 @@ mod tests {
     #[test]
     fn dialog_subrole_classifies_as_dialog() {
         assert_eq!(
-            classify_window_kind(Some(AX_DIALOG_SUBROLE), false),
+            classify_window_kind(Some(AX_DIALOG_SUBROLE), false, false, true),
             WindowKind::Dialog
         );
         assert_eq!(
-            classify_window_kind(Some(AX_SYSTEM_DIALOG_SUBROLE), true),
+            classify_window_kind(Some(AX_SYSTEM_DIALOG_SUBROLE), true, false, true),
             WindowKind::Dialog
         );
     }
@@ -372,26 +417,56 @@ mod tests {
     #[test]
     fn standard_subrole_classifies_as_standard() {
         assert_eq!(
-            classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), false),
+            classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), false, false, true),
             WindowKind::Standard
         );
     }
 
     #[test]
-    fn missing_subrole_with_fullscreen_button_ties_break_to_standard() {
-        assert_eq!(classify_window_kind(None, true), WindowKind::Standard);
+    fn missing_subrole_with_chrome_button_ties_break_to_standard() {
+        assert_eq!(
+            classify_window_kind(None, true, false, true),
+            WindowKind::Standard
+        );
     }
 
     #[test]
-    fn missing_subrole_without_fullscreen_button_is_popup() {
-        assert_eq!(classify_window_kind(None, false), WindowKind::Popup);
+    fn missing_subrole_without_chrome_button_is_popup() {
+        assert_eq!(
+            classify_window_kind(None, false, false, true),
+            WindowKind::Popup
+        );
     }
 
     #[test]
     fn unrecognized_subrole_is_popup() {
         assert_eq!(
-            classify_window_kind(Some("AXFloatingWindow"), false),
+            classify_window_kind(Some("AXFloatingWindow"), false, false, true),
             WindowKind::Popup
+        );
+    }
+
+    #[test]
+    fn non_regular_app_without_close_button_is_popup_even_with_standard_subrole() {
+        // Mirrors AeroSpace's `isWindowHeuristic`'s unconditional
+        // `activationPolicy == .accessory && closeButton == nil` gate —
+        // catches Dock context menus, SecurityAgent's keychain prompt, the
+        // screenshot toolbar's thumbnail preview, etc. regardless of what
+        // subrole they happen to report.
+        assert_eq!(
+            classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), true, false, false),
+            WindowKind::Popup
+        );
+    }
+
+    #[test]
+    fn non_regular_app_with_close_button_still_classifies_normally() {
+        // A menu-bar-only utility app (accessory policy) with a real
+        // preference window (has a close button) isn't caught by the gate
+        // above — falls through to ordinary subrole-based classification.
+        assert_eq!(
+            classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), true, true, false),
+            WindowKind::Standard
         );
     }
 }
