@@ -251,7 +251,7 @@ fn resolve_disposition(
 /// carrying the `Restore` state to pop back to once the special state
 /// ends), then `disposition` itself (see `resolve_disposition`):
 /// `Ignore` -> `Popup`, `Float` -> `Floating` (frame computed separately
-/// by the caller once disposition is known — see `compute_floating_frame`),
+/// by the caller once disposition is known — see `place_floating_window`),
 /// `Tile` -> `Tiled`.
 fn classify_new_window(
     disposition: tili_config::FloatingRuleMode,
@@ -557,15 +557,8 @@ impl WmState {
                         .or_insert(node);
                 }
                 PlacementKind::Floating { .. } => {
-                    let frame = self
-                        .windows
-                        .get(&id)
-                        .map(|w| self.compute_floating_frame(w));
-                    if let Some(frame) = frame
-                        && let Some(w) = self.windows.get_mut(&id)
-                    {
-                        self.frame_setter.set_frame(w, frame);
-                    }
+                    let area = self.focused_monitor_area();
+                    self.place_floating_window(id, area);
                 }
                 PlacementKind::NativeFullscreen(_)
                 | PlacementKind::Minimized(_)
@@ -694,15 +687,8 @@ impl WmState {
                         kind: PlacementKind::Floating { manual: None },
                     },
                 );
-                let frame = self
-                    .windows
-                    .get(&id)
-                    .map(|w| self.compute_floating_frame(w));
-                if let Some(frame) = frame
-                    && let Some(w) = self.windows.get_mut(&id)
-                {
-                    self.frame_setter.set_frame(w, frame);
-                }
+                let area = self.focused_monitor_area();
+                self.place_floating_window(id, area);
             }
         }
     }
@@ -1607,15 +1593,8 @@ impl WmState {
                     kind: PlacementKind::Floating { manual: None },
                 },
             );
-            let frame = self
-                .windows
-                .get(&id)
-                .map(|w| self.compute_floating_frame(w));
-            if let Some(frame) = frame
-                && let Some(w) = self.windows.get_mut(&id)
-            {
-                self.frame_setter.set_frame(w, frame);
-            }
+            let area = self.focused_monitor_area();
+            self.place_floating_window(id, area);
         } else {
             let near = self.workspace_focus.get(&workspace).copied();
             let root_orientation = self.root_orientation_hint();
@@ -2074,17 +2053,17 @@ impl WmState {
                 PlacementKind::Floating { manual } => *manual,
                 _ => None,
             });
-            let frame = match manual {
-                Some(geometry) => Some(restore_floating_frame(geometry, area)),
-                None => self
-                    .windows
-                    .get(&id)
-                    .map(|w| self.initial_floating_frame_in(w, area)),
-            };
-            if let Some(frame) = frame
-                && let Some(window) = self.windows.get_mut(&id)
-            {
-                self.frame_setter.set_frame(window, frame);
+            match manual {
+                // A captured drag/resize is restored exactly as the user
+                // left it (proportionally) — no centering intent to
+                // re-derive or correct here.
+                Some(geometry) => {
+                    let frame = restore_floating_frame(geometry, area);
+                    if let Some(window) = self.windows.get_mut(&id) {
+                        self.frame_setter.set_frame(window, frame);
+                    }
+                }
+                None => self.place_floating_window(id, area),
             }
         }
     }
@@ -2105,28 +2084,27 @@ impl WmState {
         })
     }
 
-    /// The frame a `Float`-disposition window should be placed at, sized/
-    /// centered against `focused_monitor`'s frame since new windows always
-    /// land on the focused monitor's active workspace. Rule-based, so only
-    /// used at *creation* (and reattachment from a special state) — once a
-    /// window has captured manual geometry, `restore_floating_frame` takes
-    /// over.
-    fn compute_floating_frame(&self, window: &AxWindow) -> Rect {
-        let area = self.monitor_frame(self.focused_monitor).unwrap_or(Rect {
+    /// `focused_monitor`'s frame, since new/reattached floating windows
+    /// always land on the focused monitor's active workspace — falls back
+    /// to a hardcoded size if it's unresolvable, so callers always have an
+    /// area to size/center against.
+    fn focused_monitor_area(&self) -> Rect {
+        self.monitor_frame(self.focused_monitor).unwrap_or(Rect {
             x: 0.0,
             y: 0.0,
             width: 1440.0,
             height: 900.0,
-        });
-        self.initial_floating_frame_in(window, area)
+        })
     }
 
     /// Sizes/centers a `Float`-disposition window within `area` — an
     /// explicit matching rule's `width`/`height`/`center` win, falling back
     /// to `floating_defaults` for anything the rule didn't specify (or if
     /// no rule matched at all, e.g. a `Dialog`-kind window with no app-id
-    /// entry in `floating-rules`).
-    fn initial_floating_frame_in(&self, window: &AxWindow, area: Rect) -> Rect {
+    /// entry in `floating-rules`). Also returns whether centering was
+    /// requested, so `place_floating_window` knows whether a post-write
+    /// correction is meaningful.
+    fn initial_floating_frame_in(&self, window: &AxWindow, area: Rect) -> (Rect, bool) {
         let rule = self.matching_floating_rule(window);
         let width = rule
             .and_then(|r| r.width)
@@ -2148,12 +2126,48 @@ impl WmState {
             (area.x, area.y)
         };
 
-        Rect {
-            x,
-            y,
-            width,
-            height,
+        (
+            Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            center,
+        )
+    }
+
+    /// Computes and writes `id`'s floating frame within `area` (see
+    /// `initial_floating_frame_in`), then — if centering was requested —
+    /// reads back the window's *actual* resulting size and corrects its
+    /// position if the app silently clamped the requested size along one
+    /// axis (e.g. a fixed-width Settings window that only resizes
+    /// vertically). Centering math run against the *requested* size would
+    /// otherwise leave the window visibly off-center once the real,
+    /// clamped size is accounted for. A no-op correction (via
+    /// `AxWindow::set_position`'s own epsilon guard) when nothing was
+    /// actually clamped. The one place every floating-placement call site
+    /// should go through, rather than calling `frame_setter.set_frame`
+    /// directly.
+    fn place_floating_window(&mut self, id: WindowId, area: Rect) {
+        let Some(window) = self.windows.get(&id) else {
+            return;
+        };
+        let (frame, center) = self.initial_floating_frame_in(window, area);
+        let Some(window) = self.windows.get_mut(&id) else {
+            return;
+        };
+        self.frame_setter.set_frame(window, frame);
+        if !center {
+            return;
         }
+        let actual = window.live_frame();
+        if frames_match(actual, frame) {
+            return;
+        }
+        let corrected_x = area.x + (area.width - actual.width) / 2.0;
+        let corrected_y = area.y + (area.height - actual.height) / 2.0;
+        window.set_position(corrected_x, corrected_y);
     }
 }
 

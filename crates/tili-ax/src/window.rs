@@ -68,6 +68,24 @@ fn frame_matches(a: Rect, b: Rect) -> bool {
         && (a.height - b.height).abs() < FRAME_EPSILON
 }
 
+/// Reads a window's current position/size straight from AX — `None` if
+/// either attribute is unreadable. Shared by `from_element` (initial
+/// construction) and `AxWindow::live_frame` (a post-write check), so both
+/// agree on exactly what "the real frame" means.
+fn read_frame(element: &AXUIElement) -> Option<Rect> {
+    let position = element
+        .point_attribute(kAXPositionAttribute)
+        .ok()
+        .flatten()?;
+    let size = element.size_attribute(kAXSizeAttribute).ok().flatten()?;
+    Some(Rect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    })
+}
+
 /// Wraps a cached `AXUIElement` handle for one window, plus its resolved
 /// `CGWindowID`. All AX/CoreFoundation specifics are confined to this module.
 pub struct AxWindow {
@@ -164,22 +182,12 @@ impl AxWindow {
             .ok()
             .flatten()
             .unwrap_or_default();
-        let position = element.point_attribute(kAXPositionAttribute).ok().flatten();
-        let size = element.size_attribute(kAXSizeAttribute).ok().flatten();
-        let frame = match (position, size) {
-            (Some(p), Some(s)) => Rect {
-                x: p.x,
-                y: p.y,
-                width: s.width,
-                height: s.height,
-            },
-            _ => Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
-        };
+        let frame = read_frame(&element).unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        });
         let minimized = element
             .bool_attribute(AX_MINIMIZED_ATTRIBUTE)
             .ok()
@@ -222,6 +230,16 @@ impl AxWindow {
 
     pub fn frame(&self) -> Rect {
         self.frame
+    }
+
+    /// Reads the window's position/size fresh from AX, bypassing the
+    /// cached `frame()` — used right after a `set_frame` write to check
+    /// whether the app actually honored the requested size, since some
+    /// apps clamp a resize along one axis (e.g. a fixed-width Settings
+    /// window) and `set_frame` itself never verifies. Falls back to the
+    /// cached frame if the read fails.
+    pub fn live_frame(&self) -> Rect {
+        read_frame(&self.element).unwrap_or(self.frame)
     }
 
     pub fn element(&self) -> &AXUIElement {
