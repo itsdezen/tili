@@ -11,18 +11,14 @@ class Tili < Formula
   version "0.1.0"
   license "MIT"
 
-  # PLACEHOLDER — fill in with the real sha256 from the v0.1.0 release
-  # tarballs once `xtask package` has built and published them (see
-  # CONTRIBUTING.md's "Release Engineering" section). Do not publish this
-  # formula to itsdezen/homebrew-tap with placeholder hashes still in it.
   on_arm do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-aarch64-apple-darwin.tar.gz"
-    sha256 "PLACEHOLDER_FILL_IN_AFTER_RELEASE_BUILD"
+    sha256 "ce3c3064f8d23f96b09a156654a12b6f12eaf6b836d3df8d32eaa76007493031"
   end
 
   on_intel do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-x86_64-apple-darwin.tar.gz"
-    sha256 "PLACEHOLDER_FILL_IN_AFTER_RELEASE_BUILD"
+    sha256 "e219f6e1186f452dfac18d94710d6b89a30f0177a442a0144109f98f9ad45387"
   end
 
   def install
