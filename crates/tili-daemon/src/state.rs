@@ -572,7 +572,7 @@ impl WmState {
             // window lands on has nothing to do with whether it tiles or
             // floats.
             let rule_mode = if is_new {
-                if is_system_ui_bundle(window.bundle_id().as_deref()) {
+                if is_system_ui_bundle(window.bundle_id()) {
                     Some(tili_config::FloatingRuleMode::Ignore)
                 } else {
                     self.matching_floating_rule(&window).map(|r| r.mode)

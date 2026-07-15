@@ -104,10 +104,19 @@ const FULL_RESYNC_MAX_INTERVAL: Duration = Duration::from_secs(20);
 /// window is focused/main within the app.
 #[derive(Debug, Clone)]
 pub enum WmEvent {
-    AppLaunched { pid: i32, bundle_id: Option<String> },
-    AppTerminated { pid: i32 },
-    WindowsChanged { pid: i32 },
-    WindowFocused { pid: i32 },
+    AppLaunched {
+        pid: i32,
+        bundle_id: Option<String>,
+    },
+    AppTerminated {
+        pid: i32,
+    },
+    WindowsChanged {
+        pid: i32,
+    },
+    WindowFocused {
+        pid: i32,
+    },
     /// The system-wide frontmost application changed to a *different* pid —
     /// checked on the same `RESYNC_INTERVAL` tick as `resync_watchers`
     /// (`workspace::frontmost_app_pid`, a direct AX query, not a
@@ -119,7 +128,9 @@ pub enum WmEvent {
     /// per-window `WindowFocused` event above reacts to a pure OS-level
     /// frontmost change that doesn't also move focus within an already
     /// on-screen app.
-    FrontmostAppChanged { pid: i32 },
+    FrontmostAppChanged {
+        pid: i32,
+    },
 }
 
 /// Starts watching for window/app lifecycle events and returns a channel
@@ -367,7 +378,10 @@ fn resync_watchers(
 fn pid_is_dead(pid: i32) -> bool {
     // SAFETY: signal 0 sends nothing and only checks process existence/
     // permission; passing a plain pid is always sound.
-    unsafe { libc::kill(pid, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
+    unsafe {
+        libc::kill(pid, 0) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
 }
 
 /// Subscribes to one app's window lifecycle notifications and forwards a
