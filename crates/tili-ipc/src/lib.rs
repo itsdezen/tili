@@ -131,6 +131,20 @@ pub enum Command {
     /// `WmState` mutation, it's process lifecycle.
     Shutdown,
     Ping,
+    /// Blocks until *something* about `WmState` has changed since this
+    /// request arrived (workspace switch, window created/closed/moved,
+    /// monitor hot-plug, config reload, ...) — deliberately coarse, not
+    /// "which field changed," so a client re-fetches whatever it actually
+    /// cares about (e.g. `ListMonitors`/`ListWorkspaces`) after waking up
+    /// rather than this command growing a payload shape of its own.
+    /// Responds `Ok` either on a real change or after an internal
+    /// timeout, whichever comes first — the timeout exists purely so a
+    /// long-lived idle connection doesn't sit blocked forever if nothing
+    /// ever changes, not so callers need to distinguish the two cases.
+    /// Lets a client stay reachability- and change-aware with zero
+    /// polling: the blocking read costs nothing while idle, unlike a
+    /// sleep-and-recheck loop waking on a timer.
+    WaitForChange,
     Raw {
         verb: String,
         args: Vec<String>,

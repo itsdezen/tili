@@ -2,7 +2,10 @@
 # Builds, bundles, (optionally) signs, and (re)starts tili from this
 # checkout — for on-device testing without a real `brew install`. Mirrors
 # what `xtask package` does for a release build, then finishes the loop by
-# pointing PATH at the freshly built `tili.app` and restarting the daemon.
+# pointing PATH at the freshly built `tili.app` and running `tili start`,
+# which installs/starts LaunchAgents for both the daemon and the menu bar
+# badge (`tili-menubar`) — see ~/Library/Logs/tili/menubar.log if the
+# badge doesn't show up.
 #
 # Signing: set TILI_SIGN_IDENTITY to a Common Name in your keychain to sign
 # with it (defaults to "tili Self-Signed", the CN convention documented in
@@ -19,7 +22,7 @@ version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
 identity="${TILI_SIGN_IDENTITY:-tili Self-Signed}"
 
 echo "==> building release binaries for $target"
-cargo build --release --target "$target" -p tili-daemon -p tili-cli
+cargo build --release --target "$target" -p tili-daemon -p tili-cli -p tili-menubar
 
 echo "==> bundling tili.app (version $version)"
 cargo run -p xtask -- bundle --target "$target" --version "$version"
@@ -36,7 +39,7 @@ fi
 
 export PATH="$PWD/$app/Contents/MacOS:$PATH"
 
-echo "==> restarting daemon"
+echo "==> restarting daemon + menu bar badge"
 tili stop || true
 tili start
 

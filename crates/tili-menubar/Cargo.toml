@@ -1,0 +1,48 @@
+[package]
+name = "tili-menubar"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tili-menubar"
+path = "src/main.rs"
+
+[dependencies]
+tili-ipc = { path = "../tili-ipc" }
+serde_json = { workspace = true }
+tray-icon = "0.24"
+# Same objc2/objc2-app-kit/objc2-foundation version family already pinned
+# in tili-ax's Cargo.toml — tray-icon/muda resolve to the same versions,
+# this isn't a second objc2 dependency tree. default-features disabled for
+# the same reason tili-ax disables them: only pull in the specific
+# AppKit/Foundation classes actually used here.
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSResponder",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSControl",
+    "NSView",
+    "NSImage",
+    "NSBezierPath",
+    "NSColor",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphicsContext",
+    "NSGraphics",
+    "NSAttributedString",
+    "NSStringDrawing",
+    "objc2-core-foundation",
+    "block2",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSString",
+    "NSTimer",
+    "NSDictionary",
+    "NSGeometry",
+    "NSValue",
+    "block2",
+] }
+block2 = "0.6"

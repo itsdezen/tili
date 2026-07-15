@@ -10,6 +10,13 @@ use state::WmState;
 use tili_ax::WmEvent;
 use tili_ipc::{Command, Response};
 
+/// How long a `Command::WaitForChange` connection blocks before getting an
+/// `Ok` response anyway, even if nothing changed — purely so a long-idle
+/// connection doesn't sit blocked forever; callers don't need to
+/// distinguish a timeout from a real change (see the command's own doc
+/// comment in `tili-ipc`).
+const WAIT_FOR_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The daemon's bundle id, duplicated from `xtask/src/main.rs`'s `BUNDLE_ID`
 /// const (used when wrapping the daemon in `tili.app`) — keep the two in
 /// sync if either changes. Used only to target `tccutil reset` at our own
@@ -76,6 +83,11 @@ async fn main() -> std::io::Result<()> {
     let mut displays_changed = spawn_display_watcher_bridge();
     let mut mouse_events = spawn_mouse_watcher_bridge();
     let mut state = WmState::default();
+    // Fired once per loop iteration below (deliberately coarse — see
+    // `Command::WaitForChange`'s doc comment) so a `WaitForChange`
+    // connection's dedicated task (spawned in the accept arm, never
+    // touching `WmState` itself) can wake up without polling.
+    let change_notify = Arc::new(tokio::sync::Notify::new());
 
     // Debounces `WmEvent::WindowsChanged`: a pid lands here instead of
     // being rescanned immediately, and every pid queued gets exactly one
@@ -111,6 +123,25 @@ async fn main() -> std::io::Result<()> {
     // in sync via `sync_active_combos` after anything that could change the
     // current mode or its bindings.
     loop {
+        // Set by whichever branch below did something a `WaitForChange`
+        // caller would plausibly care about — checked once after the
+        // select! and only then fires `change_notify`. This is the reason
+        // `maintenance_tick` (an unconditional 30ms timer, unrelated to
+        // real activity) can't just notify unconditionally on every
+        // branch: doing so would wake every blocked `WaitForChange`
+        // connection ~33 times/sec regardless of whether anything
+        // happened, defeating the entire point of replacing polling with
+        // this. `Ping`/`ListWindows`/etc. reaching the generic socket arm
+        // still count as "changed" even though they're read-only — rare
+        // enough not to bother distinguishing, per `WaitForChange`'s own
+        // "deliberately coarse" doc comment. `MouseSignal::Moved` is the
+        // one left out entirely (not just gated): it fires every ~80ms
+        // during any cursor movement, which is exactly the kind of
+        // activity-independent-of-real-change cadence this is trying to
+        // avoid; a `focus-follows-monitor` switch it triggers is picked up
+        // on whatever the next genuinely-notifying event is, or worst
+        // case `WAIT_FOR_CHANGE_TIMEOUT`.
+        let mut changed = false;
         tokio::select! {
             accepted = listener.accept() => {
                 let (mut stream, _addr) = accepted?;
@@ -125,23 +156,48 @@ async fn main() -> std::io::Result<()> {
                         println!("tili-daemon: shutting down");
                         break;
                     }
+                    Ok(Command::WaitForChange) => {
+                        // Spawned rather than handled inline: this can
+                        // legitimately block for up to
+                        // WAIT_FOR_CHANGE_TIMEOUT, and the single select!
+                        // loop must never stall on one connection while
+                        // others (including ordinary commands) are
+                        // waiting. Never touches `state` — only awaits
+                        // `change_notify` and writes its own owned
+                        // stream — so spawning it doesn't violate the
+                        // "WmState mutates from one place only" invariant
+                        // the rest of this loop relies on. Deliberately
+                        // not counted as `changed` itself.
+                        tokio::spawn(handle_wait_for_change(stream, change_notify.clone()));
+                    }
                     Ok(command) => {
                         let response = dispatch(&mut state, command);
                         if let Err(e) = socket::write_response(&mut stream, &response).await {
                             eprintln!("tili-daemon: failed to write response: {e}");
                         }
                         sync_active_combos(&active_combos, &state);
+                        changed = true;
                     }
                     Err(e) => eprintln!("tili-daemon: failed to read command: {e}"),
                 }
             }
             event = events.recv() => {
                 match event {
-                    Some(event) => handle_event(&mut state, &mut pending_pids, event),
+                    Some(event) => {
+                        // AppLaunched/WindowFocused are no-ops in
+                        // handle_event (see its own doc comments) — not
+                        // worth waking a blocked WaitForChange caller for.
+                        changed = matches!(
+                            event,
+                            WmEvent::WindowsChanged { .. } | WmEvent::AppTerminated { .. }
+                        );
+                        handle_event(&mut state, &mut pending_pids, event);
+                    }
                     None => eprintln!("tili-daemon: event watcher channel closed unexpectedly"),
                 }
             }
             _ = maintenance_tick.tick() => {
+                changed = !pending_pids.is_empty();
                 for pid in pending_pids.drain() {
                     let windows = tili_ax::list_windows_for_pid(pid);
                     state.apply_windows_changed(pid, windows);
@@ -152,6 +208,7 @@ async fn main() -> std::io::Result<()> {
                 println!("tili-daemon: config reloaded from {}", config_path.display());
                 state.apply_config(&config);
                 sync_active_combos(&active_combos, &state);
+                changed = true;
             }
             Some(combo) = hotkeys.recv() => {
                 // Hotkey-triggered commands go through the exact same
@@ -173,6 +230,7 @@ async fn main() -> std::io::Result<()> {
                     if auto_exits {
                         state.exit_mode();
                     }
+                    changed = true;
                 }
                 sync_active_combos(&active_combos, &state);
             }
@@ -180,21 +238,32 @@ async fn main() -> std::io::Result<()> {
                 // A monitor connected/disconnected/reconfigured (M9) — the
                 // callback doesn't say which, so just re-enumerate.
                 state.on_displays_changed();
+                changed = true;
             }
             Some(signal) = mouse_events.recv() => {
                 match signal {
                     // Throttled cursor positions (M10, focus-follows-monitor)
                     // — a no-op inside `on_mouse_moved` unless that setting
-                    // is on.
+                    // is on. Deliberately excluded from `changed` — see this
+                    // loop's own top-of-body comment for why.
                     tili_ax::MouseSignal::Moved(x, y) => state.on_mouse_moved(x, y),
                     // Suppresses relayout for the duration of a drag-resize
                     // (M10.1) so `apply_windows_changed` doesn't fight the
                     // user's drag; button-up relays out once to snap back
                     // to the tiled layout.
-                    tili_ax::MouseSignal::ButtonDown => state.on_mouse_button_down(),
-                    tili_ax::MouseSignal::ButtonUp => state.on_mouse_button_up(),
+                    tili_ax::MouseSignal::ButtonDown => {
+                        state.on_mouse_button_down();
+                        changed = true;
+                    }
+                    tili_ax::MouseSignal::ButtonUp => {
+                        state.on_mouse_button_up();
+                        changed = true;
+                    }
                 }
             }
+        }
+        if changed {
+            change_notify.notify_waiters();
         }
     }
 
@@ -265,6 +334,18 @@ fn ensure_starter_config_exists(path: &std::path::Path) {
             path.display()
         ),
     }
+}
+
+/// Handles one `Command::WaitForChange` connection entirely off the main
+/// select! loop: blocks on `change_notify` (or `WAIT_FOR_CHANGE_TIMEOUT`,
+/// whichever comes first), then responds `Ok` — never touches `WmState`,
+/// so running many of these concurrently alongside the main loop is safe.
+async fn handle_wait_for_change(
+    mut stream: tokio::net::UnixStream,
+    change_notify: Arc<tokio::sync::Notify>,
+) {
+    let _ = tokio::time::timeout(WAIT_FOR_CHANGE_TIMEOUT, change_notify.notified()).await;
+    let _ = socket::write_response(&mut stream, &Response::Ok).await;
 }
 
 fn handle_event(state: &mut WmState, pending_pids: &mut HashSet<i32>, event: WmEvent) {

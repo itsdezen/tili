@@ -79,7 +79,7 @@ fn bundle(target: &str, version: &str) {
     std::fs::create_dir_all(&macos_dir)
         .unwrap_or_else(|e| panic!("create {}: {e}", macos_dir.display()));
 
-    for bin in ["tili-daemon", "tili"] {
+    for bin in ["tili-daemon", "tili", "tili-menubar"] {
         let src = PathBuf::from(format!("target/{target}/release/{bin}"));
         let dst = macos_dir.join(bin);
         std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("copy {}: {e}", src.display()));

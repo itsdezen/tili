@@ -358,25 +358,32 @@ fn print_workspaces(payload: serde_json::Value) {
 }
 
 const LAUNCH_AGENT_LABEL: &str = "com.tili.daemon";
+/// The menu bar badge's own LaunchAgent — installed/removed alongside the
+/// daemon's own by `start_daemon`/`stop_daemon`, so `tili start`/`tili
+/// stop` is the single lifecycle control for "the whole tili experience,"
+/// not just the daemon. Best-effort throughout: a menu bar badge failing
+/// to install/start should never block or fail `tili start` itself, since
+/// the daemon (and hotkeys/CLI) are already fully usable without it.
+const MENUBAR_LAUNCH_AGENT_LABEL: &str = "com.tili.menubar";
 
-fn launch_agent_path() -> std::path::PathBuf {
+fn launch_agent_path(label: &str) -> std::path::PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
     std::path::PathBuf::from(home)
         .join("Library/LaunchAgents")
-        .join(format!("{LAUNCH_AGENT_LABEL}.plist"))
+        .join(format!("{label}.plist"))
 }
 
-/// `tili-daemon` ships alongside `tili` itself (both land in the same bin
-/// directory, whether that's a Homebrew prefix or `cargo build`'s
+/// A sibling binary ships alongside `tili` itself (both land in the same
+/// bin directory, whether that's a Homebrew prefix or `cargo build`'s
 /// `target/debug`) — resolved relative to this running binary rather than
-/// relying on `tili-daemon` being on `PATH`, which a LaunchAgent's minimal
+/// relying on it being on `PATH`, which a LaunchAgent's minimal
 /// environment doesn't guarantee.
-fn daemon_binary_path() -> std::path::PathBuf {
+fn sibling_binary_path(name: &str) -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|dir| dir.join("tili-daemon")))
+        .and_then(|p| p.parent().map(|dir| dir.join(name)))
         .filter(|p| p.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("tili-daemon"))
+        .unwrap_or_else(|| std::path::PathBuf::from(name))
 }
 
 /// Parses `tili move-workspace-to-monitor <workspace> <target>`'s target
@@ -461,7 +468,7 @@ fn wait_for_daemon_ready() {
             println!(" running.");
             return;
         }
-        if !launch_agent_is_loaded() {
+        if !launch_agent_is_loaded(LAUNCH_AGENT_LABEL) {
             println!();
             eprintln!(
                 "tili: tili-daemon stopped during startup (Accessibility permission is likely \
@@ -477,9 +484,9 @@ fn wait_for_daemon_ready() {
     }
 }
 
-fn launch_agent_is_loaded() -> bool {
+fn launch_agent_is_loaded(label: &str) -> bool {
     std::process::Command::new("launchctl")
-        .args(["list", LAUNCH_AGENT_LABEL])
+        .args(["list", label])
         .output()
         .is_ok_and(|out| out.status.success())
 }
@@ -516,32 +523,31 @@ fn daemon_is_reachable() -> bool {
     stream.read_exact(&mut response_buf).is_ok()
 }
 
-/// `tili start` — writes a LaunchAgent plist and `launchctl load`s it, so
-/// `launchd` (not this short-lived CLI process) owns tili-daemon from here
-/// on: it starts it right now, restarts it if it crashes (`KeepAlive`),
-/// and starts it again at every login (`RunAtLoad`).
-fn start_daemon() {
-    let plist_path = launch_agent_path();
+/// Writes `label`'s LaunchAgent plist (`RunAtLoad`+`KeepAlive`, logging to
+/// `~/Library/Logs/tili/{log_name}.{log,err.log}`) and `launchctl load`s
+/// it. Shared by `start_daemon` (the daemon itself) and the menu bar
+/// badge — same mechanism, different binary/label/log prefix.
+fn install_launch_agent(label: &str, binary: &std::path::Path, log_name: &str) -> Result<(), ()> {
+    let plist_path = launch_agent_path(label);
     let Some(parent) = plist_path.parent() else {
-        return;
+        return Err(());
     };
     if let Err(e) = std::fs::create_dir_all(parent) {
         eprintln!("tili: couldn't create {}: {e}", parent.display());
-        std::process::exit(1);
+        return Err(());
     }
 
     let home = std::env::var("HOME").unwrap_or_default();
     let log_dir = format!("{home}/Library/Logs/tili");
     let _ = std::fs::create_dir_all(&log_dir);
 
-    let binary = daemon_binary_path();
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{LAUNCH_AGENT_LABEL}</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{}</string>
@@ -551,9 +557,9 @@ fn start_daemon() {
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{log_dir}/daemon.log</string>
+    <string>{log_dir}/{log_name}.log</string>
     <key>StandardErrorPath</key>
-    <string>{log_dir}/daemon.err.log</string>
+    <string>{log_dir}/{log_name}.err.log</string>
 </dict>
 </plist>
 "#,
@@ -562,7 +568,7 @@ fn start_daemon() {
 
     if let Err(e) = std::fs::write(&plist_path, plist) {
         eprintln!("tili: couldn't write {}: {e}", plist_path.display());
-        std::process::exit(1);
+        return Err(());
     }
 
     match std::process::Command::new("launchctl")
@@ -572,36 +578,67 @@ fn start_daemon() {
     {
         Ok(status) if status.success() => {
             println!("tili: LaunchAgent installed at {}", plist_path.display());
-            wait_for_daemon_ready();
+            Ok(())
         }
         Ok(status) => {
             eprintln!("tili: `launchctl load` exited with {status}");
-            std::process::exit(1);
+            Err(())
         }
         Err(e) => {
             eprintln!("tili: couldn't run launchctl: {e}");
-            std::process::exit(1);
+            Err(())
         }
     }
 }
 
-/// `tili stop` — `launchctl unload`s and removes the LaunchAgent plist, so
-/// `launchd` won't respawn tili-daemon (its `KeepAlive` only applies while
-/// the job stays loaded). A daemon that's already not running (no plist)
-/// is reported calmly, not as an error.
+/// `tili start` — installs tili-daemon's LaunchAgent (see
+/// `install_launch_agent`) so `launchd`, not this short-lived CLI
+/// process, owns it from here on, then does the same for the menu bar
+/// badge. The badge is best-effort: if `tili-menubar` isn't present in
+/// this build (or its LaunchAgent fails to install) the daemon is
+/// already up and fully usable without it, so this doesn't fail `tili
+/// start` overall.
+fn start_daemon() {
+    if install_launch_agent(
+        LAUNCH_AGENT_LABEL,
+        &sibling_binary_path("tili-daemon"),
+        "daemon",
+    )
+    .is_err()
+    {
+        std::process::exit(1);
+    }
+    wait_for_daemon_ready();
+    let _ = install_launch_agent(
+        MENUBAR_LAUNCH_AGENT_LABEL,
+        &sibling_binary_path("tili-menubar"),
+        "menubar",
+    );
+}
+
+/// `tili stop` — `launchctl unload`s and removes both the daemon's and
+/// the menu bar badge's LaunchAgent plists, so neither comes back until
+/// `tili start` runs again. Either being already absent is reported
+/// calmly, not as an error — matches tili-menubar's own "Quit" action,
+/// which shells out to this same command.
 fn stop_daemon() {
-    let plist_path = launch_agent_path();
-    if !plist_path.exists() {
+    let daemon_plist = launch_agent_path(LAUNCH_AGENT_LABEL);
+    let menubar_plist = launch_agent_path(MENUBAR_LAUNCH_AGENT_LABEL);
+    if !daemon_plist.exists() && !menubar_plist.exists() {
         println!("tili: daemon is not running");
         return;
     }
-    let _ = std::process::Command::new("launchctl")
-        .args(["unload", "-w"])
-        .arg(&plist_path)
-        .status();
-    if let Err(e) = std::fs::remove_file(&plist_path) {
-        eprintln!("tili: couldn't remove {}: {e}", plist_path.display());
-        std::process::exit(1);
+    for plist_path in [&daemon_plist, &menubar_plist] {
+        if !plist_path.exists() {
+            continue;
+        }
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", "-w"])
+            .arg(plist_path)
+            .status();
+        if let Err(e) = std::fs::remove_file(plist_path) {
+            eprintln!("tili: couldn't remove {}: {e}", plist_path.display());
+        }
     }
     println!("tili: daemon stopped");
 }
