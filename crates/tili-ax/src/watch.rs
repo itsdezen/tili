@@ -176,7 +176,19 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
         // the last tick emit `FrontmostAppChanged`, so revealing a parked
         // workspace (which ends by raising/focusing the same pid already
         // recorded here) doesn't cause the very next tick to re-detect a
-        // "change" and loop.
+        // "change" and loop. Deliberately never overwritten with a bare
+        // `None` read (see below) — confirmed on real hardware that
+        // `frontmost_app_pid()` (`AXFocusedApplication` off the system-wide
+        // element) transiently reads `None` for one tick right after
+        // `park()` moves a still-real-macOS-frontmost app's window into its
+        // barely-on-screen corner sliver, even though no other app actually
+        // took focus. If that transient `None` were allowed to overwrite
+        // this, the very next tick reading the *same* still-frontmost pid
+        // would look like a fresh change and wrongly fire
+        // `FrontmostAppChanged` — which `reveal_frontmost` treats as "the
+        // user Cmd-Tabbed to this app," yanking the display straight back
+        // to whatever (possibly now-empty) workspace that pid's window
+        // belongs to and undoing a manual switch to an empty workspace.
         let mut last_frontmost_pid: Option<i32> = None;
         loop {
             match app_rx.recv_timeout(RESYNC_INTERVAL) {
@@ -222,13 +234,12 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
                         full_window_resync,
                     );
 
-                    let frontmost = workspace::frontmost_app_pid();
-                    if let Some(pid) = frontmost
-                        && last_frontmost_pid != Some(pid)
-                    {
-                        let _ = event_tx.send(WmEvent::FrontmostAppChanged { pid });
+                    if let Some(pid) = workspace::frontmost_app_pid() {
+                        if last_frontmost_pid != Some(pid) {
+                            let _ = event_tx.send(WmEvent::FrontmostAppChanged { pid });
+                        }
+                        last_frontmost_pid = Some(pid);
                     }
-                    last_frontmost_pid = frontmost;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             }
