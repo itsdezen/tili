@@ -16,18 +16,18 @@ workspaces {
 
 gaps {
     inner 4
-    outer 8 8 8 8
+    outer 8 16 16 16
 
     // How many points of a non-visible accordion sibling peek out from
     // behind the active one. 0 collapses every child to the same full frame.
-    accordion 30
+    accordion 32
 
     // Per-workspace override — anything not listed here uses this block's
     // own defaults, not whatever's set above.
-    workspace "random" {
-        inner 0
-        outer 0
-    }
+    // workspace "random" {
+    //     inner 0
+    //     outer 0
+    // }
 }
 
 settings {
@@ -39,12 +39,12 @@ settings {
     // the alphabetically-first declared workspace if omitted.
     default-workspace "entertain"
 
-    // Warps the cursor to the newly-focused window (M10). Off by default.
-    mouse-follows-focus #false
+    // Warps the cursor to the newly-focused window (M10). On by default.
+    mouse-follows-focus #true
 
     // Moving the cursor onto a different monitor focuses it, same as the
-    // `focus-monitor` command (M10). Off by default.
-    focus-follows-monitor #false
+    // `focus-monitor` command (M10). On by default.
+    focus-follows-monitor #true
 
     // Orientation a workspace's root container gets when it's created for
     // its second window: "auto" (derive from the monitor's aspect ratio),
@@ -143,17 +143,36 @@ keybindings mode="manage" auto-exit=#true {
 // `osascript -e 'id of app "Finder"'` or `mdls -name kMDItemCFBundleIdentifier
 // /Applications/Finder.app`). `title` (optional) is a regex matched against
 // the window title, for narrowing a rule to specific dialogs of an app that
-// should otherwise tile normally.
+// should otherwise tile normally. `mode` (optional, one of "float"/"tile"/
+// "ignore", defaults to "float") overrides tili's own guess at whether a
+// window should float, tile, or be left untouched entirely — useful for an
+// app tili misclassifies, without needing a source change.
 floating-rules {
     rule app-id="com.apple.finder"
     rule app-id="com.apple.systempreferences"
     rule app-id="com.apple.ActivityMonitor"
-    rule app-id="com.apple.systempreferences" { width 900; height 600; center #true }
+
+    // Example: a rule can override `defaults` per app with its own
+    // width/height (in points) and center flag. Left commented out since
+    // the plain "com.apple.systempreferences" rule above already matches
+    // first and would make this one unreachable.
+    // rule app-id="com.apple.systempreferences" { width 900; height 600; center #true }
 
     // Only Finder's "Copy"/"Connect to Server" style dialogs float — other
     // Finder windows are already covered by the plain rule above, so this
     // one only matters for apps you'd otherwise want tiled.
     rule app-id="com.apple.finder" title="^(Copy|Connect to Server)$"
+
+    // mode="tile" rescues a window back into normal tiling even if tili's
+    // AX heuristic classified it as a dialog (some apps mark an ordinary
+    // resizable window with a dialog-like subrole) — replace the app-id
+    // below with whatever app you've actually observed being misclassified.
+    // rule app-id="com.example.misclassified-dialog-app" mode="tile"
+
+    // mode="ignore" leaves a window's position/size alone entirely — no
+    // tiling, no floating, no auto-centering. Useful for a small
+    // menu-bar-only utility panel that should never be touched.
+    // rule app-id="com.example.menu-bar-panel" mode="ignore"
 
     defaults {
         center #true

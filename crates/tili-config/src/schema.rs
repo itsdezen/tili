@@ -57,6 +57,26 @@ pub struct FloatingRule {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub center: Option<bool>,
+    pub mode: FloatingRuleMode,
+}
+
+/// What a matched `FloatingRule` forces a window's placement disposition
+/// to, overriding `tili-ax`'s AX-kind-based default (`Popup` -> ignore,
+/// `Dialog` -> float, `Standard` -> tile).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FloatingRuleMode {
+    /// Auto-centered/sized per the rule's own width/height/center, falling
+    /// back to `FloatingDefaults`. The default when `mode` is omitted —
+    /// every rule written before this field existed behaves identically
+    /// after upgrading.
+    #[default]
+    Float,
+    /// Tiled, even if `tili-ax` classified the window `Dialog` or `Popup`.
+    Tile,
+    /// Left exactly where/however it already is — tracked but never
+    /// tiled, floated, or parked. Same runtime treatment a `Popup`-kind
+    /// window with no matching rule already gets.
+    Ignore,
 }
 
 /// Fallback centering/sizing for a floating window that matched a rule
@@ -332,6 +352,11 @@ fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaul
                 .get("title")
                 .and_then(|v| v.as_string())
                 .map(str::to_string);
+            let mode = match n.get("mode").and_then(|v| v.as_string()) {
+                Some("tile") => FloatingRuleMode::Tile,
+                Some("ignore") => FloatingRuleMode::Ignore,
+                _ => FloatingRuleMode::Float,
+            };
             let (width, height, center) = match n.children() {
                 Some(rule_children) => (
                     rule_children
@@ -352,6 +377,7 @@ fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaul
                 width,
                 height,
                 center,
+                mode,
             })
         })
         .collect();
@@ -587,6 +613,32 @@ mod tests {
         assert!(config.floating_defaults.center);
         assert!((config.floating_defaults.width_ratio - 0.6).abs() < f32::EPSILON);
         assert!((config.floating_defaults.height_ratio - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parses_floating_rule_mode_tile_and_ignore() {
+        let source = r#"
+            floating-rules {
+                rule app-id="com.apple.finder"
+                rule app-id="com.example.dialog-app" mode="tile"
+                rule app-id="com.example.utility-panel" mode="ignore"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.floating_rules[0].mode, FloatingRuleMode::Float);
+        assert_eq!(config.floating_rules[1].mode, FloatingRuleMode::Tile);
+        assert_eq!(config.floating_rules[2].mode, FloatingRuleMode::Ignore);
+    }
+
+    #[test]
+    fn floating_rule_mode_falls_back_to_float_for_unrecognized_value() {
+        let source = r#"
+            floating-rules {
+                rule app-id="com.apple.finder" mode="bogus"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.floating_rules[0].mode, FloatingRuleMode::Float);
     }
 
     #[test]

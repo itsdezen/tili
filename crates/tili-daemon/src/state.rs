@@ -75,10 +75,13 @@ struct Placement {
 /// into (see `demote_to_special`/`promote_from_special`) and back out of
 /// without losing track of which of `Tiled`/`Floating` it should return to.
 ///
-/// `Popup` (ambiguous `WindowKind`, see `tili_ax::WindowKind`) is tracked
-/// (shows up in `list_windows`) but — like the transient popups it
-/// replaces the old binary reject-outright behavior for — is never tiled,
-/// floated, or parked; tili simply never touches its geometry.
+/// `Popup` is tracked (shows up in `list_windows`) but — like the transient
+/// popups it replaces the old binary reject-outright behavior for — is
+/// never tiled, floated, or parked; tili simply never touches its
+/// geometry. Reached two ways: an ambiguous `WindowKind` (see
+/// `tili_ax::WindowKind`) with no overriding floating-rule match, or an
+/// explicit `mode="ignore"` rule (see `resolve_disposition`) forcing it
+/// regardless of kind — both get identical runtime treatment.
 #[derive(Clone, Debug)]
 enum PlacementKind {
     Tiled,
@@ -225,20 +228,38 @@ fn restore_for(kind: &PlacementKind) -> Restore {
     }
 }
 
-/// Classifies a brand-new window's placement, in priority order:
-/// `HiddenApplication`, then `Minimized`, then `NativeFullscreen`, then
-/// `Popup` (kind), then `Floating` (a `Dialog`-kind window, or a
-/// `Standard`-kind one matching a floating rule — `floating_frame` is
-/// `Some` exactly when the latter applies, computed by the caller via
-/// `compute_floating_frame`), and finally `Tiled`.
-fn classify_new_window(
+/// What a brand-new window's placement disposition should be: an explicit
+/// floating-rule `mode` match always wins; otherwise falls back to the
+/// kind-based default that predates per-rule modes — `Popup`
+/// (AX-ambiguous) -> `Ignore`, `Dialog` -> `Float`, `Standard` -> `Tile`.
+/// Resolved once, at creation, alongside `classify_new_window` — never
+/// re-derived for an already-placed window (see `apply_config`; rule
+/// changes only affect windows created after a reload).
+fn resolve_disposition(
     kind: tili_ax::WindowKind,
+    rule_mode: Option<tili_config::FloatingRuleMode>,
+) -> tili_config::FloatingRuleMode {
+    rule_mode.unwrap_or(match kind {
+        tili_ax::WindowKind::Popup => tili_config::FloatingRuleMode::Ignore,
+        tili_ax::WindowKind::Dialog => tili_config::FloatingRuleMode::Float,
+        tili_ax::WindowKind::Standard => tili_config::FloatingRuleMode::Tile,
+    })
+}
+
+/// Classifies a brand-new window's placement, in priority order:
+/// `HiddenApplication`, then `Minimized`, then `NativeFullscreen` (each
+/// carrying the `Restore` state to pop back to once the special state
+/// ends), then `disposition` itself (see `resolve_disposition`):
+/// `Ignore` -> `Popup`, `Float` -> `Floating` (frame computed separately
+/// by the caller once disposition is known — see `compute_floating_frame`),
+/// `Tile` -> `Tiled`.
+fn classify_new_window(
+    disposition: tili_config::FloatingRuleMode,
     app_hidden: bool,
     minimized: bool,
     fullscreen: bool,
-    floating_frame: Option<Rect>,
 ) -> PlacementKind {
-    let base_restore = if kind == tili_ax::WindowKind::Dialog || floating_frame.is_some() {
+    let base_restore = if disposition == tili_config::FloatingRuleMode::Float {
         Restore::Floating
     } else {
         Restore::Tiled
@@ -250,13 +271,10 @@ fn classify_new_window(
             SpecialKind::NativeFullscreen => PlacementKind::NativeFullscreen(base_restore),
         };
     }
-    match kind {
-        tili_ax::WindowKind::Popup => PlacementKind::Popup,
-        tili_ax::WindowKind::Dialog => PlacementKind::Floating { manual: None },
-        tili_ax::WindowKind::Standard if floating_frame.is_some() => {
-            PlacementKind::Floating { manual: None }
-        }
-        tili_ax::WindowKind::Standard => PlacementKind::Tiled,
+    match disposition {
+        tili_config::FloatingRuleMode::Ignore => PlacementKind::Popup,
+        tili_config::FloatingRuleMode::Float => PlacementKind::Floating { manual: None },
+        tili_config::FloatingRuleMode::Tile => PlacementKind::Tiled,
     }
 }
 
@@ -279,6 +297,7 @@ struct CompiledFloatingRule {
     width: Option<u32>,
     height: Option<u32>,
     center: Option<bool>,
+    mode: tili_config::FloatingRuleMode,
 }
 
 /// Holds the daemon's entire mutable state. Both the socket handler and the
@@ -504,8 +523,11 @@ impl WmState {
             } else {
                 self.windows.get(&id).map(AxWindow::frame)
             };
-            let floating_frame = if is_new {
-                self.compute_floating_frame(&window)
+            // Only resolved for brand-new windows — an existing placement's
+            // disposition is never re-derived on a later scan or config
+            // reload (see `resolve_disposition`'s doc comment).
+            let rule_mode = if is_new {
+                self.matching_floating_rule(&window).map(|r| r.mode)
             } else {
                 None
             };
@@ -520,8 +542,9 @@ impl WmState {
                 continue;
             }
 
+            let disposition = resolve_disposition(kind, rule_mode);
             let placement_kind =
-                classify_new_window(kind, app_hidden, minimized, fullscreen, floating_frame);
+                classify_new_window(disposition, app_hidden, minimized, fullscreen);
             match &placement_kind {
                 PlacementKind::Tiled => {
                     let near = self.workspace_focus.get(&active_workspace).copied();
@@ -534,7 +557,11 @@ impl WmState {
                         .or_insert(node);
                 }
                 PlacementKind::Floating { .. } => {
-                    if let Some(frame) = floating_frame
+                    let frame = self
+                        .windows
+                        .get(&id)
+                        .map(|w| self.compute_floating_frame(w));
+                    if let Some(frame) = frame
                         && let Some(w) = self.windows.get_mut(&id)
                     {
                         self.frame_setter.set_frame(w, frame);
@@ -670,7 +697,7 @@ impl WmState {
                 let frame = self
                     .windows
                     .get(&id)
-                    .and_then(|w| self.compute_floating_frame(w));
+                    .map(|w| self.compute_floating_frame(w));
                 if let Some(frame) = frame
                     && let Some(w) = self.windows.get_mut(&id)
                 {
@@ -955,6 +982,7 @@ impl WmState {
                     width: rule.width,
                     height: rule.height,
                     center: rule.center,
+                    mode: rule.mode,
                 })
             })
             .collect();
@@ -1582,7 +1610,7 @@ impl WmState {
             let frame = self
                 .windows
                 .get(&id)
-                .and_then(|w| self.compute_floating_frame(w));
+                .map(|w| self.compute_floating_frame(w));
             if let Some(frame) = frame
                 && let Some(w) = self.windows.get_mut(&id)
             {
@@ -1644,19 +1672,21 @@ impl WmState {
 
         self.previous_workspace = current.clone();
 
-        if let Some(outgoing_name) = &current {
-            let outgoing: Vec<WindowId> = self
-                .workspaces
+        // Captured before any parking/relayout so the incoming workspace's
+        // windows can be brought on screen *first* (see below) — each AX
+        // position write is a synchronous per-window round-trip, not an
+        // atomic swap, so parking the outgoing windows before the incoming
+        // ones arrive leaves a real (if brief) gap with nothing on screen
+        // but the desktop.
+        let outgoing: Vec<WindowId> = current.as_ref().map_or(Vec::new(), |outgoing_name| {
+            self.workspaces
                 .get(outgoing_name)
                 .map(Tree::window_ids)
                 .unwrap_or_default()
                 .into_iter()
                 .chain(self.floating_windows_in(outgoing_name))
-                .collect();
-            for (i, id) in outgoing.into_iter().enumerate() {
-                self.park(id, i);
-            }
-        }
+                .collect()
+        });
 
         if let Some(swap_id) = swap_monitor {
             match &current {
@@ -1674,8 +1704,16 @@ impl WmState {
         self.relayout_active();
         self.reposition_floating_in_active_workspace();
         if let Some(swap_id) = swap_monitor {
+            // The outgoing workspace is now `swap_id`'s active one — laid
+            // out directly onto that monitor's own frame below, never
+            // parked at all (parking then immediately relaying out
+            // elsewhere would just be a second, needless flash).
             self.relayout_monitor(swap_id);
             self.reposition_floating_for_monitor(swap_id);
+        } else {
+            for (i, id) in outgoing.into_iter().enumerate() {
+                self.park(id, i);
+            }
         }
 
         let restore = self
@@ -2041,7 +2079,7 @@ impl WmState {
                 None => self
                     .windows
                     .get(&id)
-                    .and_then(|w| self.initial_floating_frame_in(w, area)),
+                    .map(|w| self.initial_floating_frame_in(w, area)),
             };
             if let Some(frame) = frame
                 && let Some(window) = self.windows.get_mut(&id)
@@ -2051,14 +2089,29 @@ impl WmState {
         }
     }
 
-    /// Returns the frame a floating window should be placed at if `window`
-    /// matches a floating rule (first match wins), or `None` if it doesn't
-    /// match any — meaning it should be tiled instead. Sized/centered
-    /// against `focused_monitor`'s frame, since new windows always land on
-    /// the focused monitor's active workspace. Rule-based, so only used at
-    /// *creation* (and reattachment from a special state) — once a window
-    /// has captured manual geometry, `restore_floating_frame` takes over.
-    fn compute_floating_frame(&self, window: &AxWindow) -> Option<Rect> {
+    /// Finds the first configured floating rule matching `window`'s bundle
+    /// id (and title regex, if the rule has one) — `None` if `window` has
+    /// no resolvable bundle id or no rule matches. Shared by disposition
+    /// resolution (`resolve_disposition`'s caller) and frame sizing
+    /// (`initial_floating_frame_in`), so both agree on which rule "won."
+    fn matching_floating_rule(&self, window: &AxWindow) -> Option<&CompiledFloatingRule> {
+        let bundle_id = window.bundle_id()?;
+        self.floating_rules.iter().find(|rule| {
+            rule.app_id == bundle_id
+                && rule
+                    .title
+                    .as_ref()
+                    .is_none_or(|re| re.is_match(window.title()))
+        })
+    }
+
+    /// The frame a `Float`-disposition window should be placed at, sized/
+    /// centered against `focused_monitor`'s frame since new windows always
+    /// land on the focused monitor's active workspace. Rule-based, so only
+    /// used at *creation* (and reattachment from a special state) — once a
+    /// window has captured manual geometry, `restore_floating_frame` takes
+    /// over.
+    fn compute_floating_frame(&self, window: &AxWindow) -> Rect {
         let area = self.monitor_frame(self.focused_monitor).unwrap_or(Rect {
             x: 0.0,
             y: 0.0,
@@ -2068,25 +2121,24 @@ impl WmState {
         self.initial_floating_frame_in(window, area)
     }
 
-    fn initial_floating_frame_in(&self, window: &AxWindow, area: Rect) -> Option<Rect> {
-        let bundle_id = window.bundle_id()?;
-        let rule = self.floating_rules.iter().find(|rule| {
-            rule.app_id == bundle_id
-                && rule
-                    .title
-                    .as_ref()
-                    .is_none_or(|re| re.is_match(window.title()))
-        })?;
-
+    /// Sizes/centers a `Float`-disposition window within `area` — an
+    /// explicit matching rule's `width`/`height`/`center` win, falling back
+    /// to `floating_defaults` for anything the rule didn't specify (or if
+    /// no rule matched at all, e.g. a `Dialog`-kind window with no app-id
+    /// entry in `floating-rules`).
+    fn initial_floating_frame_in(&self, window: &AxWindow, area: Rect) -> Rect {
+        let rule = self.matching_floating_rule(window);
         let width = rule
-            .width
+            .and_then(|r| r.width)
             .map(f64::from)
             .unwrap_or(area.width * f64::from(self.floating_defaults.width_ratio));
         let height = rule
-            .height
+            .and_then(|r| r.height)
             .map(f64::from)
             .unwrap_or(area.height * f64::from(self.floating_defaults.height_ratio));
-        let center = rule.center.unwrap_or(self.floating_defaults.center);
+        let center = rule
+            .and_then(|r| r.center)
+            .unwrap_or(self.floating_defaults.center);
         let (x, y) = if center {
             (
                 area.x + (area.width - width) / 2.0,
@@ -2096,12 +2148,12 @@ impl WmState {
             (area.x, area.y)
         };
 
-        Some(Rect {
+        Rect {
             x,
             y,
             width,
             height,
-        })
+        }
     }
 }
 
@@ -2191,67 +2243,99 @@ mod tests {
 
     #[test]
     fn classify_new_window_priority_order() {
-        // HiddenApplication beats everything else, even a Standard window
-        // that would otherwise just be Tiled.
+        // HiddenApplication beats everything else, even a `Tile`-disposition
+        // window that would otherwise just end up Tiled.
         assert!(matches!(
-            classify_new_window(tili_ax::WindowKind::Standard, true, true, true, None),
+            classify_new_window(tili_config::FloatingRuleMode::Tile, true, true, true),
             PlacementKind::HiddenApplication(Restore::Tiled)
         ));
         // Minimized beats NativeFullscreen.
         assert!(matches!(
-            classify_new_window(tili_ax::WindowKind::Standard, false, true, true, None),
+            classify_new_window(tili_config::FloatingRuleMode::Tile, false, true, true),
             PlacementKind::Minimized(Restore::Tiled)
         ));
         assert!(matches!(
-            classify_new_window(tili_ax::WindowKind::Standard, false, false, true, None),
+            classify_new_window(tili_config::FloatingRuleMode::Tile, false, false, true),
             PlacementKind::NativeFullscreen(Restore::Tiled)
         ));
     }
 
     #[test]
-    fn classify_new_window_popup_kind_beats_floating_rule_match() {
-        let some_frame = Some(Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-        });
+    fn classify_new_window_ignore_disposition_is_popup() {
         assert!(matches!(
-            classify_new_window(tili_ax::WindowKind::Popup, false, false, false, some_frame),
+            classify_new_window(tili_config::FloatingRuleMode::Ignore, false, false, false),
             PlacementKind::Popup
         ));
     }
 
     #[test]
-    fn classify_new_window_dialog_is_floating_even_without_a_rule_match() {
+    fn classify_new_window_float_disposition_is_floating() {
         assert!(matches!(
-            classify_new_window(tili_ax::WindowKind::Dialog, false, false, false, None),
+            classify_new_window(tili_config::FloatingRuleMode::Float, false, false, false),
             PlacementKind::Floating { manual: None }
         ));
     }
 
     #[test]
-    fn classify_new_window_standard_follows_rule_match_else_tiled() {
-        let some_frame = Some(Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-        });
+    fn classify_new_window_tile_disposition_is_tiled() {
         assert!(matches!(
-            classify_new_window(
-                tili_ax::WindowKind::Standard,
-                false,
-                false,
-                false,
-                some_frame
-            ),
-            PlacementKind::Floating { manual: None }
-        ));
-        assert!(matches!(
-            classify_new_window(tili_ax::WindowKind::Standard, false, false, false, None),
+            classify_new_window(tili_config::FloatingRuleMode::Tile, false, false, false),
             PlacementKind::Tiled
         ));
+    }
+
+    #[test]
+    fn resolve_disposition_falls_back_to_kind_when_no_rule_matches() {
+        assert_eq!(
+            resolve_disposition(tili_ax::WindowKind::Popup, None),
+            tili_config::FloatingRuleMode::Ignore
+        );
+        assert_eq!(
+            resolve_disposition(tili_ax::WindowKind::Dialog, None),
+            tili_config::FloatingRuleMode::Float
+        );
+        assert_eq!(
+            resolve_disposition(tili_ax::WindowKind::Standard, None),
+            tili_config::FloatingRuleMode::Tile
+        );
+    }
+
+    #[test]
+    fn resolve_disposition_explicit_rule_mode_overrides_popup_kind() {
+        // A `Popup`-kind window (AX-ambiguous) that matches a `mode="float"`
+        // rule is rescued into floating — previously impossible, since kind
+        // unconditionally beat any rule match.
+        assert_eq!(
+            resolve_disposition(
+                tili_ax::WindowKind::Popup,
+                Some(tili_config::FloatingRuleMode::Float)
+            ),
+            tili_config::FloatingRuleMode::Float
+        );
+    }
+
+    #[test]
+    fn resolve_disposition_explicit_rule_mode_overrides_dialog_kind() {
+        // A `Dialog`-kind window that matches a `mode="tile"` rule is forced
+        // back into tiling — previously impossible, `Dialog` always floated.
+        assert_eq!(
+            resolve_disposition(
+                tili_ax::WindowKind::Dialog,
+                Some(tili_config::FloatingRuleMode::Tile)
+            ),
+            tili_config::FloatingRuleMode::Tile
+        );
+    }
+
+    #[test]
+    fn resolve_disposition_explicit_ignore_overrides_standard_kind() {
+        assert_eq!(
+            resolve_disposition(
+                tili_ax::WindowKind::Standard,
+                Some(tili_config::FloatingRuleMode::Ignore)
+            ),
+            tili_config::FloatingRuleMode::Ignore
+        );
     }
 
     #[test]
