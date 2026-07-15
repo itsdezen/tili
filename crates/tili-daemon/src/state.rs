@@ -288,6 +288,16 @@ fn placement_info(kind: &PlacementKind) -> tili_ipc::PlacementInfo {
     }
 }
 
+/// A `tili_config::WorkspaceRule` with its `workspace` pre-validated
+/// against the reloaded config's own declared workspaces — done once in
+/// `apply_config`, not on every window creation. An undeclared target
+/// drops the whole rule (see `apply_config`'s rebuild), since `workspace`
+/// is this rule's only meaningful field.
+struct CompiledWorkspaceRule {
+    app_id: String,
+    workspace: String,
+}
+
 /// A `tili_config::FloatingRule` with its title pattern pre-compiled —
 /// done once in `apply_config`, not on every window creation.
 struct CompiledFloatingRule {
@@ -355,6 +365,10 @@ pub struct WmState {
     /// `main` after firing a single bound command, without inventing
     /// multi-command-per-key syntax.
     auto_exit_modes: HashSet<String>,
+    /// Matched in order — first match wins. Independent of `floating_rules`
+    /// — applies regardless of whether the matched window ends up tiled or
+    /// floating.
+    workspace_rules: Vec<CompiledWorkspaceRule>,
     /// Matched in order — first match wins.
     floating_rules: Vec<CompiledFloatingRule>,
     floating_defaults: tili_config::FloatingDefaults,
@@ -422,6 +436,7 @@ impl Default for WmState {
             current_mode: DEFAULT_MODE.to_string(),
             mode_bindings: HashMap::new(),
             auto_exit_modes: HashSet::new(),
+            workspace_rules: Vec::new(),
             floating_rules: Vec::new(),
             floating_defaults: tili_config::FloatingDefaults::default(),
             mouse_follows_focus: false,
@@ -524,9 +539,18 @@ impl WmState {
             };
             // Only resolved for brand-new windows — an existing placement's
             // disposition is never re-derived on a later scan or config
-            // reload (see `resolve_disposition`'s doc comment).
+            // reload (see `resolve_disposition`'s doc comment). The two
+            // matchers are deliberately independent: which workspace a
+            // window lands on has nothing to do with whether it tiles or
+            // floats.
             let rule_mode = if is_new {
                 self.matching_floating_rule(&window).map(|r| r.mode)
+            } else {
+                None
+            };
+            let rule_workspace = if is_new {
+                self.matching_workspace_rule(&window)
+                    .map(|r| r.workspace.clone())
             } else {
                 None
             };
@@ -541,43 +565,78 @@ impl WmState {
                 continue;
             }
 
+            let target_workspace = rule_workspace.unwrap_or_else(|| active_workspace.clone());
             let disposition = resolve_disposition(kind, rule_mode);
             let placement_kind =
                 classify_new_window(disposition, app_hidden, minimized, fullscreen);
-            match &placement_kind {
-                PlacementKind::Tiled => {
-                    let near = self.workspace_focus.get(&active_workspace).copied();
-                    let root_orientation = self.root_orientation_hint();
-                    let node = self
-                        .active_tree_mut()
-                        .insert_window(id, near, root_orientation);
-                    self.workspace_focus
-                        .entry(active_workspace.clone())
-                        .or_insert(node);
-                }
-                PlacementKind::Floating { .. } => {
-                    let area = self.focused_monitor_area();
-                    self.place_floating_window(id, area);
-                }
-                PlacementKind::NativeFullscreen(_)
-                | PlacementKind::Minimized(_)
-                | PlacementKind::HiddenApplication(_)
-                | PlacementKind::Popup => {
-                    // Tracked but left exactly where/however it already is
-                    // — no tree insertion, no frame write.
-                }
-            }
+            // Recorded *before* `place_new_window` runs — that function's
+            // inactive-workspace path can call `reposition_floating_for_monitor`,
+            // which looks windows up via `self.placements`, so it needs to
+            // already know about this one.
             self.placements.insert(
                 id,
                 Placement {
-                    workspace: active_workspace.clone(),
-                    kind: placement_kind,
+                    workspace: target_workspace.clone(),
+                    kind: placement_kind.clone(),
                 },
             );
+            self.place_new_window(id, &placement_kind, &target_workspace);
         }
 
         if !self.mouse_button_down {
             self.relayout_active();
+        }
+    }
+
+    /// Places a brand-new window into `target_workspace` — tiled into that
+    /// workspace's own `Tree` next to its own last focus, or floated/
+    /// centered if `target_workspace` is the one currently active on the
+    /// focused monitor. If `target_workspace` isn't active on the focused
+    /// monitor, the window is parked immediately and, only if
+    /// `target_workspace` happens to already be visible on some *other*
+    /// monitor, resynced there right away instead of sitting parked — the
+    /// same idempotent "park unconditionally, then relayout for real if it
+    /// turns out to be visible somewhere" pattern
+    /// `move_focused_to_workspace` uses. Deliberately keyed only by
+    /// `WindowId`/`PlacementKind`, no `AxWindow` — this is the seam that
+    /// makes per-app-workspace placement unit-testable without a live
+    /// `AXUIElement`, unlike `apply_windows_changed` itself.
+    fn place_new_window(
+        &mut self,
+        id: WindowId,
+        placement_kind: &PlacementKind,
+        target_workspace: &str,
+    ) {
+        let active_workspace = self.active_workspace_name();
+        let inactive = target_workspace != active_workspace;
+
+        match placement_kind {
+            PlacementKind::Tiled => {
+                let near = self.workspace_focus.get(target_workspace).copied();
+                let root_orientation = self.root_orientation_hint();
+                let node = self
+                    .workspaces
+                    .entry(target_workspace.to_string())
+                    .or_default()
+                    .insert_window(id, near, root_orientation);
+                self.workspace_focus
+                    .entry(target_workspace.to_string())
+                    .or_insert(node);
+            }
+            PlacementKind::Floating { .. } if !inactive => {
+                let area = self.focused_monitor_area();
+                self.place_floating_window(id, area);
+            }
+            // A floating window targeting an inactive workspace, and every
+            // "no positional action" kind: nothing to do here — parking
+            // below (if inactive) or simply leaving the window alone is
+            // correct either way.
+            _ => {}
+        }
+
+        if inactive {
+            self.park(id, 0);
+            self.resync_workspace_if_visible_elsewhere(target_workspace);
         }
     }
 
@@ -942,6 +1001,26 @@ impl WmState {
             .iter()
             .filter(|mode| mode.auto_exit)
             .map(|mode| mode.name.clone())
+            .collect();
+
+        self.workspace_rules = config
+            .workspace_rules
+            .iter()
+            .filter_map(|rule| {
+                if config.workspaces.iter().any(|w| w.name == rule.workspace) {
+                    Some(CompiledWorkspaceRule {
+                        app_id: rule.app_id.clone(),
+                        workspace: rule.workspace.clone(),
+                    })
+                } else {
+                    eprintln!(
+                        "tili-daemon: skipping workspace rule for '{}' — workspace '{}' isn't \
+                         declared in config",
+                        rule.app_id, rule.workspace
+                    );
+                    None
+                }
+            })
             .collect();
 
         self.floating_rules = config
@@ -1770,14 +1849,7 @@ impl WmState {
         );
 
         self.park(id, 0);
-        let visible_elsewhere = self
-            .active_workspace
-            .iter()
-            .find(|(mid, n)| **mid != self.focused_monitor && n.as_str() == target_name)
-            .map(|(&mid, _)| mid);
-        if let Some(mid) = visible_elsewhere {
-            self.relayout_monitor(mid);
-        }
+        self.resync_workspace_if_visible_elsewhere(target_name);
         self.relayout_active();
         Ok(())
     }
@@ -2066,6 +2138,26 @@ impl WmState {
         }
     }
 
+    /// If `workspace` happens to already be the active workspace on some
+    /// *other* connected monitor, immediately re-lays-out its tiled
+    /// windows and re-centers its floating ones there, instead of leaving
+    /// whatever was just parked into it sitting off-screen until some
+    /// unrelated later switch. A no-op if `workspace` isn't visible
+    /// anywhere else right now. Calling both unconditionally is simpler
+    /// than parameterizing "which kind" — each is already a cheap no-op
+    /// when there's nothing of that kind on the target.
+    fn resync_workspace_if_visible_elsewhere(&mut self, workspace: &str) {
+        let visible_elsewhere = self
+            .active_workspace
+            .iter()
+            .find(|(mid, name)| **mid != self.focused_monitor && name.as_str() == workspace)
+            .map(|(&mid, _)| mid);
+        if let Some(mid) = visible_elsewhere {
+            self.relayout_monitor(mid);
+            self.reposition_floating_for_monitor(mid);
+        }
+    }
+
     /// Finds the first configured floating rule matching `window`'s bundle
     /// id (and title regex, if the rule has one) — `None` if `window` has
     /// no resolvable bundle id or no rule matches. Shared by disposition
@@ -2080,6 +2172,18 @@ impl WmState {
                     .as_ref()
                     .is_none_or(|re| re.is_match(window.title()))
         })
+    }
+
+    /// Finds the first configured `workspace-rules` entry matching
+    /// `window`'s bundle id — `None` if unresolvable or no rule matches.
+    /// Deliberately independent of `matching_floating_rule`: which
+    /// workspace a window is created on has nothing to do with whether it
+    /// ends up tiled or floating.
+    fn matching_workspace_rule(&self, window: &AxWindow) -> Option<&CompiledWorkspaceRule> {
+        let bundle_id = window.bundle_id()?;
+        self.workspace_rules
+            .iter()
+            .find(|rule| rule.app_id == bundle_id)
     }
 
     /// `focused_monitor`'s frame, since new/reattached floating windows
@@ -3366,5 +3470,225 @@ mod tests {
 
         assert!(state.switch_to_previous_workspace().is_ok());
         assert_eq!(state.active_workspace_name(), "b");
+    }
+
+    #[test]
+    fn apply_config_keeps_a_workspace_rule_when_its_workspace_is_declared() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            workspaces {
+                workspace "work"
+            }
+            workspace-rules {
+                rule app-id="com.mitchellh.ghostty" workspace="work"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+        assert_eq!(state.workspace_rules.len(), 1);
+        assert_eq!(state.workspace_rules[0].app_id, "com.mitchellh.ghostty");
+        assert_eq!(state.workspace_rules[0].workspace, "work");
+    }
+
+    #[test]
+    fn apply_config_drops_the_whole_workspace_rule_when_its_workspace_isnt_declared() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            workspace-rules {
+                rule app-id="com.mitchellh.ghostty" workspace="ghost"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+        assert!(
+            state.workspace_rules.is_empty(),
+            "an undeclared workspace target has nothing else in the rule worth keeping"
+        );
+    }
+
+    #[test]
+    fn place_new_window_tiled_into_the_active_workspace_matches_previous_behavior() {
+        let mut state = floating_test_state();
+        state.place_new_window(1, &PlacementKind::Tiled, DEFAULT_WORKSPACE);
+        assert!(state.active_tree().window_ids().contains(&1));
+        assert_eq!(
+            state.relayout_calls.get(),
+            0,
+            "place_new_window itself never relayouts the active case — that's still apply_windows_changed's job"
+        );
+    }
+
+    #[test]
+    fn place_new_window_tiled_into_an_inactive_workspace_not_visible_anywhere_parks_and_skips_relayout()
+     {
+        let mut state = floating_test_state();
+        state.workspaces.insert("side".to_string(), Tree::new());
+
+        state.place_new_window(1, &PlacementKind::Tiled, "side");
+
+        assert!(
+            state
+                .workspaces
+                .get("side")
+                .unwrap()
+                .window_ids()
+                .contains(&1)
+        );
+        assert!(!state.active_tree().window_ids().contains(&1));
+        assert_eq!(state.relayout_calls.get(), 0);
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn place_new_window_tiled_into_a_workspace_active_on_another_monitor_relayouts_it_immediately()
+    {
+        let mut state = WmState::default();
+        state.monitors = vec![
+            Monitor {
+                id: 1,
+                frame: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: true,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect {
+                    x: 1920.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+            },
+        ];
+        state.workspaces.insert("a".to_string(), Tree::new());
+        state.workspaces.insert("b".to_string(), Tree::new());
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "a".to_string());
+        state.active_workspace.insert(2, "b".to_string());
+        state.focused_monitor = 1;
+
+        state.place_new_window(1, &PlacementKind::Tiled, "b");
+
+        assert!(state.workspaces.get("b").unwrap().window_ids().contains(&1));
+        assert!(
+            state.relayout_calls.get() > 0,
+            "workspace 'b' is visible on monitor 2, so it should be relaid-out immediately \
+             instead of left parked"
+        );
+    }
+
+    #[test]
+    fn place_new_window_floating_into_the_active_workspace_never_enters_a_tree() {
+        let mut state = floating_test_state();
+        state.place_new_window(
+            1,
+            &PlacementKind::Floating { manual: None },
+            DEFAULT_WORKSPACE,
+        );
+        assert!(!state.active_tree().window_ids().contains(&1));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn resync_workspace_if_visible_elsewhere_relayouts_the_monitor_showing_that_workspace() {
+        let mut state = WmState::default();
+        state.monitors = vec![
+            Monitor {
+                id: 1,
+                frame: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: true,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect {
+                    x: 1920.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+            },
+        ];
+        state.workspaces.insert("b".to_string(), Tree::new());
+        state.active_workspace.clear();
+        state.active_workspace.insert(2, "b".to_string());
+        state.focused_monitor = 1;
+
+        state.resync_workspace_if_visible_elsewhere("b");
+
+        assert!(state.relayout_calls.get() > 0);
+    }
+
+    #[test]
+    fn resync_workspace_if_visible_elsewhere_is_a_no_op_when_not_visible_anywhere() {
+        let mut state = floating_test_state();
+        state.resync_workspace_if_visible_elsewhere("nowhere");
+        assert_eq!(state.relayout_calls.get(), 0);
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn move_focused_to_workspace_relayouts_the_target_when_visible_on_another_monitor() {
+        let mut state = WmState::default();
+        state.monitors = vec![
+            Monitor {
+                id: 1,
+                frame: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: true,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect {
+                    x: 1920.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+            },
+        ];
+        state.workspaces.insert("a".to_string(), Tree::new());
+        state.workspaces.insert("b".to_string(), Tree::new());
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "a".to_string());
+        state.active_workspace.insert(2, "b".to_string());
+        state.focused_monitor = 1;
+
+        let root_orientation = state.root_orientation_hint();
+        let node = state
+            .workspaces
+            .get_mut("a")
+            .unwrap()
+            .insert_window(1, None, root_orientation);
+        state.set_focused_node(node);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: "a".to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+
+        assert!(state.move_focused_to_workspace("b").is_ok());
+        assert!(state.relayout_calls.get() > 0);
     }
 }

@@ -37,6 +37,10 @@ First public release.
 - **Floating rules.** Match windows by app id / title regex and
   auto-center/size them on creation, plus a runtime `set-floating`
   toggle and a per-rule `mode` override (tile/float/ignore).
+- **Workspace rules.** A standalone `workspace-rules` section that always
+  creates a matching app's windows on a specific declared workspace
+  instead of wherever's active — independent of `floating-rules`, so it
+  applies the same whether the window ends up tiled or floating.
 - **Mouse integration.** `mouse-follows-focus` (cursor warps to the
   newly-focused window) and `focus-follows-monitor` (moving the cursor to
   another display retargets which monitor commands act on).

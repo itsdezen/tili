@@ -141,7 +141,17 @@ the dependency direction is a hard boundary, not just organization:
   and `floating-rules { rule app-id="..." title="regex"? { ... } ...
   defaults { ... } }` (M8) — `title` stays a plain `String` here, not a
   compiled `Regex`, so this crate doesn't need a regex dependency just to
-  hold a pattern; `tili-daemon` compiles it. Unrecognized top-level
+  hold a pattern; `tili-daemon` compiles it. `workspace-rules { rule
+  app-id="..." workspace="name" ... }` is a separate, independent section
+  — both fields required, no `title`/sizing/`mode`, since it's a purely
+  event-driven "which workspace does this app land on" rule with nothing
+  to do with tile-vs-float — parsed by its own `parse_workspace_rules`,
+  not folded into `parse_floating_rules`. Neither section validates
+  `workspace` names here (this crate has no cross-section validation
+  anywhere, and no error-reporting path for semantic issues, only KDL-
+  syntax ones) — `tili-daemon` checks it names a declared workspace, the
+  same way it already resolves `settings.default-workspace`. Unrecognized
+  top-level
   sections are still silently ignored, not rejected, so a config can be
   written against the full target schema before the parser catches up —
   see README.md's config preview vs. `example/tili.kdl` for "aspirational
@@ -184,9 +194,25 @@ the dependency direction is a hard boundary, not just organization:
   when their workspace becomes active again, not on every layout-affecting
   event, so a user's manual drag of a floating window isn't undone by, say,
   a gap change. `workspace_focus` remembers each workspace's last-focused
-  node so switching back restores where you left off. New windows always
-  join the active workspace next to the current focus (if tiled) or just
-  get centered (if floating).
+  node so switching back restores where you left off. A new window joins
+  the active workspace next to the current focus (if tiled) or just gets
+  centered (if floating) *unless* it matches a `workspace-rules` entry
+  (`matching_workspace_rule`, checked via `AxWindow::bundle_id()` — kept
+  entirely separate from `matching_floating_rule`, since which workspace a
+  window lands on has nothing to do with whether it tiles or floats).
+  `apply_windows_changed` resolves that into a `target_workspace` and
+  hands off to `place_new_window`, which inserts into that workspace's own
+  `Tree` (keying its focus-hint lookup off `target_workspace`, not
+  whatever's active, so it still respects where focus was last left there)
+  or, for a floating window, just records the `Placement` against it. If
+  `target_workspace` isn't the one active on the focused monitor, the
+  window is parked immediately and `resync_workspace_if_visible_elsewhere`
+  (a fourth "thickness of relayout," alongside
+  `relayout_active`/`relayout_monitor`/`relayout_all_visible` below)
+  checks whether it's visible on some *other* monitor and, if so,
+  relayouts/repositions it there right away instead of leaving it parked
+  until an unrelated later switch — `move_focused_to_workspace` uses the
+  same helper for the same reason.
 
   **M9 — multi-monitor.** `active_workspace: HashMap<u32, String>` maps
   each connected monitor's id (`tili_ax::Monitor::id`) to whichever

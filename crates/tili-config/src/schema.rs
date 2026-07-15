@@ -47,6 +47,19 @@ pub struct KeybindingMode {
     pub auto_exit: bool,
 }
 
+/// `workspace-rules { rule app-id="..." workspace="..." ... }` — always
+/// creates a matching window on the named workspace, independent of
+/// `floating-rules` and applying regardless of whether the window ends up
+/// tiled or floating. `workspace` isn't validated here — this crate never
+/// cross-checks between sections (see `settings.default_workspace`'s own
+/// doc comment for the same reasoning) — that's `tili-daemon`'s job at
+/// `apply_config` time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRule {
+    pub app_id: String,
+    pub workspace: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FloatingRule {
     pub app_id: String,
@@ -143,6 +156,8 @@ pub struct Config {
     pub settings: Settings,
     pub keybindings: Vec<KeybindingMode>,
     /// Matched in order — first match wins.
+    pub workspace_rules: Vec<WorkspaceRule>,
+    /// Matched in order — first match wins.
     pub floating_rules: Vec<FloatingRule>,
     pub floating_defaults: FloatingDefaults,
 }
@@ -195,6 +210,7 @@ pub fn parse(source: &str) -> Result<Config, ConfigError> {
         default_layout: parse_default_layout(&doc),
         settings: parse_settings(&doc),
         keybindings: parse_keybindings(&doc),
+        workspace_rules: parse_workspace_rules(&doc),
         floating_rules,
         floating_defaults,
         ..Config::default()
@@ -331,6 +347,28 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
         gaps.accordion = v;
     }
     gaps
+}
+
+/// `workspace-rules { rule app-id="..." workspace="..." ... }`. Both
+/// fields are required — a rule with no workspace has no purpose — so a
+/// malformed entry is silently skipped, matching how `floating-rules`
+/// already treats a missing `app-id`. Rules are returned in document
+/// order — callers should match first-wins.
+fn parse_workspace_rules(doc: &KdlDocument) -> Vec<WorkspaceRule> {
+    let Some(children) = doc.get("workspace-rules").and_then(KdlNode::children) else {
+        return Vec::new();
+    };
+
+    children
+        .nodes()
+        .iter()
+        .filter(|n| n.name().value() == "rule")
+        .filter_map(|n| {
+            let app_id = n.get("app-id")?.as_string()?.to_string();
+            let workspace = n.get("workspace")?.as_string()?.to_string();
+            Some(WorkspaceRule { app_id, workspace })
+        })
+        .collect()
 }
 
 /// `floating-rules { rule app-id="..." title="..." { width N; height N;
@@ -628,6 +666,41 @@ mod tests {
         assert_eq!(config.floating_rules[0].mode, FloatingRuleMode::Float);
         assert_eq!(config.floating_rules[1].mode, FloatingRuleMode::Tile);
         assert_eq!(config.floating_rules[2].mode, FloatingRuleMode::Ignore);
+    }
+
+    #[test]
+    fn parses_workspace_rules() {
+        let source = r#"
+            workspace-rules {
+                rule app-id="com.mitchellh.ghostty" workspace="work"
+                rule app-id="com.apple.finder" workspace="personal"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.workspace_rules.len(), 2);
+        assert_eq!(config.workspace_rules[0].app_id, "com.mitchellh.ghostty");
+        assert_eq!(config.workspace_rules[0].workspace, "work");
+        assert_eq!(config.workspace_rules[1].app_id, "com.apple.finder");
+        assert_eq!(config.workspace_rules[1].workspace, "personal");
+    }
+
+    #[test]
+    fn workspace_rule_missing_the_required_workspace_field_is_skipped() {
+        let source = r#"
+            workspace-rules {
+                rule app-id="com.mitchellh.ghostty"
+                rule app-id="com.apple.finder" workspace="personal"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.workspace_rules.len(), 1);
+        assert_eq!(config.workspace_rules[0].app_id, "com.apple.finder");
+    }
+
+    #[test]
+    fn workspace_rules_default_to_empty_when_section_is_absent() {
+        let config = parse("").unwrap();
+        assert!(config.workspace_rules.is_empty());
     }
 
     #[test]

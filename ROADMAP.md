@@ -13,6 +13,8 @@ feature set:
 - Built-in global hotkeys, with switchable keybinding modes.
 - Floating rules (auto-center/size on creation, runtime tile/float
   toggle, per-rule mode override).
+- Workspace rules — auto-assign an app to a specific workspace on
+  creation, independent of whether it tiles or floats.
 - Mouse-follows-focus and focus-follows-monitor.
 - Native and tiled fullscreen, window close, and `summon` (find-and-raise
   by title/bundle id).
@@ -49,9 +51,6 @@ doing eventually, roughly in the order they'd likely land:
   switches instead of parking.
 - **Native-tab support.** Deferred until macOS's native-tab semantics
   can be relied on consistently across apps.
-- **Per-app default-workspace rules.** Route a window to a specific
-  workspace on creation, based on app id — similar matching machinery to
-  floating rules, but assigning a workspace instead of a frame.
 
 ## Design principles
 

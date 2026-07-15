@@ -193,6 +193,20 @@ keybindings mode="manage" auto-exit=#true {
     bind "alt-shift-l" "join right"
 }
 
+// Auto-assigns a matching app's windows to a specific declared workspace on
+// creation, regardless of whatever workspace is currently active — and
+// regardless of whether that app ends up tiled or floating (see
+// `floating-rules` below for that separate concern). Matched in order,
+// first match wins. If the target workspace isn't visible on any monitor
+// right now, the window is parked until you switch to it.
+//   app-id     required. The target app's bundle identifier (find one with
+//              `osascript -e 'id of app "Finder"'` or `mdls -name
+//              kMDItemCFBundleIdentifier /Applications/Finder.app`).
+//   workspace  required. Must name a workspace declared above.
+workspace-rules {
+    // rule app-id="com.mitchellh.ghostty" workspace="work"
+}
+
 // Windows matching one of these float instead of tiling, and are sized on
 // creation (auto-centered only for rules/apps that opt in via `center
 // #true` — `defaults.center` below is off, so an app with no explicit
