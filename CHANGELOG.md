@@ -8,6 +8,46 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-15
+
+A fix release addressing four issues found in daily use of `v0.1.0`.
+
+### Fixed
+
+- **Cmd-Tab / Mission Control / Control Center couldn't switch to an app in
+  a parked workspace.** Switching real macOS focus to an app whose window
+  lived in a currently inactive (parked, off-screen) workspace made that
+  app frontmost, but tili never revealed its window — it stayed off-screen
+  until an unrelated `workspace`/`focus` command happened to bring it back.
+  tili now detects the frontmost-app change (checked on the existing 250ms
+  reconciliation tick, not a new poll) and immediately switches to/reveals
+  the owning workspace, matching whichever monitor already shows it if it's
+  visible elsewhere.
+- **A pre-existing app quitting could leave a permanent "ghost" tile.** An
+  app that was already running before `tili-daemon` started, and later quit
+  while backgrounded with no open windows, could in rare cases leave a
+  stale tile behind forever — both the primary termination notification and
+  its existing reconciliation-tick backstop are sourced from `NSWorkspace`,
+  so the two could go stale together for that specific case. Detection now
+  also cross-checks a process's liveness at the kernel level
+  (`kill(pid, 0)`), independent of `NSWorkspace`, closing that gap.
+- **Transient system UI was misdetected as a real window and moved/resized.**
+  Right-clicking the Trash in the Dock, the thumbnail preview shown after
+  taking a screenshot, and macOS's keychain "always allow" authorization
+  prompt could each get tiled or re-centered as if they were a real
+  application window. Window classification now also checks whether the
+  owning process is a regular, Dock-visible application and whether the
+  window has a close button — system-UI chrome (no Dock icon, no close
+  button) is now always left untouched, regardless of what AX role/subrole
+  it happens to report.
+- Also confirmed, and deliberately left as-is: floating windows can briefly
+  flash at their app/OS-assigned default frame before tili repositions them
+  to their configured floating frame. This is an inherent limitation of any
+  window manager that reacts to window creation via Accessibility
+  notifications (there's no way to intercept a window before its first
+  paint), not a defect in tili's own placement logic — floating windows are
+  never tiled first; see `place_floating_window`'s doc comment.
+
 ## [0.1.0] - 2026-07-15
 
 First public release.

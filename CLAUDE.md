@@ -69,7 +69,21 @@ the dependency direction is a hard boundary, not just organization:
   the codebase (`_AXUIElementGetWindow`, to resolve a window's real
   `CGWindowID`) — keep that call isolated there; don't add other private API
   usage without a strong reason, since staying public-API-only is what lets
-  tili run without disabling SIP. `AxWindow::set_frame`/`set_position`/
+  tili run without disabling SIP. `window.rs` also owns `WindowKind`
+  (`Standard`/`Dialog`/`Popup`) via `classify_window_kind` — checked before
+  subrole matching (M-fix 0.1.1): a non-regular-activation-policy process
+  (`workspace::is_regular_app`, i.e. no Dock icon/Cmd-Tab entry — the Dock
+  itself, `SecurityAgent`, the screenshot toolbar, ...) presenting a window
+  with no close button is always `Popup` regardless of AX role/subrole,
+  ported from AeroSpace's own unconditional `isWindowHeuristic` rule after
+  live-hardware testing showed system-UI chrome occasionally slipping
+  through the old subrole-only check and getting tiled/re-centered. A
+  missing/ambiguous subrole otherwise falls back to whether the window has
+  *any* chrome button (close/fullscreen/zoom/minimize), not just
+  fullscreen. `tili-daemon/src/state.rs`'s `SYSTEM_UI_BUNDLE_IDS` is a
+  second, belt-and-suspenders bundle-id denylist forcing
+  `FloatingRuleMode::Ignore` for a few specific confirmed cases, in case the
+  general signal above doesn't apply to some future process. `AxWindow::set_frame`/`set_position`/
   `focus` (also in `window.rs`) are the only place real windows get
   moved/resized/raised — `set_frame` sets position before size (some apps
   clamp size based on current position), `set_position` only moves (used to
@@ -113,7 +127,20 @@ the dependency direction is a hard boundary, not just organization:
   process's windows via `list_windows_for_pid` rather than trying to
   interpret individual notification payloads (this sidesteps having to
   reason about whether a specific `AXUIElement` is still valid to query at
-  the exact moment its destroyed-notification fires). `src/hotkey.rs` (M6)
+  the exact moment its destroyed-notification fires). The same file's
+  250ms reconciliation tick (`resync_watchers`) also drives two fixes added
+  in 0.1.1: it cross-checks each watched pid's kernel-level liveness via
+  `libc::kill(pid, 0)` (independent of `NSWorkspace`, which the primary
+  termination notification and this tick's own pre-existing backstop both
+  already depend on — closing a gap where both could go stale together for
+  a backgrounded, windowless pre-existing app); and it tracks
+  `workspace::frontmost_app_pid()` across ticks, emitting
+  `WmEvent::FrontmostAppChanged { pid }` on an edge-triggered change — the
+  only signal that catches Cmd-Tab or a Mission Control/Control Center
+  click switching to an app whose window lives in a parked workspace, since
+  neither `NSWorkspaceDidActivateApplicationNotification` (dead for this
+  process, see below) nor per-window `WindowFocused` reacts to a pure
+  OS-level frontmost change. `src/hotkey.rs` (M6)
   is the global hotkey capture: a `CGEventTap` on its own dedicated
   `CFRunLoop` thread (same reasoning as the NSWorkspace/AX watchers above),
   which consumes (drops) a keypress if it's in the caller-supplied
@@ -329,7 +356,15 @@ the dependency direction is a hard boundary, not just organization:
   (M10) writes `example/tili.kdl` (via `include_str!`) to
   `~/.config/tili/tili.kdl` before the first `tili_config::load` if
   nothing's there yet — best-effort, a write failure just falls back to
-  `Config::default()` like before M10.
+  `Config::default()` like before M10. `handle_event`'s
+  `WmEvent::FrontmostAppChanged { pid }` arm (0.1.1) calls
+  `WmState::reveal_frontmost(pid)`, the only reaction to that event — it
+  mirrors `summon`'s body (resolve a window, switch to/reveal its
+  workspace or just retarget `focused_monitor` if already visible
+  elsewhere, then raise it) but resolves the target window via
+  `AxWindow::focused_id_for_pid(pid)` instead of a title/bundle-id text
+  query, and silently no-ops instead of erroring since there's no CLI
+  caller to report a failure to.
 - **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
   `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
   `move-to-workspace <name>`, `layout <toggle|tiles|accordion>`,
