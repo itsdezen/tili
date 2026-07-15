@@ -469,18 +469,26 @@ preference):
   `_AXUIElementGetWindow` call in `tili-ax/src/window.rs`.
 - No polling — the daemon reacts to AXObserver/NSWorkspace/display
   notifications (`tili-ax`'s `watch.rs`/`workspace.rs`), it doesn't loop and
-  check state. Two sanctioned, narrowly-scoped exceptions:
+  check state. Three sanctioned, narrowly-scoped exceptions:
   `tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap` retries installing the
   `CGEventTap` every few seconds for the process's whole lifetime, since
   Input Monitoring can be granted at any point after the daemon starts
-  with no accompanying event to react to; and `tili-ax/src/watch.rs`'s
+  with no accompanying event to react to; `tili-ax/src/watch.rs`'s
   window/app-watcher resync backstop — a cheap 250ms tick (attach/detach
   watchers, no relayout) plus a debounced-since-quiet full-window resync
   capped at 20s (`FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL`) — since
   `NSWorkspace` launch/terminate notifications and `AXObserver`
   window-level notifications have both been observed to occasionally
-  never fire. Don't add a third polling loop without a similarly hard
-  constraint forcing it. Scoped to `tili-daemon`'s own event loop
+  never fire; and `tili-ax/src/display.rs`'s `spawn_display_watcher`, which
+  bounds its `CFRunLoopRun` into `RESOLUTION_POLL_INTERVAL` (1s) chunks and
+  re-diffs `list_monitors()` after every wake — confirmed on real hardware
+  (temporary debug logging, since removed) that
+  `CGDisplayRegisterReconfigurationCallback` reliably fires for hot-plug/
+  unplug and sleep/wake but never fires at all for a resolution-only change
+  (same monitor id, no add/remove) in this process, which has no
+  `NSApplication`/UI-session-activation context by design. Don't add a
+  fourth polling loop without a similarly hard constraint forcing it.
+  Scoped to `tili-daemon`'s own event loop
   specifically — `tili-cli`'s `wait_for_daemon_ready` (a short-lived
   foreground wait with clear exit conditions, watching a *separate*
   process finish starting) and `tili-menubar`'s reconnect backoff (only

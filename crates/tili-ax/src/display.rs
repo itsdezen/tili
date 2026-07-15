@@ -213,9 +213,11 @@ unsafe extern "C" fn reconfiguration_callback(
     let _ = tx.send(());
 }
 
-unsafe extern "C" {
-    fn CFRunLoopRun();
-}
+/// How often the fallback poll below re-enumerates displays. Cheap (just
+/// `CGDisplay::active_displays()` + bounds reads, no AX calls), so a
+/// 1-second period costs nothing while still feeling instant for a resize
+/// done through System Settings.
+const RESOLUTION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Spawns a dedicated OS thread that registers a `CGDisplayRegisterReconfigurationCallback`
 /// and pumps a `CFRunLoop` on that thread for the process's lifetime — same
@@ -223,13 +225,41 @@ unsafe extern "C" {
 /// callbacks are delivered on whichever thread's run loop is running when
 /// they're registered. Each signal on the returned channel just means "call
 /// `list_monitors` again," not any specific change.
+///
+/// The callback alone isn't sufficient: confirmed on real hardware that
+/// `CGDisplayRegisterReconfigurationCallback` reliably fires for hot-plug/
+/// unplug and sleep/wake in this process, but never fires at all for a
+/// resolution-only change (no monitor added or removed) — `tili-daemon` has
+/// no `NSApplication`/UI-session-activation context (by design, see M9's own
+/// notes and the confirmed-dead `NSWorkspaceDidActivateApplicationNotification`
+/// case this mirrors), and pure mode-switch reconfiguration events appear to
+/// need that context to be delivered, unlike hot-plug/sleep-wake which don't.
+/// So this is the third sanctioned exception to the "no polling" invariant
+/// (see CLAUDE.md's Project status section) — the run loop below is bounded
+/// to `RESOLUTION_POLL_INTERVAL` chunks instead of running forever
+/// unattended, and after every wake (whether from a real callback or a
+/// timeout) it diffs a fresh `list_monitors()` against the last snapshot,
+/// only signaling the channel when something actually changed.
 pub fn spawn_display_watcher() -> std::sync::mpsc::Receiver<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let user_info = Box::into_raw(Box::new(tx)) as *const c_void;
+        let user_info = Box::into_raw(Box::new(tx.clone())) as *const c_void;
         unsafe {
             CGDisplayRegisterReconfigurationCallback(reconfiguration_callback, user_info);
-            CFRunLoopRun();
+        }
+
+        let mut last = list_monitors();
+        loop {
+            core_foundation::runloop::CFRunLoop::run_in_mode(
+                unsafe { core_foundation::runloop::kCFRunLoopDefaultMode },
+                RESOLUTION_POLL_INTERVAL,
+                false,
+            );
+            let current = list_monitors();
+            if current != last {
+                let _ = tx.send(());
+                last = current;
+            }
         }
     });
     rx
