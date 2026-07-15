@@ -8,6 +8,22 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-15
+
+A fix release addressing one issue found after `v0.1.1`.
+
+### Fixed
+
+- **`brew upgrade tili` left the old daemon/menu bar running until a manual
+  restart.** Homebrew swaps the installed binaries in place, but a
+  LaunchAgent already running keeps its old process image loaded — an
+  upgrade silently had no effect until the user remembered to run
+  `tili stop && tili start` themselves. The formula's `post_install` now
+  detects an already-running daemon (its LaunchAgent plist present) and
+  restarts it automatically, so `brew upgrade` takes effect immediately. A
+  fresh `brew install` is unaffected — it still leaves the first
+  `tili start` to the user.
+
 ## [0.1.1] - 2026-07-15
 
 A fix release addressing four issues found in daily use of `v0.1.0`.

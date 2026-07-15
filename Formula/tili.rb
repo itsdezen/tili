@@ -35,6 +35,22 @@ class Tili < Formula
     bin.install_symlink prefix/"tili.app/Contents/MacOS/tili-menubar"
   end
 
+  def post_install
+    # Homebrew calls post_install after both a fresh `brew install` and
+    # every `brew upgrade` — this is the hook that lets an upgrade take
+    # effect immediately. If tili was already running under the previous
+    # version (its LaunchAgent plist is present), restart it now so the
+    # daemon/menu bar pick up the freshly installed binaries right away
+    # instead of continuing to run the old ones until the user remembers
+    # to `tili stop && tili start` by hand. A fresh install has no plist
+    # yet, so this is a no-op then.
+    daemon_plist = "#{Dir.home}/Library/LaunchAgents/com.tili.daemon.plist"
+    return unless File.exist?(daemon_plist)
+
+    system bin/"tili", "stop"
+    system bin/"tili", "start"
+  end
+
   def caveats
     <<~EOS
       tili-daemon needs Accessibility permission to manage windows:

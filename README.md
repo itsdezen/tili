@@ -9,7 +9,7 @@ i3-style workflow · public Accessibility API only · Rust · no SIP disable
 [![CI](https://github.com/itsdezen/tili/actions/workflows/ci.yml/badge.svg)](https://github.com/itsdezen/tili/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
-[![Status](https://img.shields.io/badge/status-v0.1.1-brightgreen.svg)](ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-v0.1.2-brightgreen.svg)](ROADMAP.md)
 
 [Getting started](#getting-started) · [Commands](#commands) · [Roadmap](ROADMAP.md) · [Contributing](#contributing) · [Architecture](#architecture)
 
@@ -46,7 +46,7 @@ shortcut.
 
 ## Status
 
-`v0.1.1` is tili's latest release (a fix release on top of `v0.1.0`, tili's
+`v0.1.2` is tili's latest release (a fix release on top of `v0.1.0`, tili's
 first public release), and it's already daily-drivable: tiling, workspaces,
 hot-reloaded config, built-in hotkeys, floating rules, multi-monitor,
 mouse/focus-follows-monitor, a menu bar workspace badge, and a real signed
