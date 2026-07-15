@@ -1,5 +1,5 @@
 use objc2::MainThreadMarker;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 use crate::badge;
@@ -127,11 +127,15 @@ fn build_menu(current: Option<&str>, workspaces: &[tili_ipc::WorkspaceInfo]) -> 
     let menu = Menu::new();
     for ws in workspaces {
         let checked = current == Some(ws.name.as_str());
-        let item = CheckMenuItem::with_id(
+        let label = if checked {
+            format!("\u{2022} {}", ws.name)
+        } else {
+            ws.name.clone()
+        };
+        let item = MenuItem::with_id(
             MenuId::new(format!("workspace:{}", ws.name)),
-            &ws.name,
+            &label,
             true,
-            checked,
             None,
         );
         let _ = menu.append(&item);
@@ -145,7 +149,12 @@ fn build_menu(current: Option<&str>, workspaces: &[tili_ipc::WorkspaceInfo]) -> 
         true,
         None,
     ));
-    let _ = menu.append(&MenuItem::with_id(MenuId::new("quit"), "Quit", true, None));
+    let _ = menu.append(&MenuItem::with_id(
+        MenuId::new("quit"),
+        "Quit tili",
+        true,
+        None,
+    ));
     menu
 }
 
