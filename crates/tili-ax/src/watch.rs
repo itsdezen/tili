@@ -306,7 +306,24 @@ fn resync_watchers(
             false
         }
     });
-    unwatchable.retain(|pid| current.contains(pid));
+    unwatchable.retain(|&pid| {
+        if current.contains(&pid) {
+            true
+        } else {
+            // Mirrors `watched.retain` above — a pid whose AXObserver
+            // subscription failed at discovery time can still have real
+            // windows recorded in `WmState` (`seed_watchers`/the launch
+            // arm both fire `WindowsChanged` for it regardless of
+            // subscription success), so it needs the same synthetic
+            // `AppTerminated` when it disappears, or its windows are
+            // never cleaned out of the tree if the primary NSWorkspace
+            // termination notification also doesn't fire for it (the
+            // same real, occasional delivery gap `watched.retain` above
+            // already accounts for).
+            let _ = event_tx.send(WmEvent::AppTerminated { pid });
+            false
+        }
+    });
 }
 
 /// Subscribes to one app's window lifecycle notifications and forwards a
