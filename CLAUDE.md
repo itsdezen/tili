@@ -222,9 +222,8 @@ the dependency direction is a hard boundary, not just organization:
   back to near a real screen's edge regardless of how far outside it's
   requested (it only constrains the origin, not the window's full frame).
   Keeping the origin legitimately on-screen and letting the window's own
-  size extend past the corner (the same technique AeroSpace's
-  `MacWindow.hideInCorner` uses) avoids that clamp entirely instead of
-  fighting it.
+  size extend past the corner (a technique other AX-based tiling WMs use
+  too) avoids that clamp entirely instead of fighting it.
   Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
   parsed since M5) is intentionally still unwired — M9's bar is
   hot-plug/unplug safety, not that finer-grained UX.
@@ -282,11 +281,10 @@ the dependency direction is a hard boundary, not just organization:
   focus asynchronously has an unavoidable race against the very next
   hotkey press, since there's no ordering guarantee between "the
   background sync noticed the click" and "the keypress got processed."
-  Mirrors AeroSpace's own design (`getNativeFocusedWindow`/
-  `updateFocusCache`, called synchronously at the top of every command in
-  its `runLightSession`/`runHeavyCompleteRefreshSession`) — this is the fix
-  for a long-reported "the first direction key press after switching
-  windows manually does nothing/goes the wrong way" bug that several
+  Other AX-based tiling WMs resolve this the same way, synchronously at
+  the top of every command — this is the fix for a long-reported "the
+  first direction key press after switching windows manually does
+  nothing/goes the wrong way" bug that several
   reactive-sync attempts (an AX per-window notification, then an
   `NSWorkspaceDidActivateApplicationNotification` subscription — confirmed
   to never fire for a process like this one with no `NSApplication`
@@ -336,6 +334,46 @@ the dependency direction is a hard boundary, not just organization:
   - `tili status` *does* talk to the socket (via `Command::Ping`) but gets
     its own wording instead of the generic "couldn't reach daemon" error
     path.
+- **`tili-menubar`** — an `NSStatusItem` badge showing the focused
+  monitor's active workspace, plus a dropdown to switch workspaces, open
+  the config file, or quit. `src/badge.rs`'s `image_for` renders the
+  badge as a solid rounded-pill `NSImage` with the text "knocked out"
+  (`NSCompositingOperation::DestinationOut`) so the menu bar shows
+  through in the shape of the letters, then marks it a template image so
+  AppKit tints it correctly for light/dark/highlighted state — a leading
+  filled-dot glyph is drawn at its own smaller font size with a computed
+  baseline offset so it lines up with the workspace name's visual center
+  instead of sitting low. `src/menu.rs`'s `MenuState` tracks the last-
+  applied `(current workspace, workspace name list)` key so `apply_snapshot`
+  only rebuilds the live `NSMenu` when that key actually changes (rebuilding
+  unconditionally on every tick previously caused menu clicks to fire on
+  their own with zero user interaction) — the badge title and visibility
+  are still updated every tick regardless, since those are cheap. A
+  daemon-unreachable poll result (`None`) hides the status item entirely
+  rather than leaving a stale workspace name on screen. `src/ipc.rs`
+  duplicates `tili-cli`'s own socket framing rather than sharing it (same
+  precedent as `tili_ipc::default_socket_path`'s doc comment) and adds
+  `wait_for_change`, sent as `Command::WaitForChange` — this blocks
+  server-side (via `tili-daemon/src/main.rs`'s `change_notify:
+  Arc<tokio::sync::Notify>`, spawned into its own task per connection so
+  it doesn't block the main `select!` loop) until something actually
+  changes or a 30s internal timeout fires, so `tili-menubar` learns about
+  workspace/monitor changes the instant they happen instead of polling —
+  `main.rs` runs this on a dedicated background thread in a loop, feeding
+  results to the main thread over an `mpsc::channel` drained by a cheap
+  50ms `NSTimer` tick (not itself a poll interval — the channel is
+  normally empty; real work only happens right after `wait_for_change`
+  unblocks). The one deliberate exception: a 1s backoff between reconnect
+  attempts while the daemon is unreachable at all (not running, or
+  between `tili stop`/`tili start`) — there's no notification to wait on
+  when there's no connection to notify over. `src/actions.rs` handles
+  menu clicks (`workspace:<name>` switches, `open-settings` opens the
+  config via `$EDITOR`/`open`/`open -a TextEdit` in that fallback order,
+  `quit` runs `tili stop` before exiting this process too) on its own
+  background thread, since none of those reactions need the main thread.
+  `tili-cli`'s `tili start`/`stop`/`uninstall` manage this binary's
+  LaunchAgent alongside the daemon's own, so the badge's lifecycle never
+  has to be driven separately — see `tili-cli`'s own entry below.
 - **`xtask`** — release/signing tooling (M11). `bundle` wraps
   `tili-daemon`/`tili` in a minimal `tili.app` at
   `target/<target>/release/tili.app` (bundle id `com.tili.daemon` — the
@@ -357,16 +395,12 @@ the dependency direction is a hard boundary, not just organization:
   auto-published — see that file's own header comment for the sync
   process).
 
-## Project status and milestones
+## Project status
 
-tili is built as a sequence of independently verifiable milestones (M0
-through M11), tracked in [ROADMAP.md](ROADMAP.md) — check that file for
-current status before assuming a feature exists. Code that's ahead of the
-current milestone is marked with `TODO(M<n>): ...` comments and, where
-there's nothing reasonable to do yet, `unimplemented!("...: wired up in
-M<n>")` — these are intentional scaffolding stubs, not bugs, and should stay
-unimplemented until their milestone comes up rather than being filled in
-opportunistically out of order.
+tili shipped its first release (v0.1.0) with a complete, daily-drivable
+feature set — see [ROADMAP.md](ROADMAP.md) for what's shipped and what's
+planned next, and check that file before assuming a feature exists or
+doesn't.
 
 Key non-negotiable design invariants (from the architecture, not just style
 preference):
@@ -385,7 +419,12 @@ preference):
   `NSWorkspace` launch/terminate notifications and `AXObserver`
   window-level notifications have both been observed to occasionally
   never fire. Don't add a third polling loop without a similarly hard
-  constraint forcing it.
+  constraint forcing it. Scoped to `tili-daemon`'s own event loop
+  specifically — `tili-cli`'s `wait_for_daemon_ready` (a short-lived
+  foreground wait with clear exit conditions, watching a *separate*
+  process finish starting) and `tili-menubar`'s reconnect backoff (only
+  active while the daemon is genuinely unreachable, see its own module
+  docs) are outside this invariant by construction, not exceptions to it.
 
   Accessibility permission deliberately has **no** in-process wait/poll of
   any kind, despite being a permission grant with no accompanying
@@ -412,14 +451,13 @@ preference):
 
 ## Release process
 
-Every milestone that reaches a working, verifiable state (per its ROADMAP.md
-checkbox) is a release candidate — the project ships continuously rather
-than batching everything up for v1. To cut a release: update
-[CHANGELOG.md](CHANGELOG.md) (`Unreleased` → a dated version section), tag
-`vX.Y.Z` following the versioning convention documented there, and push the
-tag — `.github/workflows/release.yml` re-runs the full gate, builds
-aarch64/x86_64 binaries, and opens a **draft** GitHub release for manual
-review before publishing. Releases stay unsigned/prerelease until M11 lands
-proper codesigning; don't hand-sign or ad-hoc-sign a release binary outside
-that pipeline (see the Release Engineering section of the architecture
-notes for why ad-hoc signing is specifically disallowed).
+The project ships continuously — a new feature or fix set becomes a release
+whenever it reaches a working, verifiable state, not on a fixed schedule.
+To cut a release: update [CHANGELOG.md](CHANGELOG.md) (`Unreleased` → a
+dated version section), tag `vX.Y.Z` per the plain pre-1.0 SemVer convention
+documented there, and push the tag — `.github/workflows/release.yml`
+re-runs the full gate, builds aarch64/x86_64 binaries, codesigns them, and
+opens a **draft** GitHub release for manual review before publishing. Don't
+hand-sign or ad-hoc-sign a release binary outside that pipeline (see the
+Release Engineering section of the architecture notes for why ad-hoc
+signing is specifically disallowed).

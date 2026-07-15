@@ -144,6 +144,11 @@ enum Commands {
     WorkspaceBack,
     /// Toggle the focused window between tiled and floating at runtime.
     SetFloating { state: OnOffArg },
+    /// Fully tear down tili's local state: stops both LaunchAgents, then
+    /// removes the config file, logs, IPC socket, and the Accessibility
+    /// permission grant. Doesn't touch a Homebrew install itself — run
+    /// `brew uninstall tili` separately if that's how tili was installed.
+    Uninstall,
 }
 
 /// What shape of payload to expect back, so the CLI doesn't have to guess
@@ -183,6 +188,10 @@ fn main() {
         }
         Commands::Status => {
             print_status();
+            return;
+        }
+        Commands::Uninstall => {
+            uninstall();
             return;
         }
         _ => {}
@@ -243,6 +252,7 @@ fn main() {
         Commands::Start => unreachable!("handled above before the socket connection"),
         Commands::Stop => unreachable!("handled above before the socket connection"),
         Commands::Status => unreachable!("handled above before the socket connection"),
+        Commands::Uninstall => unreachable!("handled above before the socket connection"),
     };
 
     match send(command) {
@@ -641,6 +651,60 @@ fn stop_daemon() {
         }
     }
     println!("tili: daemon stopped");
+}
+
+/// `~/.config/tili/tili.kdl` — duplicated from `tili_config::default_config_path`
+/// rather than depending on `tili-config` for one 3-line function; same
+/// tradeoff `tili-menubar` already made for the same reason (that crate
+/// pulls in a KDL parser and an FSEvents-based file watcher, both
+/// irrelevant here).
+fn default_config_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").expect("HOME must be set");
+    std::path::PathBuf::from(home).join(".config/tili/tili.kdl")
+}
+
+/// `tili uninstall` — a full teardown, unlike `tili stop` (which only
+/// removes the LaunchAgents so a later `tili start` can bring things back
+/// unchanged). Removes every file tili writes outside of a Homebrew
+/// Cellar/prefix, plus the Accessibility grant, so a fresh `tili start`
+/// afterward behaves exactly like a first-ever install — including
+/// re-prompting for permission, which is how this actually gets verified.
+fn uninstall() {
+    stop_daemon();
+
+    let config_path = default_config_path();
+    if config_path.exists()
+        && let Err(e) = std::fs::remove_file(&config_path)
+    {
+        eprintln!("tili: couldn't remove {}: {e}", config_path.display());
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let logs_dir = std::path::PathBuf::from(&home).join("Library/Logs/tili");
+    if logs_dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(&logs_dir)
+    {
+        eprintln!("tili: couldn't remove {}: {e}", logs_dir.display());
+    }
+
+    let socket_path = tili_ipc::default_socket_path();
+    if socket_path.exists()
+        && let Err(e) = std::fs::remove_file(&socket_path)
+    {
+        eprintln!("tili: couldn't remove {}: {e}", socket_path.display());
+    }
+
+    // Best-effort, same as tili-daemon's own reset_accessibility_tcc — a
+    // no-op on an unsigned dev build, since tccutil keys off the bundle id
+    // an ad-hoc-signed binary doesn't stably have.
+    let _ = std::process::Command::new("tccutil")
+        .args(["reset", "Accessibility", LAUNCH_AGENT_LABEL])
+        .status();
+
+    println!("tili: uninstalled — config, logs, socket, and Accessibility grant removed.");
+    println!(
+        "tili: if you installed via Homebrew, run `brew uninstall tili` to remove the binaries."
+    );
 }
 
 fn print_monitors(payload: serde_json::Value) {

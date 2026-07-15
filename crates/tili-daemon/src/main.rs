@@ -52,11 +52,12 @@ async fn main() -> std::io::Result<()> {
         // they've granted it — that next invocation is a genuinely fresh
         // process, which is the one case already proven to work.
         //
-        // Mirrors AeroSpace's `resetAccessibility()`: a dev binary rebuilt
-        // across iterations can shift code identity, leaving TCC holding a
-        // stale grant record tied to a previous signature that a plain
-        // trust check gets stuck against. Resetting here clears that before
-        // the user's next `tili start` attempt. Best-effort: a raw unsigned
+        // A dev binary rebuilt across iterations can shift code identity,
+        // leaving TCC holding a stale grant record tied to a previous
+        // signature that a plain trust check gets stuck against —
+        // resetting here clears that before the user's next `tili start`
+        // attempt (the same fix other AX-based tiling WMs apply for the
+        // same dev-signing-churn problem). Best-effort: a raw unsigned
         // dev binary has no real bundle id for tccutil to match, so this
         // silently no-ops in that case; harmless either way.
         reset_accessibility_tcc();

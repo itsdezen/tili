@@ -9,7 +9,7 @@ i3-style workflow · public Accessibility API only · Rust · no SIP disable
 [![CI](https://github.com/itsdezen/tili/actions/workflows/ci.yml/badge.svg)](https://github.com/itsdezen/tili/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
-[![Status](https://img.shields.io/badge/status-v0.11.0-brightgreen.svg)](ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-v0.1.0-brightgreen.svg)](ROADMAP.md)
 
 [Getting started](#getting-started) · [Commands](#commands) · [Roadmap](ROADMAP.md) · [Contributing](#contributing) · [Architecture](#architecture)
 
@@ -46,12 +46,12 @@ shortcut.
 
 ## Status
 
-All 11 milestones in [ROADMAP.md](ROADMAP.md) are done as of `v0.11.0` —
+`v0.1.0` is tili's first public release, and it's already daily-drivable:
 tiling, workspaces, hot-reloaded config, built-in hotkeys, floating rules,
-multi-monitor, mouse/focus-follows-monitor, LaunchAgent auto-start, and a
-real signed release pipeline. tili is daily-drivable. Pre-1.0 still means
-config schema and CLI surface can change between releases — check
-[CHANGELOG.md](CHANGELOG.md) when upgrading.
+multi-monitor, mouse/focus-follows-monitor, a menu bar workspace badge, and
+a real signed release pipeline. See [ROADMAP.md](ROADMAP.md) for what's
+planned next. Pre-1.0 still means config schema and CLI surface can change
+between releases — check [CHANGELOG.md](CHANGELOG.md) when upgrading.
 
 ## Getting started
 
@@ -87,6 +87,16 @@ to stop it and remove the LaunchAgent (so it stays stopped until you run
 `tili start` again), `tili status` to check whether it's running, and
 `tili --version`/`tili help` for the installed version and full command
 list.
+
+## Menu bar badge
+
+`tili start` also installs and starts `tili-menubar` alongside the daemon —
+a small `NSStatusItem` badge showing the active workspace on your focused
+monitor. Click it to switch workspaces, open your config file, or quit
+(which stops the daemon too). It starts/stops/uninstalls automatically with
+`tili start`/`stop`/`uninstall`, so there's nothing extra to run, and it
+hides itself entirely whenever the daemon isn't reachable rather than
+showing stale state.
 
 ## Other ways to install
 
@@ -152,7 +162,7 @@ floating-rules {
 
 ## Commands
 
-`tili start`/`stop`/`status` manage the daemon's LaunchAgent itself;
+`tili start`/`stop`/`uninstall`/`status` manage the daemon's LaunchAgent itself;
 everything else below is a client command sent over a Unix socket to a
 daemon that's already running — the same commands are also what
 keybindings in your config resolve to (e.g. `bind "alt-h" "focus left"`).
@@ -162,6 +172,7 @@ keybindings in your config resolve to (e.g. `bind "alt-h" "focus left"`).
 | `tili` (no subcommand) | Same as `tili start`, after an Enter-key confirmation |
 | `tili start` | Install and start tili-daemon as a background LaunchAgent (auto-restart, auto-start at login) |
 | `tili stop` | Stop tili-daemon and remove its LaunchAgent |
+| `tili uninstall` | Full teardown: stop the daemon, remove its config/logs/socket, and reset the Accessibility grant |
 | `tili status` | Report whether the daemon is running |
 | `tili ping` | Check the daemon is reachable (scripting-friendly; see `status`) |
 | `tili --version`/`-V` | Print the installed version |
@@ -200,7 +211,8 @@ crates/
 ├── tili-config    KDL parsing + validation, hot-reload
 ├── tili-ipc        shared daemon/CLI protocol types
 ├── tili-daemon     the window manager: event loop, state, hotkeys
-└── tili-cli        the `tili` command-line client
+├── tili-cli        the `tili` command-line client
+└── tili-menubar    the menu bar workspace badge
 ```
 
 The daemon is single-threaded around one piece of state: every command,
@@ -215,13 +227,14 @@ Spaces, the same technique other public-API-only tools in this space use.
 ## Contributing
 
 tili is early enough that architectural feedback is as valuable as code.
-Check [ROADMAP.md](ROADMAP.md) for what's next — milestones are scoped to be
-independently pickup-able. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev
-setup, the pre-PR test gate, and the design invariants PRs are expected to
-respect. Bug reports and feature requests use the issue templates; general
-questions go in [Discussions](https://github.com/itsdezen/tili/discussions).
+Check [ROADMAP.md](ROADMAP.md) for what's planned — each item there is
+scoped to be independently pickup-able. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for dev setup, the pre-PR test gate, and the design invariants PRs are
+expected to respect. Bug reports and feature requests use the issue
+templates; general questions go in
+[Discussions](https://github.com/itsdezen/tili/discussions).
 
-Releases are cut continuously as milestones land — see
+Releases ship continuously as features land — see
 [`.github/workflows/release.yml`](.github/workflows/release.yml) and
 [CHANGELOG.md](CHANGELOG.md) for the process and versioning convention.
 
@@ -233,6 +246,17 @@ public issue for security reports.
 ## Code of Conduct
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
+## Acknowledgments
+
+tili exists because [AeroSpace](https://github.com/nikitabobko/AeroSpace) is
+great and I wanted an excuse to rewrite it in Rust anyway. Not because Rust
+is faster (it isn't, meaningfully) — just because Cargo, the type system,
+and shipping one static binary make for a nicer afternoon than I was
+having otherwise. Thank you, AeroSpace, for existing. 🙏
+
+tili is fully open for contributions — issues, PRs, "this config option
+should really work differently," all of it welcome.
 
 ## License
 

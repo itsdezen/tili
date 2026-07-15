@@ -1,40 +1,69 @@
 # Roadmap
 
-tili is built in small, independently verifiable milestones. Each one ships
-something you can actually run and check — no milestone is "trust me, it
-works."
+## v0.1.0 — first release
 
-Status legend: ✅ done · 🚧 in progress · ⬜ not started
+tili shipped its first public release with a complete, daily-drivable
+feature set:
 
-| # | Milestone | Status | Verification |
-|---|-----------|:---:|---|
-| M0 | Workspace scaffolding | ✅ | `cargo build --workspace` succeeds; daemon triggers the Accessibility permission dialog |
-| M1 | Read-only window listing | ✅ | `tili list-windows` over a real socket shows real running windows |
-| M2 | Event-driven updates | ✅ | Window list stays live via AXObserver/NSWorkspace, no polling; near-zero idle CPU |
-| M3 | Single-workspace Tiles layout | ✅ | `tili focus/move <dir>` works with real BSP tiling on one monitor |
-| M4 | Named workspaces + virtualization | ✅ | Off-screen parking confirmed via `tili list-windows --json` |
-| M5 | KDL config + hot-reload | ✅ | Editing `tili.kdl` and saving updates gaps live, no restart |
-| M6 | Built-in hotkey handling | ✅ | Rebinding a key in config works with no external hotkey daemon |
-| M7 | Accordion layout + toggle | ✅ | `layout toggle` switches Tiles ↔ Accordion on a live workspace |
-| M8 | Floating rules + auto-center | ✅ | ~30 floating-app rules match and auto-center/size on window creation |
-| M9 | Multi-monitor support | ✅ | Hot-plug/unplug reassigns workspaces without losing windows |
-| M10 | Daily-drivable MVP | ✅ | Used as the only WM for one full workday, no manual intervention |
-| M11 | Release engineering | ✅ | `brew install` → `brew upgrade` does **not** reset Accessibility permission |
+- BSP tiling (`Tiles`) and Accordion layouts, with i3-style directional
+  focus/move, join, resize, and balance.
+- Named workspaces, off-screen virtualization, and full multi-monitor
+  support (hot-plug/unplug safe).
+- KDL config with file-watch hot-reload — no daemon restart needed.
+- Built-in global hotkeys, with switchable keybinding modes.
+- Floating rules (auto-center/size on creation, runtime tile/float
+  toggle, per-rule mode override).
+- Mouse-follows-focus and focus-follows-monitor.
+- Native and tiled fullscreen, window close, and `summon` (find-and-raise
+  by title/bundle id).
+- A menu bar workspace badge (`tili-menubar`) that stays in sync with the
+  daemon over an event-driven long-poll, not polling.
+- LaunchAgent-managed `start`/`stop`/`uninstall`, the latter leaving
+  nothing behind — config, logs, socket, and the Accessibility grant are
+  all cleaned up automatically.
+- A real, signed release pipeline (`xtask` + a stable self-signed
+  identity + Homebrew tap).
 
-Post-v1 (deferred on purpose): animated window movement (`TweenedFrameSetter`),
-tabbed/stacked containers, `tili subscribe` event streaming for status-bar
-integrations, per-app default-workspace rules.
+See [CHANGELOG.md](CHANGELOG.md) for the full itemized list.
 
-## Design principles guiding every milestone
+## Planned
+
+Nothing here is scheduled — this is the backlog of ideas judged worth
+doing eventually, roughly in the order they'd likely land:
+
+- **Animated window movement.** `WindowFrameSetter` (`tili-ax`) is
+  already designed as the single seam every real frame mutation goes
+  through, specifically so an animated implementation
+  (`TweenedFrameSetter`) can be dropped in later without touching layout
+  code.
+- **Third-party status bar integration (e.g. SketchyBar).** Right now
+  only `tili-menubar` can show live workspace state, via an in-process
+  long-poll. Two directions are already scoped from building that:
+  a `tili subscribe` push protocol external tools can connect to over
+  the existing socket, or a simpler synchronous exec-hook
+  (`on-workspace-change` calling out to a user script) for tools that
+  would rather not speak tili's protocol at all.
+- **Tabbed/stacked containers.** A third container kind between `Tiles`
+  and `Accordion` — tabs instead of full-window stacking.
+- **Sticky windows.** Windows that stay visible across workspace
+  switches instead of parking.
+- **Native-tab support.** Deferred until macOS's native-tab semantics
+  can be relied on consistently across apps.
+- **Per-app default-workspace rules.** Route a window to a specific
+  workspace on creation, based on app id — similar matching machinery to
+  floating rules, but assigning a workspace instead of a frame.
+
+## Design principles
 
 - **Public API only.** One documented private call (`_AXUIElementGetWindow`)
-  to resolve a window's `CGWindowID` — everything else is public Accessibility
-  API. No SIP disable, ever.
-- **Event-driven, not polling.** Every milestone that touches the daemon's
-  event loop should be checked against idle CPU usage, not just correctness.
-- **The animation seam stays a seam.** `WindowFrameSetter` is the only thing
-  that's allowed to know how a window's frame actually gets set. If a
-  milestone needs to reach around it, that's a design smell worth stopping for.
+  to resolve a window's `CGWindowID` — everything else is public
+  Accessibility API. No SIP disable, ever.
+- **Event-driven, not polling.** Every change to the daemon's event loop
+  should be checked against idle CPU usage, not just correctness.
+- **The animation seam stays a seam.** `WindowFrameSetter` is the only
+  thing allowed to know how a window's frame actually gets set. If a
+  feature needs to reach around it, that's a design smell worth stopping
+  for.
 
-See the architecture notes for the full technical design behind each
-milestone.
+See the architecture notes in [CLAUDE.md](CLAUDE.md) for the full
+technical design.

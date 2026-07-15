@@ -7,9 +7,9 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
     // macOS currently considers focused, synchronously, before *any*
     // command runs — see `WmState::sync_focus_from_frontmost`'s doc comment
     // for why this can't be a reactive background sync instead (an
-    // unavoidable race against the very next hotkey press). Mirrors
-    // AeroSpace's `runLightSession`, which does the same
-    // `getNativeFocusedWindow`/`updateFocusCache` step before every command.
+    // unavoidable race against the very next hotkey press). Other AX-based
+    // tiling WMs resolve this the same way: a synchronous focus resync at
+    // the top of every command, not a reactive background sync.
     state.sync_focus_from_frontmost();
     match command {
         Command::Ping => Response::Ok,

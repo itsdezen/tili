@@ -32,8 +32,7 @@ const DEFAULT_MODE: &str = "main";
 /// place a window's origin somewhere unreachable back to near a real
 /// screen's own edge regardless of how far outside it's requested — it
 /// only constrains the origin, not the window's full frame. See
-/// `parking_position`'s doc comment for the technique this uses instead
-/// (the same one AeroSpace's `MacWindow.hideInCorner` uses).
+/// `parking_position`'s doc comment for the technique this uses instead.
 const PARK_OFFSET_STEP: f64 = 50.0;
 
 /// How close two frames need to be to count as "the same" when deciding
@@ -1163,12 +1162,11 @@ impl WmState {
     /// updating `workspace_focus` asynchronously can easily still be stale
     /// by the time a hotkey fires moments later, since there's no ordering
     /// guarantee between "the poll noticed the click" and "the user's next
-    /// keypress got processed." Mirrors AeroSpace's own design exactly
-    /// (`getNativeFocusedWindow`/`updateFocusCache`, called synchronously at
-    /// the top of *every* command in its `runLightSession`/
-    /// `runHeavyCompleteRefreshSession`) — resolve reality synchronously,
-    /// immediately before using it, rather than trusting a cache that was
-    /// last updated by some independent, unsynchronized background event.
+    /// keypress got processed." Other AX-based tiling WMs resolve this the
+    /// same way, synchronously at the top of every command — resolve
+    /// reality immediately before using it, rather than trusting a cache
+    /// that was last updated by some independent, unsynchronized
+    /// background event.
     /// Called once at the top of `dispatch()`, covering both socket- and
     /// hotkey-triggered commands.
     pub fn sync_focus_from_frontmost(&mut self) {

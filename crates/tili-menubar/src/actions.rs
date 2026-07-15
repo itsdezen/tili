@@ -68,7 +68,6 @@ fn succeeded(result: std::io::Result<std::process::ExitStatus>) -> bool {
 /// show.
 pub fn handle(id: &MenuId) {
     let id: &str = id.as_ref();
-    eprintln!("tili-menubar: menu event id={id:?}");
     if let Some(name) = id.strip_prefix("workspace:") {
         let _ = crate::ipc::send(tili_ipc::Command::WorkspaceSwitch(name.to_string()));
     } else if id == "open-settings" {

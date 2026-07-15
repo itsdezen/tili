@@ -92,11 +92,11 @@ pub fn main_display_frame() -> Rect {
 /// regardless of how far outside it's requested — AppKit only constrains a
 /// window's *origin* to stay reachable on some real display, it doesn't
 /// care whether the window's full frame does. So instead of fighting that
-/// clamp, `parking_position` exploits it exactly the way AeroSpace's
-/// `MacWindow.hideInCorner` does: keep the origin legitimately on-screen,
-/// just barely, and let the window's own size push everything past it off
-/// the edge. A larger value here doesn't hide more — it would just be a
-/// wider on-screen sliver, the opposite of what parking wants.
+/// clamp, `parking_position` exploits it — a technique other AX-based
+/// tiling WMs use too: keep the origin legitimately on-screen, just
+/// barely, and let the window's own size push everything past it off the
+/// edge. A larger value here doesn't hide more — it would just be a wider
+/// on-screen sliver, the opposite of what parking wants.
 const PARK_EPSILON: f64 = 1.0;
 
 /// Computes where to position a window so only a `PARK_EPSILON` sliver of
@@ -105,8 +105,8 @@ const PARK_EPSILON: f64 = 1.0;
 /// this corner specifically — the window's own top-left lands just inside
 /// the corner, and its body (extending in the +x/+y direction from there)
 /// does all the hiding regardless of how big it is — but is taken anyway
-/// so this signature doesn't need to change if a different corner
-/// (needing it, like AeroSpace's bottom-left case) is ever added.
+/// so this signature doesn't need to change if a different corner (one
+/// that actually needs it, e.g. a bottom-left variant) is ever added.
 ///
 /// Doesn't need to check other connected monitors: `PARK_EPSILON` is tiny
 /// enough that this point is always deep inside the main monitor's own

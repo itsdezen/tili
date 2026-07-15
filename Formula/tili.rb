@@ -8,17 +8,21 @@
 class Tili < Formula
   desc "i3-like tiling window manager for macOS"
   homepage "https://github.com/itsdezen/tili"
-  version "0.11.1"
+  version "0.1.0"
   license "MIT"
 
+  # PLACEHOLDER — fill in with the real sha256 from the v0.1.0 release
+  # tarballs once `xtask package` has built and published them (see
+  # CONTRIBUTING.md's "Release Engineering" section). Do not publish this
+  # formula to itsdezen/homebrew-tap with placeholder hashes still in it.
   on_arm do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-aarch64-apple-darwin.tar.gz"
-    sha256 "56f5f7b47fcf48402d5c1aaf036bec7ba564fb2afdcdf55f528442bdf1fca8a6"
+    sha256 "PLACEHOLDER_FILL_IN_AFTER_RELEASE_BUILD"
   end
 
   on_intel do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-x86_64-apple-darwin.tar.gz"
-    sha256 "e66d668e319caed2c25ba9f88e55fc0568ac49b027657320578e4c4b65e13d8c"
+    sha256 "PLACEHOLDER_FILL_IN_AFTER_RELEASE_BUILD"
   end
 
   def install
@@ -32,6 +36,7 @@ class Tili < Formula
     prefix.install "tili.app"
     bin.install_symlink prefix/"tili.app/Contents/MacOS/tili"
     bin.install_symlink prefix/"tili.app/Contents/MacOS/tili-daemon"
+    bin.install_symlink prefix/"tili.app/Contents/MacOS/tili-menubar"
   end
 
   def caveats
@@ -39,11 +44,11 @@ class Tili < Formula
       tili-daemon needs Accessibility permission to manage windows:
         System Settings > Privacy & Security > Accessibility > add tili-daemon
 
-      Try it out:
+      Try it out (also installs the menu bar workspace badge):
         tili start
 
-      Start it automatically at login instead (opt-in, not done by this install):
-        tili daemon install
+      Remove tili's config, logs, socket, and Accessibility grant:
+        tili uninstall
     EOS
   end
 
