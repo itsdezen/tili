@@ -1,7 +1,10 @@
 // Copy this to ~/.config/tili/tili.kdl and edit — the daemon watches the
-// file and hot-reloads on save (see ROADMAP.md M5). Only what's used by
-// milestones landed so far is documented below; unrecognized sections are
-// safe to include too — they're ignored, not rejected.
+// file and hot-reloads on save (no restart needed). Every section below is
+// optional; an omitted section just uses its built-in default. Unknown/
+// misspelled sections are silently ignored rather than rejected, so it's
+// safe to leave typos or future-looking config lying around — but it also
+// means a section that "does nothing" after a reload is worth
+// double-checking for a typo in its name.
 
 workspaces {
     workspace "work"
@@ -15,15 +18,22 @@ workspaces {
 }
 
 gaps {
+    // All values below are in points. `inner` is the spacing between
+    // sibling tiled windows.
     inner 4
+
+    // `outer` is the padding around the whole tiled area. Either one number
+    // (same on all 4 sides) or four numbers in CSS order: top, right,
+    // bottom, left.
     outer 8 16 16 16
 
     // How many points of a non-visible accordion sibling peek out from
     // behind the active one. 0 collapses every child to the same full frame.
     accordion 32
 
-    // Per-workspace override — anything not listed here uses this block's
-    // own defaults, not whatever's set above.
+    // Per-workspace override — put any workspace name declared above here
+    // to override `inner`/`outer`/`accordion` just for it; anything not
+    // listed here uses this block's own defaults, not whatever's set above.
     // workspace "random" {
     //     inner 0
     //     outer 0
@@ -55,10 +65,56 @@ settings {
 // Global hotkeys — no external tool (skhd etc.) needed, tili captures these
 // itself. Key strings are "modifier-modifier-key", e.g. "alt-shift-h";
 // modifiers can be listed in any order. Recognized modifiers: alt/option,
-// cmd/command, ctrl/control, shift. See tili-ax/src/hotkey.rs for the full
-// list of recognized base key names (letters, digits, punctuation like
-// "slash"/"semicolon"/"minus"/"equal", and "escape"/"enter"/"space"/"tab"/
-// arrow keys).
+// cmd/command, ctrl/control, shift. Base key names: letters, digits,
+// punctuation ("slash"/"semicolon"/"minus"/"equal"/...), and
+// "escape"/"enter"/"space"/"tab"/arrow keys.
+//
+// `mode="main"` below is the mode active by default; you can also declare
+// your own named modes (see "resize"/"manage" further down) and switch
+// into them with the `mode <name>` command. Every command below can be
+// bound in any mode, not just "main" — these are just where the defaults
+// happen to put them.
+//
+// Full list of commands usable as a `bind`'s second argument (`<dir>` is
+// always one of left/right/up/down):
+//   focus <dir>                     move focus to the neighboring window
+//   move <dir>                      move the focused window itself
+//   join <dir>                      wrap focused window + neighbor in a new
+//                                    perpendicular container
+//   workspace <name>                switch to a declared workspace
+//   workspace-back                  switch back to the previously-active one
+//   move-node-to-workspace <name>   move the focused window to a workspace
+//   move-workspace-to-monitor next|main
+//                                   move the active (or a named) workspace
+//                                   to another connected monitor
+//   layout toggle[ root]            flip focused container Tiles<->Accordion
+//   layout tiles[ root]             set focused container to Tiles
+//   layout accordion[ root]         set focused container to Accordion
+//   layout horizontal[ root]        set focused container's split axis
+//   layout vertical[ root]          set focused container's split axis
+//   layout toggle-orientation[ root]
+//                                   flip focused container's split axis
+//   resize <amount>                 grow/shrink focused window's share,
+//                                   e.g. "0.1" or "-0.1" (container
+//                                   weight-space, not pixels)
+//   balance[ root]                  reset all siblings back to equal shares
+//   flatten                         merge a redundant single-child container
+//                                   into its parent
+//   fullscreen[ native]             toggle fullscreen; "native" uses a real
+//                                   macOS Space instead of just filling the
+//                                   monitor within tili's own layout
+//   close                           close the focused window
+//   summon <text>                   focus+switch to the first window whose
+//                                   title or bundle id contains <text>
+//   set-floating on|off             toggle the focused window between
+//                                   tiled and floating at runtime
+//   focus-monitor                   cycle which connected monitor commands
+//                                   target (no-op with only one monitor)
+//   mode <name>                     switch to a named keybindings mode
+//   mode exit                       return to the default ("main") mode
+//
+// A trailing "root" (where shown above) targets the workspace's whole root
+// container instead of just the focused window's nearest one.
 keybindings mode="main" {
     bind "alt-h" "focus left"
     bind "alt-l" "focus right"
@@ -137,20 +193,30 @@ keybindings mode="manage" auto-exit=#true {
     bind "alt-shift-l" "join right"
 }
 
-// Windows matching one of these float instead of tiling, and are
-// auto-centered/sized on creation. Matched in order — first match wins.
-// `app-id` is the target app's bundle identifier (find one with
-// `osascript -e 'id of app "Finder"'` or `mdls -name kMDItemCFBundleIdentifier
-// /Applications/Finder.app`). `title` (optional) is a regex matched against
-// the window title, for narrowing a rule to specific dialogs of an app that
-// should otherwise tile normally. `mode` (optional, one of "float"/"tile"/
-// "ignore", defaults to "float") overrides tili's own guess at whether a
-// window should float, tile, or be left untouched entirely — useful for an
-// app tili misclassifies, without needing a source change.
+// Windows matching one of these float instead of tiling, and are sized on
+// creation (auto-centered only for rules/apps that opt in via `center
+// #true` — `defaults.center` below is off, so an app with no explicit
+// `center` just lands at the floating area's top-left). Matched in order —
+// first match wins. Each `rule` supports:
+//   app-id     required. The target app's bundle identifier (find one with
+//              `osascript -e 'id of app "Finder"'` or `mdls -name
+//              kMDItemCFBundleIdentifier /Applications/Finder.app`).
+//   title      optional. A regex matched against the window title, for
+//              narrowing a rule to specific dialogs of an app that should
+//              otherwise tile normally.
+//   mode       optional, one of "float" (default)/"tile"/"ignore" —
+//              overrides tili's own guess at whether the window should
+//              float, tile, or be left completely untouched. Useful for an
+//              app tili misclassifies, without needing a source change.
+//   width      optional, in points. Falls back to `defaults.width-ratio`.
+//   height     optional, in points. Falls back to `defaults.height-ratio`.
+//   center     optional. Falls back to `defaults.center`.
+// `width`/`height`/`center` go in a `{ }` body after the rule, as shown
+// below — only meaningful when `mode` is "float" (the default).
 floating-rules {
-    rule app-id="com.apple.finder"
-    rule app-id="com.apple.systempreferences"
-    rule app-id="com.apple.ActivityMonitor"
+    rule app-id="com.apple.finder" { center #true }
+    rule app-id="com.apple.systempreferences" { center #true }
+    rule app-id="com.apple.ActivityMonitor" { center #true }
 
     // Example: a rule can override `defaults` per app with its own
     // width/height (in points) and center flag. Left commented out since
@@ -161,7 +227,7 @@ floating-rules {
     // Only Finder's "Copy"/"Connect to Server" style dialogs float — other
     // Finder windows are already covered by the plain rule above, so this
     // one only matters for apps you'd otherwise want tiled.
-    rule app-id="com.apple.finder" title="^(Copy|Connect to Server)$"
+    rule app-id="com.apple.finder" title="^(Copy|Connect to Server)$" { center #true }
 
     // mode="tile" rescues a window back into normal tiling even if tili's
     // AX heuristic classified it as a dialog (some apps mark an ordinary
@@ -175,7 +241,7 @@ floating-rules {
     // rule app-id="com.example.menu-bar-panel" mode="ignore"
 
     defaults {
-        center #true
+        center #false
         width-ratio 0.6
         height-ratio 0.6
     }
