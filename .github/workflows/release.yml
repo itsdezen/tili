@@ -157,12 +157,19 @@ jobs:
           prerelease: false
           files: dist/*
           body: |
-            Codesigned with tili's self-signed certificate (hardened
-            runtime) — see
+            **Recommended install:** `brew install itsdezen/tap/tili` —
+            Homebrew downloads via `curl`, which doesn't set macOS's
+            quarantine flag, so Gatekeeper never enters the picture.
+
+            The tarballs below are codesigned with tili's self-signed
+            certificate (hardened runtime) — see
             [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering).
-            Not notarized yet, so Gatekeeper will still prompt on first
-            launch: right-click → Open, or
-            `xattr -d com.apple.quarantine tili.app`.
+            That's for a *stable signing identity* across releases (so
+            your Accessibility grant survives an upgrade), not for
+            passing Gatekeeper — a self-signed cert isn't notarized. If
+            you download `tili.app` directly from this page instead of
+            using Homebrew, Gatekeeper will still prompt on first launch:
+            right-click → Open, or `xattr -d com.apple.quarantine tili.app`.
 
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
             for what changed.
@@ -179,10 +186,13 @@ jobs:
             notarize release binaries yet — the self-signed certificate this
             project's release strategy depends on
             (see [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering))
-            hasn't been generated. macOS Gatekeeper will block these on
-            first launch; run `xattr -d com.apple.quarantine tili.app` or
-            right-click → Open to proceed. Not recommended for daily use
-            before v1.0.
+            hasn't been generated. Installing via
+            `brew install itsdezen/tap/tili` is unaffected by any of
+            this (Homebrew's `curl` download doesn't set macOS's
+            quarantine flag). If you download `tili.app` directly from
+            this page instead, Gatekeeper will block it on first launch;
+            run `xattr -d com.apple.quarantine tili.app` or right-click →
+            Open to proceed. Not recommended for daily use before v1.0.
 
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
             for what changed.
