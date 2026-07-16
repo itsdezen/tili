@@ -66,10 +66,8 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
 /// reason. See `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` for that
 /// much rarer sweep.
 ///
-/// This is the third sanctioned exception to "no polling" (see
-/// `tili-daemon/src/main.rs`'s Accessibility-grant wait and
-/// `tili-ax/src/hotkey.rs`'s hotkey-tap retry for the other two) —
-/// documented in `CLAUDE.md`.
+/// This is one of the sanctioned exceptions to "no polling" — the full
+/// list and rationale are documented in `docs/architecture/invariants.md`.
 const RESYNC_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How much a genuine `AppEvent` (app launch/terminate) pushes back the next

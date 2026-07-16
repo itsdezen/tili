@@ -13,8 +13,7 @@ cargo run --bin tili-daemon          # run the daemon directly (not via `cargo i
 cargo run --bin tili -- ping         # run the CLI directly
 ```
 
-Before committing, run the exact gate CI enforces (a red PR blocks merge, so
-run this locally first):
+Before committing, run the exact gate CI enforces (a red PR blocks merge):
 
 ```sh
 cargo fmt --all --check
@@ -22,527 +21,132 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-If `cargo fmt` reformats something, that's expected — just run `cargo fmt`
-(no `--check`) and re-stage. Clippy warnings are hard errors here (`-D
-warnings`); don't `#[allow]` one without a one-line comment explaining why
-(see the `#[allow(dead_code)]` on `Tree` in `tili-tree` for the pattern —
-intentional scaffolding pending a specific milestone, not a shrug).
+If `cargo fmt --check` fails, run `cargo fmt` and re-stage. Clippy warnings
+are hard errors (`-D warnings`); don't `#[allow]` one without a one-line
+comment explaining why (see the `#[allow(dead_code)]` on `Tree` in
+`tili-tree` for the pattern).
 
 `tili-ax` (and anything depending on it) only builds on macOS — it links
-against `AXUIElement`/Core Graphics/Core Foundation. `tili-tree` has zero
-macOS dependencies by design; prefer adding logic there over `tili-ax` when
+against `AXUIElement`/Core Graphics/Core Foundation, and needs full Xcode
+(not just CLT; see CONTRIBUTING.md). `tili-tree` has zero macOS
+dependencies by design; prefer adding logic there over `tili-ax` when
 possible so it stays testable without a Mac.
 
 ## Architecture
 
-This is a Cargo workspace, not a single crate. The split is deliberate and
-the dependency direction is a hard boundary, not just organization:
+This is a Cargo workspace; the crate split and one-way dependency
+direction are hard boundaries. **The full per-crate design notes — with
+the hardware-confirmed findings and history behind every rule below —
+live in one file per crate under
+[docs/architecture/](docs/ARCHITECTURE.md). Read the relevant crate's
+file there before changing event flow, window classification, parking,
+focus sync, polling/timing, multi-monitor handling, or release signing.**
 
 - **`tili-tree`** — the container tree and layout algorithms (Tiles/BSP,
-  Accordion). No `AXUIElement`, no CoreFoundation, no `unsafe`. Everything
-  here operates on plain `Rect`/`WindowId` (a `u32` newtype around the real
-  `CGWindowID`) so it's fully unit-testable without macOS — see
-  `src/tree.rs`'s test module for the actual coverage (insert/remove with
-  parent-split collapsing, i3-style direction `navigate`, `move`'s
-  window-identity `swap_windows`, proportional `layout`, Accordion
-  toggle/cycle/wrap). `insert_window` always wraps the target leaf in a
-  fresh 2-child `Split` rather than flattening into an existing
-  same-orientation split — a deliberate M3 simplification (still a valid,
-  correctly-tiling tree; just not the shallowest possible one — also means
-  a "flat" Accordion built via sequential inserts only ever has 2
-  children, see the M7 accordion tests). `layout(area, gaps)` takes a
-  `Gaps` (outer padding around the whole area, inner spacing between
-  siblings, both `f64` — `tili-config`'s parsed `u32` gaps get converted
-  at the `tili-daemon` boundary since this crate can't depend on
-  `tili-config`). `toggle_layout(from)` (M7) converts `from`'s parent
-  container between `Split` and `Accordion` in place — converting *to*
-  Accordion sets `active` to `from`'s own position so the
-  currently-visible window doesn't change. `focus_in_direction(from, dir)`
-  is the Accordion-aware navigation entry point `WmState` actually calls
-  (not plain `navigate`): if `from`'s parent is an `Accordion`, `dir`
-  cycles (and wraps at the ends) which child is active instead of doing
-  spatial `Split` navigation, since a stack of fully-overlapping children
-  has no inherent left/right/up/down axis.
-- **`tili-ax`** — the only crate allowed to touch the Accessibility API.
-  Depends on `tili-tree` only for geometry types (`Rect`), never for the tree
-  itself. `src/window.rs` owns the single private API call used anywhere in
-  the codebase (`_AXUIElementGetWindow`, to resolve a window's real
-  `CGWindowID`) — keep that call isolated there; don't add other private API
-  usage without a strong reason, since staying public-API-only is what lets
-  tili run without disabling SIP. `window.rs` also owns `WindowKind`
-  (`Standard`/`Dialog`/`Popup`) via `classify_window_kind` — checked before
-  subrole matching (M-fix 0.1.1): a non-regular-activation-policy process
-  (`workspace::is_regular_app`, i.e. no Dock icon/Cmd-Tab entry — the Dock
-  itself, `SecurityAgent`, the screenshot toolbar, ...) presenting a window
-  with no close button is always `Popup` regardless of AX role/subrole,
-  ported from AeroSpace's own unconditional `isWindowHeuristic` rule after
-  live-hardware testing showed system-UI chrome occasionally slipping
-  through the old subrole-only check and getting tiled/re-centered. A
-  missing/ambiguous subrole otherwise falls back to whether the window has
-  *any* chrome button (close/fullscreen/zoom/minimize), not just
-  fullscreen. `tili-daemon/src/state.rs`'s `SYSTEM_UI_BUNDLE_IDS` is a
-  second, belt-and-suspenders bundle-id denylist forcing
-  `FloatingRuleMode::Ignore` for a few specific confirmed cases, in case the
-  general signal above doesn't apply to some future process. `AxWindow::set_frame`/`set_position`/
-  `focus` (also in `window.rs`) are the only place real windows get
-  moved/resized/raised — `set_frame` sets position before size (some apps
-  clamp size based on current position), `set_position` only moves (used to
-  park a window off-screen without needlessly resizing it, M4), and both
-  writes are best-effort (`let _ =` on the AX result; a window that refuses
-  a write is left alone, matching every other AX-based WM). Both also update
-  the cached `frame` field to match what was just written, so
-  `WmState::list_windows` reflects reality without a wasted AX read-back —
-  this is why `WindowFrameSetter::set_frame` takes `&mut AxWindow`.
-  `src/frame_setter.rs` defines the `WindowFrameSetter` trait — every place
-  that moves/resizes a real window must go through `dyn WindowFrameSetter`,
-  not call `AxWindow::set_frame` directly. v1 only implements
-  `InstantFrameSetter`; this trait is the seam a future animated setter
-  plugs into without touching layout code. `src/display.rs` (M9)
-  enumerates every connected display via `CGDisplay::active_displays()` —
-  `list_monitors()` is re-run fresh on every call (nothing cached) so
-  hot-plug/unplug just falls out of calling it again; each `Monitor`'s
-  usable `frame` is its full `CGDisplay` bounds minus a hardcoded menu-bar
-  inset applied only when `is_main` (secondary displays don't carry a menu
-  bar). This is a deliberate, documented simplification over real
-  `NSScreen.visibleFrame` (which would be more precise about notches/Dock
-  placement but requires flipping between `NSScreen`'s bottom-left-origin
-  coordinate space and AX/`CGDisplay`'s top-left-origin one — judged not
-  worth the risk for what M9 needs). `spawn_display_watcher()` registers a
-  `CGDisplayRegisterReconfigurationCallback` on its own dedicated
-  `CFRunLoop` thread (same reasoning as the NSWorkspace/AX watchers) and
-  just signals "something changed, re-enumerate" per callback — it doesn't
-  interpret `CGDisplayChangeSummaryFlags`. `src/workspace.rs`
-  bridges `NSWorkspace` app-launch/quit notifications via `objc2`/
-  `objc2-app-kit` — note it spawns its own dedicated `CFRunLoop` thread,
-  since a process without `NSApplication` needs *some* thread pumping a run
-  loop to receive Cocoa notifications at all (same reason `axuielement`'s own
-  `AXNotificationStream` does the same for AX notifications). It also has
-  `bundle_id_for_pid` (M8, via `NSRunningApplication`) — `enumerate.rs`
-  resolves this once per process and shares it across all of that process's
-  `AxWindow`s, rather than once per window, since it's used to match
-  floating rules. `src/watch.rs` ties both together into
-  `spawn_event_watcher()`, which subscribes each running app to window
-  lifecycle notifications and emits a single coarse
-  `WmEvent::WindowsChanged { pid }` per change — callers re-read that
-  process's windows via `list_windows_for_pid` rather than trying to
-  interpret individual notification payloads (this sidesteps having to
-  reason about whether a specific `AXUIElement` is still valid to query at
-  the exact moment its destroyed-notification fires). The same file's
-  250ms reconciliation tick (`resync_watchers`) also drives two fixes added
-  in 0.1.1: it cross-checks each watched pid's kernel-level liveness via
-  `libc::kill(pid, 0)` (independent of `NSWorkspace`, which the primary
-  termination notification and this tick's own pre-existing backstop both
-  already depend on — closing a gap where both could go stale together for
-  a backgrounded, windowless pre-existing app); and it tracks
-  `workspace::frontmost_app_pid()` across ticks, emitting
-  `WmEvent::FrontmostAppChanged { pid }` on an edge-triggered change — the
-  only signal that catches Cmd-Tab or a Mission Control/Control Center
-  click switching to an app whose window lives in a parked workspace, since
-  neither `NSWorkspaceDidActivateApplicationNotification` (dead for this
-  process, see below) nor per-window `WindowFocused` reacts to a pure
-  OS-level frontmost change. `src/hotkey.rs` (M6)
-  is the global hotkey capture: a `CGEventTap` on its own dedicated
-  `CFRunLoop` thread (same reasoning as the NSWorkspace/AX watchers above),
-  which consumes (drops) a keypress if it's in the caller-supplied
-  `active_bindings` set and passes everything else through untouched.
-  `parse_key_combo` turns a KDL key string like `"alt-shift-h"` into a
-  `KeyCombo` (`key_code_for_name` is the exhaustive keycode table — extend
-  it there if a config references a key name it doesn't recognize).
-  `active_bindings` is an `Arc<Mutex<HashSet<KeyCombo>>>` because the
-  event-tap callback must decide Keep-vs-Drop *synchronously* — it can't
-  `.await` a round-trip to `tili-daemon`'s single owning loop to ask "is
-  this bound?" This is the one place in the codebase with a shared `Mutex`
-  instead of message-passing into one owner; see `tili-daemon`'s
-  `sync_active_combos` for how it's kept from drifting. `src/mouse.rs`
-  (M10) has `warp_cursor_to` (`CGDisplay::warp_mouse_cursor_position`, for
-  `mouse-follows-focus`) and `spawn_mouse_watcher` — another
-  `CGEventTap`, this one `ListenOnly` on `kCGEventMouseMoved` for
-  `focus-follows-monitor`, throttled to one position report per 80ms via a
-  *thread-local* `Cell<Instant>` (not a shared `Mutex` — this callback
-  only ever runs on its own dedicated OS thread, so there's nothing to
-  synchronize) so mouse activity in general can't flood the daemon's
-  `select!` loop with one message per pixel of travel.
-- **`tili-config`** — KDL parsing/validation into a `Config` struct, plus
-  file-watch hot-reload. `src/schema.rs` has the types and `parse()`,
-  including `keybindings mode="..." { bind "key" "command" }` blocks (M6)
-  and `floating-rules { rule app-id="..." title="regex"? { ... } ...
-  defaults { ... } }` (M8) — `title` stays a plain `String` here, not a
-  compiled `Regex`, so this crate doesn't need a regex dependency just to
-  hold a pattern; `tili-daemon` compiles it. `workspace-rules { rule
-  app-id="..." workspace="name" ... }` is a separate, independent section
-  — both fields required, no `title`/sizing/`mode`, since it's a purely
-  event-driven "which workspace does this app land on" rule with nothing
-  to do with tile-vs-float — parsed by its own `parse_workspace_rules`,
-  not folded into `parse_floating_rules`. Neither section validates
-  `workspace` names here (this crate has no cross-section validation
-  anywhere, and no error-reporting path for semantic issues, only KDL-
-  syntax ones) — `tili-daemon` checks it names a declared workspace, the
-  same way it already resolves `settings.default-workspace`. Unrecognized
-  top-level
-  sections are still silently ignored, not rejected, so a config can be
-  written against the full target schema before the parser catches up —
-  see README.md's config preview vs. `example/tili.kdl` for "aspirational
-  full schema" vs. "what's actually parsed today." **KDL v2 booleans are
-  `#true`/`#false`** (a `#`-prefixed keyword, to disambiguate from bare
-  identifiers) — bare `true`/`false` is a parse error, easy to get wrong
-  when writing test fixtures or example configs; there's a test guarding
-  against forgetting this (`parses_settings_and_default_layout`).
-  `src/watch.rs`'s `spawn_config_watcher` is deliberately synchronous
-  (`std::sync::mpsc`, not tokio) so this crate stays runtime-agnostic —
-  `tili-daemon` bridges it into its `tokio::select!` loop itself, the same
-  pattern used for `tili-ax`'s NSWorkspace/AX event sources. It watches the
-  config file's *containing directory*, not the file itself, since editors
-  that save via temp-file-then-rename can otherwise orphan the watch on the
-  old inode. A parse error during a reload is logged and dropped — the
-  caller's previous `Config` keeps applying.
-- **`tili-ipc`** — `Command`/`Response` types shared by the daemon and CLI,
-  plus the socket path/framing convention. This is the only crate both
-  `tili-daemon` and `tili-cli` depend on in common — protocol changes belong
-  here, not duplicated in both binaries. `src/parse.rs`'s `parse(s: &str) ->
-  Command` (M6) turns a keybinding's command string (`"focus left"`,
-  `"mode resize"`) into a `Command` — infallible by design, an unrecognized
-  string becomes `Command::Raw` rather than a parse error, so a config
-  referencing a command ahead of its milestone (or with a typo) still loads
-  and just fails at `dispatch()` time with "not implemented yet" instead of
-  refusing to start the daemon.
-- **`tili-daemon`** — the actual window manager process. `src/state.rs` holds
-  `WmState`: the live `AxWindow` handles themselves (not just cached
-  metadata — M3 needs the real `AXUIElement` to move/focus/park a window),
-  one `tili_tree::Tree` **per workspace** (M4) for *tiled* windows, and a
-  `placements: HashMap<WindowId, Placement>` index (M8 — `Placement` is
-  just `{ workspace, floating }`) giving O(1) "which workspace owns this
-  window, and is it tiled or floating" instead of scanning every
-  workspace's tree (M4 through M7's approach). Floating windows (M8:
-  matched a `floating-rules` entry at creation time, via
-  `compute_floating_frame`, which checks `AxWindow::bundle_id()` against
-  each compiled rule in order and computes a centered/sized `Rect` from the
-  rule's or the config's `defaults`' width/height-ratio) live entirely
-  outside any `Tree` — floating ones only get repositioned at creation and
-  when their workspace becomes active again, not on every layout-affecting
-  event, so a user's manual drag of a floating window isn't undone by, say,
-  a gap change. `workspace_focus` remembers each workspace's last-focused
-  node so switching back restores where you left off. A new window joins
-  the active workspace next to the current focus (if tiled) or just gets
-  centered (if floating) *unless* it matches a `workspace-rules` entry
-  (`matching_workspace_rule`, checked via `AxWindow::bundle_id()` — kept
-  entirely separate from `matching_floating_rule`, since which workspace a
-  window lands on has nothing to do with whether it tiles or floats).
-  `apply_windows_changed` resolves that into a `target_workspace` and
-  hands off to `place_new_window`, which inserts into that workspace's own
-  `Tree` (keying its focus-hint lookup off `target_workspace`, not
-  whatever's active, so it still respects where focus was last left there)
-  or, for a floating window, just records the `Placement` against it. If
-  `target_workspace` isn't the one active on the focused monitor, the
-  window is parked immediately and `resync_workspace_if_visible_elsewhere`
-  (a fourth "thickness of relayout," alongside
-  `relayout_active`/`relayout_monitor`/`relayout_all_visible` below)
-  checks whether it's visible on some *other* monitor and, if so,
-  relayouts/repositions it there right away instead of leaving it parked
-  until an unrelated later switch — `move_focused_to_workspace` uses the
-  same helper for the same reason.
-
-  **M9 — multi-monitor.** `active_workspace: HashMap<u32, String>` maps
-  each connected monitor's id (`tili_ax::Monitor::id`) to whichever
-  workspace it's currently showing — a workspace absent from this map is
-  parked, wherever it last was. `focused_monitor: u32` is which one
-  `Focus`/`Move`/`WorkspaceSwitch`/layout commands actually target;
-  `relayout_active`/`active_tree`/`active_tree_mut` all resolve through it
-  (via `active_workspace_name()`), so most of the pre-M9 code didn't need
-  to change — only `switch_workspace`, `apply_windows_changed`, and
-  `move_focused_to_workspace` needed to become monitor-name-aware.
-  `Command::FocusMonitor` (`focus_monitor_next`) is the *only* thing that
-  changes `focused_monitor`; it cycles through `self.monitors`, no-op
-  under two. `switch_workspace` swaps with whatever monitor is already
-  showing the target workspace, if any — two monitors can never display
-  the same workspace at once, since each has its own `Tree` layout
-  computed against its own frame. `on_displays_changed` (called from
-  `main.rs` on every `spawn_display_watcher` signal) is the hot-plug/
-  unplug handler: a disconnected monitor's workspace gets parked and its
-  slot dropped (same mechanics as switching away from it — nothing is
-  lost, just no longer shown anywhere); a newly connected monitor gets a
-  fresh empty `"monitor-<id>"` workspace; every still-visible workspace
-  gets re-laid-out afterward since frames may have changed even for
-  monitors that stayed connected. `relayout_active`/`relayout_monitor`/
-  `relayout_all_visible` are three thicknesses of "recompute and apply
-  frames" — most callers only need the focused monitor (`relayout_active`),
-  but anything that could touch a workspace visible on a *different*
-  monitor (app termination, config reload) uses `relayout_all_visible`.
-  `park()` targets `tili_ax::parking_position` — a window's origin lands
-  just a point inside the main monitor's own bottom-right corner (not
-  pushed *outside* every monitor's bounds, `combined_bounds`'s original
-  purpose): confirmed on real hardware that AppKit clamps a
-  `kAXPositionAttribute` write requesting somewhere totally unreachable
-  back to near a real screen's edge regardless of how far outside it's
-  requested (it only constrains the origin, not the window's full frame).
-  Keeping the origin legitimately on-screen and letting the window's own
-  size extend past the corner (a technique other AX-based tiling WMs use
-  too) avoids that clamp entirely instead of fighting it.
-  Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
-  parsed since M5) is intentionally still unwired — M9's bar is
-  hot-plug/unplug safety, not that finer-grained UX.
-
-  **M10 — mouse-follows-focus / focus-follows-monitor.**
-  `mouse_follows_focus`/`focus_follows_monitor` are plain `bool`s set from
-  `config.settings` in `apply_config` (previously parsed but never read
-  anywhere, since M5). `raise_focused` is the single place that warps the
-  cursor when `mouse_follows_focus` is on — every focus-changing path
-  (`focus`, `move_focused`, `switch_workspace`'s restore step) already
-  funnels through it, so this didn't need duplicating per call site.
-  `on_mouse_moved(x, y)`, called from `main.rs` on every throttled
-  position report from `tili_ax::spawn_mouse_watcher`, is a no-op unless
-  `focus_follows_monitor` is on; when it is, a cheap point-in-rect check
-  against the already-cached `self.monitors` (no AX/CG call on the hot
-  path) updates `focused_monitor` if the cursor's now over a different
-  connected monitor — same effect as an explicit `Command::FocusMonitor`.
-
-  `focus`/`move_focused` are the only places that call `AxWindow::focus()`
-  (real OS focus/raise); nothing calls it automatically on window creation,
-  specifically to avoid focus-stealing every already-open window when the
-  daemon starts up and gets seeded with the apps already running.
-  `focus`/`move_focused` go through `tili_tree::Tree::focus_in_direction`
-  (not plain `navigate`), and both now always call `relayout_active`
-  afterward (M7) — cycling an Accordion's active child changes what's
-  actually visible, so it's not just a focus-pointer update anymore the
-  way plain `Split` navigation is. `toggle_layout`/`set_layout` (M7) wrap
-  `Tree::toggle_layout` for `Command::LayoutToggle`/`LayoutSet`; `set_layout`
-  is a no-op if the container's already the requested kind, since there
-  are only two kinds and "set" is just "toggle away from the other one."
-  `apply_config` updates `gaps`/`workspace_gaps` from a loaded or
-  hot-reloaded `tili_config::Config`, creates any workspace it declares
-  (without switching to it, so a reload never yanks focus off whatever's on
-  screen), and rebuilds `mode_bindings` (M6: `HashMap<mode name,
-  HashMap<KeyCombo, Command>>`) from `config.keybindings`.
-  `Command::ModeEnter`/`ModeExit` switch `current_mode`;
-  `resolve_hotkey(combo)` looks a press up in the current mode's table, and
-  `active_key_combos()` returns just the keys (for syncing the `Mutex` the
-  hotkey tap reads — see `tili-ax`'s `hotkey.rs`). `src/dispatch.rs` has
-  the single `dispatch(&mut WmState, Command) -> Response` function — both
-  the Unix-socket handler and the global-hotkey handler must call this
-  same function, never a separate code path, or CLI-invoked and
-  hotkey-invoked behavior can drift apart. `Command::Shutdown` is the one
-  deliberate exception — it's process lifecycle, not a `WmState` mutation,
-  so both `main.rs`'s socket-accept and hotkey `select!` arms check for it
-  and `break` the loop directly instead of routing it through `dispatch()`
-  (which would have nowhere to signal "please exit the process" from).
-  `dispatch()` itself calls `WmState::sync_focus_from_frontmost()` before
-  the command match — resolves which window real macOS currently considers
-  focused (via `tili_ax::workspace::frontmost_app_pid`, an
-  `AXUIElementCreateSystemWide`-based query) and updates `workspace_focus`
-  synchronously, immediately before that command runs. This is deliberately
-  not a reactive background sync triggered by an event arriving whenever —
-  confirmed on real hardware that a background poll/notification updating
-  focus asynchronously has an unavoidable race against the very next
-  hotkey press, since there's no ordering guarantee between "the
-  background sync noticed the click" and "the keypress got processed."
-  Other AX-based tiling WMs resolve this the same way, synchronously at
-  the top of every command — this is the fix for a long-reported "the
-  first direction key press after switching windows manually does
-  nothing/goes the wrong way" bug that several
-  reactive-sync attempts (an AX per-window notification, then an
-  `NSWorkspaceDidActivateApplicationNotification` subscription — confirmed
-  to never fire for a process like this one with no `NSApplication`
-  instance, unlike the process-lifecycle Launch/Terminate notifications,
-  which don't depend on window-server UI-activation machinery — then a
-  poll on `watch.rs`'s resync tick) all failed to fully close.
-  `src/main.rs` is one
-  `tokio::select!` loop merging socket accepts,
-  `tili_ax::spawn_event_watcher()`'s channel, the config-reload bridge, the
-  hotkey-tap bridge, the display-watcher bridge (M9), and the mouse-watcher
-  bridge (M10) — no locks around `WmState` itself, because only one branch
-  of the loop ever touches it at a time; `sync_active_combos` is called
-  after every branch that could change the active mode/bindings, to keep
-  the hotkey tap's `Mutex<HashSet<KeyCombo>>` from drifting out of sync
-  with what `WmState` actually has bound. `ensure_starter_config_exists`
-  (M10) writes `example/tili.kdl` (via `include_str!`) to
-  `~/.config/tili/tili.kdl` before the first `tili_config::load` if
-  nothing's there yet — best-effort, a write failure just falls back to
-  `Config::default()` like before M10. `handle_event`'s
-  `WmEvent::FrontmostAppChanged { pid }` arm (0.1.1) calls
-  `WmState::reveal_frontmost(pid)`, the only reaction to that event — it
-  mirrors `summon`'s body (resolve a window, switch to/reveal its
-  workspace or just retarget `focused_monitor` if already visible
-  elsewhere, then raise it) but resolves the target window via
-  `AxWindow::focused_id_for_pid(pid)` instead of a title/bundle-id text
-  query, and silently no-ops instead of erroring since there's no CLI
-  caller to report a failure to.
-- **`tili-cli`** — thin socket client only (`ping`, `list-windows`,
-  `focus <dir>`, `move <dir>`, `list-workspaces`, `workspace <name>`,
-  `move-to-workspace <name>`, `layout <toggle|tiles|accordion>`,
-  `focus-monitor`, `list-monitors`, `stop`, `status`). The
-  package is named `tili-cli` but the binary itself is named `tili` (see
-  the `[[bin]]` section in its
-  `Cargo.toml`). No business logic belongs here — if you're tempted to add
-  logic to the CLI, it probably belongs in `tili-daemon` behind a `Command`
-  instead. `print_response` needs an `ExpectedPayload` hint per subcommand
-  since `Response::OkWithPayload` carries an untyped `serde_json::Value` —
-  add a new variant there (not JSON-shape sniffing) when a command gets a
-  new payload type. Two exceptions to "no business logic here," both
-  intercepted in `main()` before the socket-connecting code path (each
-  `return`s instead of falling through to the generic `send()`/
-  `print_response` path):
-  - `tili start`/`stop` manage tili-daemon's LaunchAgent entirely on the
-    local filesystem, never touching the daemon's socket. `start_daemon()`
-    resolves `tili-daemon` relative to the running `tili` binary's own
-    directory (`daemon_binary_path()`, via `std::env::current_exe()`, not
-    `PATH` — a LaunchAgent's environment doesn't guarantee one), writes
-    `~/Library/LaunchAgents/com.tili.daemon.plist` (`RunAtLoad` +
-    `KeepAlive` both `true`), and `launchctl load -w`s it — this is the
-    *only* way to run tili-daemon; there's no separate foreground mode.
-    `stop_daemon()` is the reverse: `launchctl unload -w` then remove the
-    plist. Unloading (not just killing the process) is load-bearing —
-    `KeepAlive` only respawns the job while it stays loaded, so `tili stop`
-    has to unload before the daemon can actually stay down.
-  - `tili status` *does* talk to the socket (via `Command::Ping`) but gets
-    its own wording instead of the generic "couldn't reach daemon" error
-    path.
-- **`tili-menubar`** — an `NSStatusItem` badge showing the focused
-  monitor's active workspace, plus a dropdown to switch workspaces, open
-  the config file, or quit. `src/badge.rs`'s `image_for` renders the
-  badge as a solid rounded-pill `NSImage` with the text "knocked out"
-  (`NSCompositingOperation::DestinationOut`) so the menu bar shows
-  through in the shape of the letters, then marks it a template image so
-  AppKit tints it correctly for light/dark/highlighted state — a leading
-  filled-dot glyph is drawn at its own smaller font size with a computed
-  baseline offset so it lines up with the workspace name's visual center
-  instead of sitting low. `src/menu.rs`'s `MenuState` tracks the last-
-  applied `(current workspace, workspace name list)` key so `apply_snapshot`
-  only rebuilds the live `NSMenu` when that key actually changes (rebuilding
-  unconditionally on every tick previously caused menu clicks to fire on
-  their own with zero user interaction) — the badge title and visibility
-  are still updated every tick regardless, since those are cheap. A
-  daemon-unreachable poll result (`None`) hides the status item entirely
-  rather than leaving a stale workspace name on screen. `src/ipc.rs`
-  duplicates `tili-cli`'s own socket framing rather than sharing it (same
-  precedent as `tili_ipc::default_socket_path`'s doc comment) and adds
-  `wait_for_change`, sent as `Command::WaitForChange` — this blocks
-  server-side (via `tili-daemon/src/main.rs`'s `change_notify:
-  Arc<tokio::sync::Notify>`, spawned into its own task per connection so
-  it doesn't block the main `select!` loop) until something actually
-  changes or a 30s internal timeout fires, so `tili-menubar` learns about
-  workspace/monitor changes the instant they happen instead of polling —
-  `main.rs` runs this on a dedicated background thread in a loop, feeding
-  results to the main thread over an `mpsc::channel` drained by a cheap
-  50ms `NSTimer` tick (not itself a poll interval — the channel is
-  normally empty; real work only happens right after `wait_for_change`
-  unblocks). The one deliberate exception: a 1s backoff between reconnect
-  attempts while the daemon is unreachable at all (not running, or
-  between `tili stop`/`tili start`) — there's no notification to wait on
-  when there's no connection to notify over. `src/actions.rs` handles
-  menu clicks (`workspace:<name>` switches, `open-settings` opens the
-  config via `$EDITOR`/`open`/`open -a TextEdit` in that fallback order,
-  `quit` runs `tili stop` before exiting this process too) on its own
-  background thread, since none of those reactions need the main thread.
-  `tili-cli`'s `tili start`/`stop`/`uninstall` manage this binary's
-  LaunchAgent alongside the daemon's own, so the badge's lifecycle never
-  has to be driven separately — see `tili-cli`'s own entry below.
-- **`xtask`** — release/signing tooling (M11). `bundle` wraps
-  `tili-daemon`/`tili` in a minimal `tili.app` at
-  `target/<target>/release/tili.app` (bundle id `com.tili.daemon` — the
-  same id `tili-cli`'s LaunchAgent uses, M10). `codesign` signs it with
-  hardened runtime + `xtask/entitlements.plist` (a bare `<dict/>` —
-  **keep it free of XML comments**; `codesign`'s entitlements parser,
-  `AMFIUnserializeXML`, is much stricter than a normal XML parser and
-  rejects well-formed comments with an opaque "syntax error near line N").
-  `package` runs `bundle`, then `codesign` only if `TILI_SIGN_IDENTITY` is
-  set in the environment, then tars + sha256s — the single command
-  `release.yml`'s `build` job calls per target. Certificate generation
-  itself is deliberately *not* automated anywhere (see CONTRIBUTING.md's
-  "Release Engineering" section) — it's a one-time, human, Keychain
-  Access step, because the entire point of the self-signed-cert strategy
-  is that the identity never changes; automating its creation would make
-  it too easy to accidentally regenerate (which resets every user's
-  Accessibility grant). `Formula/tili.rb` here is a copy of the real
-  formula that lives in the separate `itsdezen/homebrew-tap` repo (not
-  auto-published — see that file's own header comment for the sync
-  process).
+  Accordion). No `AXUIElement`, no CoreFoundation, no `unsafe`; operates
+  on plain `Rect`/`WindowId` so it's fully unit-testable without macOS.
+  Callers use `focus_in_direction` (Accordion-aware), not plain `navigate`.
+- **`tili-ax`** — the only crate allowed to touch the Accessibility API;
+  depends on `tili-tree` only for geometry types. `src/window.rs` owns the
+  single private API call in the codebase (`_AXUIElementGetWindow`) plus
+  window classification (`WindowKind`); `src/frame_setter.rs` defines
+  `WindowFrameSetter` — the seam every real frame write goes through.
+  Each OS event source (`workspace.rs`, `watch.rs`, `display.rs`,
+  `hotkey.rs`, `mouse.rs`) runs its own dedicated `CFRunLoop` thread and
+  only sends messages.
+- **`tili-config`** — KDL parsing/validation into `Config`, plus
+  file-watch hot-reload. Runtime-agnostic (`std::sync::mpsc`, not tokio);
+  no cross-section semantic validation (that's `tili-daemon`'s job).
+  **KDL v2 booleans are `#true`/`#false`** — bare `true`/`false` is a
+  parse error; easy to get wrong in test fixtures and example configs.
+- **`tili-ipc`** — `Command`/`Response` types shared by daemon and CLI,
+  plus socket path/framing. Protocol changes belong here, never duplicated
+  in both binaries. `parse.rs` is infallible by design — unknown command
+  strings become `Command::Raw` and fail at `dispatch()` time, so a typo'd
+  config still loads.
+- **`tili-daemon`** — the window manager process. `state.rs` holds
+  `WmState`: live `AxWindow` handles, one `Tree` per workspace for tiled
+  windows, a `placements` index for O(1) window→workspace lookup, and
+  floating windows outside any `Tree`. `dispatch.rs` has the single
+  `dispatch(&mut WmState, Command) -> Response` both the socket and hotkey
+  paths call (`Command::Shutdown` is the one documented exception — it's
+  process lifecycle, handled in `main.rs`'s loop). `dispatch()` syncs
+  focus from real macOS frontmost state synchronously before every
+  command — deliberately not a reactive background sync (race-prone;
+  see docs/architecture/tili-daemon.md). `main.rs` is one `tokio::select!` loop; no
+  locks around `WmState`, only one branch touches it at a time.
+- **`tili-cli`** — thin socket client; the binary is named `tili`. No
+  business logic here — new behavior belongs in `tili-daemon` behind a
+  `Command`. Two documented exceptions: `tili start`/`stop` (LaunchAgent
+  management, filesystem-only) and `tili status`'s custom wording.
+- **`tili-menubar`** — `NSStatusItem` workspace badge; stays in sync via a
+  server-side long-poll (`Command::WaitForChange`), not polling. Its
+  LaunchAgent is managed by `tili start`/`stop`/`uninstall` alongside the
+  daemon's.
+- **`xtask`** — release/signing tooling: `bundle`/`codesign`/`package`
+  build a signed `tili.app`. `xtask/entitlements.plist` must stay free of
+  XML comments (`codesign`'s parser rejects them). Certificate generation
+  is deliberately manual — regenerating the cert resets every user's
+  Accessibility grant (see CONTRIBUTING.md's Release engineering).
 
 ## Project status
 
-tili shipped its first release (v0.1.0) with a complete, daily-drivable
-feature set — see [ROADMAP.md](ROADMAP.md) for what's shipped and what's
-planned next, and check that file before assuming a feature exists or
-doesn't.
+tili has shipped (v0.1.x) with a complete, daily-drivable feature set —
+see [ROADMAP.md](ROADMAP.md) for what's shipped and what's planned, and
+check that file before assuming a feature exists or doesn't.
+[docs/BLUEPRINT.md](docs/BLUEPRINT.md) holds the design reference for
+planned-but-unshipped features.
 
-Key non-negotiable design invariants (from the architecture, not just style
-preference):
-- No private Accessibility/window APIs beyond the one documented
-  `_AXUIElementGetWindow` call in `tili-ax/src/window.rs`.
-- No polling — the daemon reacts to AXObserver/NSWorkspace/display
-  notifications (`tili-ax`'s `watch.rs`/`workspace.rs`), it doesn't loop and
-  check state. Four sanctioned, narrowly-scoped exceptions:
-  `tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap` retries installing the
-  `CGEventTap` every few seconds for the process's whole lifetime, since
-  Input Monitoring can be granted at any point after the daemon starts
-  with no accompanying event to react to; `tili-ax/src/watch.rs`'s
-  window/app-watcher resync backstop — a cheap 250ms tick (attach/detach
-  watchers, no relayout) plus a debounced-since-quiet full-window resync
-  capped at 20s (`FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL`) — since
-  `NSWorkspace` launch/terminate notifications and `AXObserver`
-  window-level notifications have both been observed to occasionally
-  never fire; and `tili-ax/src/display.rs`'s `spawn_display_watcher`, which
-  bounds its `CFRunLoopRun` into `RESOLUTION_POLL_INTERVAL` (1s) chunks and
-  re-diffs `list_monitors()` after every wake — confirmed on real hardware
-  (temporary debug logging, since removed) that
-  `CGDisplayRegisterReconfigurationCallback` reliably fires for hot-plug/
-  unplug and sleep/wake but never fires at all for a resolution-only change
-  (same monitor id, no add/remove) in this process, which has no
-  `NSApplication`/UI-session-activation context by design; and
-  `tili-daemon/src/main.rs`'s `maintenance_tick`, an unconditional 30ms
-  `tokio::time::interval` branch of the main `select!` loop. Unlike the
-  other three, this isn't a fallback for a notification that sometimes
-  doesn't fire — every pid it processes already arrived via a real
-  AXObserver/NSWorkspace push into `pending_pids`; the tick is purely a
-  debounce/coalescing point (a pid re-signaled before its tick folds into
-  that one rescan instead of triggering a second) shared with rechecking
-  `pending_removal`'s grace-period expiry, so two "a little time has
-  passed, go recheck something" concerns don't need two branches. Per-tick
-  cost when idle (`pending_pids` empty, nothing due for removal) is one
-  `HashSet::is_empty()` check plus an O(pending removals) scan, normally
-  zero — CPU sampling on real hardware during the v0.1.7 investigation
-  (see CHANGELOG.md) confirmed this tick wasn't a meaningful CPU cost;
-  `display.rs`'s `spawn_display_watcher` was (that release fixed a bug
-  where its `CFRunLoop::run_in_mode` call returned immediately instead of
-  blocking for `RESOLUTION_POLL_INTERVAL`, sustaining ~40% CPU). Don't add
-  a fifth polling loop without a similarly hard constraint forcing it.
-  Scoped to `tili-daemon`'s own event loop
-  specifically — `tili-cli`'s `wait_for_daemon_ready` (a short-lived
-  foreground wait with clear exit conditions, watching a *separate*
-  process finish starting) and `tili-menubar`'s reconnect backoff (only
-  active while the daemon is genuinely unreachable, see its own module
-  docs) are outside this invariant by construction, not exceptions to it.
+## Design invariants
 
-  Accessibility permission deliberately has **no** in-process wait/poll of
-  any kind, despite being a permission grant with no accompanying
-  notification either — confirmed on real hardware, across three
-  different mechanisms (plain sleep-based polling, a run-loop-serviced
-  polling thread, and a stable non-ad-hoc signing identity), that an
-  already-running process never reliably observes a grant made after it
-  started; only a freshly launched process's own check reflects reality.
-  `tili-daemon/src/main.rs` checks once at startup and, if not granted,
-  unloads its own LaunchAgent (`stop_self`) and tells the user to run
-  `tili start` again after granting it — no restart loop, no wait, no
-  fifth polling exception. Don't reintroduce an in-process
-  wait/retry/restart for this specific permission without new evidence
-  that changes the above.
-- All real window-frame mutations go through `WindowFrameSetter`, never a
-  direct AX API call from daemon/tree code.
-- Hotkey-triggered and socket-triggered commands both go through
-  `dispatch()` — no parallel command-handling path. The hotkey tap's
-  `active_bindings: Arc<Mutex<HashSet<KeyCombo>>>` (`tili-ax/src/hotkey.rs`)
-  is the *one* sanctioned exception to "no locks, single owning loop" — a
-  `CGEventTap` callback must decide synchronously whether to consume a
-  keystroke and can't await a round-trip into `WmState`'s loop to find out.
-  Don't add a second one without a similarly hard constraint forcing it.
+Non-negotiable, from the architecture rather than style preference. The
+rationale (and real-hardware evidence) behind each is in
+[docs/architecture/invariants.md](docs/architecture/invariants.md):
+
+- **No private Accessibility/window APIs** beyond the one documented
+  `_AXUIElementGetWindow` call in `tili-ax/src/window.rs` — this is what
+  lets tili run without disabling SIP.
+- **No polling** — the daemon reacts to AXObserver/NSWorkspace/display
+  notifications. Exactly four sanctioned, narrowly-scoped exceptions:
+  `hotkey.rs`'s event-tap install retry (Input Monitoring can be granted
+  at any time, with no notification); `watch.rs`'s 250ms watcher-resync
+  backstop + capped full resync (both notification sources have been
+  observed to occasionally never fire); `display.rs`'s 1s bounded run-loop
+  re-diff (resolution-only changes never fire the reconfiguration
+  callback in this process); and `main.rs`'s 30ms `maintenance_tick`
+  (pure debounce/coalescing of already-pushed events, near-zero idle
+  cost). Don't add a fifth without a similarly hard constraint.
+- **Accessibility permission gets no in-process wait/poll/restart of any
+  kind** — an already-running process never reliably observes the grant
+  (confirmed across three mechanisms). The daemon checks once at startup
+  and stops itself if not granted. Don't reintroduce a wait without new
+  evidence.
+- **All real window-frame mutations go through `WindowFrameSetter`**,
+  never a direct AX call from daemon/tree code — the future-animation
+  seam.
+- **Hotkey- and socket-triggered commands both go through `dispatch()`**
+  — no parallel command path. The hotkey tap's `active_bindings:
+  Arc<Mutex<HashSet<KeyCombo>>>` is the *one* sanctioned lock (the tap
+  callback must decide synchronously); don't add a second.
+
+## Keeping docs in sync
+
+Every change that alters behavior described in this file,
+`docs/architecture/*.md`, `docs/BLUEPRINT.md`, `ROADMAP.md`, or a code
+comment pointing at them must update that doc **in the same change** —
+these files are trusted as accurate over reading the code, so a stale
+sentence is worse than a missing one. When you ship a planned feature,
+move its entry from ROADMAP.md's planned list (and prune the covered
+design from docs/BLUEPRINT.md) into the relevant
+`docs/architecture/<crate>.md`.
 
 ## Release process
 
-The project ships continuously — a new feature or fix set becomes a release
-whenever it reaches a working, verifiable state, not on a fixed schedule.
-To cut a release: update [CHANGELOG.md](CHANGELOG.md) (`Unreleased` → a
-dated version section), tag `vX.Y.Z` per the plain pre-1.0 SemVer convention
-documented there, and push the tag — `.github/workflows/release.yml`
-re-runs the full gate, builds aarch64/x86_64 binaries, codesigns them, and
-opens a **draft** GitHub release for manual review before publishing. Don't
-hand-sign or ad-hoc-sign a release binary outside that pipeline (see the
-Release Engineering section of the architecture notes for why ad-hoc
-signing is specifically disallowed).
+The project ships continuously — a feature/fix set becomes a release when
+it reaches a working, verifiable state. To cut one: update
+[CHANGELOG.md](CHANGELOG.md) (`Unreleased` → dated version section), bump
+`[workspace.package] version` in `Cargo.toml` to match, tag `vX.Y.Z`, and
+push the tag — `release.yml` re-runs the full gate, builds signed
+aarch64/x86_64 binaries, and opens a **draft** GitHub release for manual
+review. Never hand-sign or ad-hoc-sign a release binary outside that
+pipeline (see CONTRIBUTING.md's Release engineering for why).

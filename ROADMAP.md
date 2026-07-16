@@ -64,5 +64,6 @@ doing eventually, roughly in the order they'd likely land:
   feature needs to reach around it, that's a design smell worth stopping
   for.
 
-See the architecture notes in [CLAUDE.md](CLAUDE.md) for the full
-technical design.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full technical
+design, and [docs/BLUEPRINT.md](docs/BLUEPRINT.md) for the design
+reference behind the planned items above.

@@ -9,7 +9,7 @@ i3-style workflow · public Accessibility API only · Rust · no SIP disable
 [![CI](https://github.com/itsdezen/tili/actions/workflows/ci.yml/badge.svg)](https://github.com/itsdezen/tili/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
-[![Status](https://img.shields.io/badge/status-v0.1.2-brightgreen.svg)](ROADMAP.md)
+[![Release](https://img.shields.io/github/v/release/itsdezen/tili?include_prereleases&color=brightgreen)](https://github.com/itsdezen/tili/releases)
 
 [Getting started](#getting-started) · [Commands](#commands) · [Roadmap](ROADMAP.md) · [Contributing](#contributing) · [Architecture](#architecture)
 
@@ -46,8 +46,7 @@ shortcut.
 
 ## Status
 
-`v0.1.2` is tili's latest release (a fix release on top of `v0.1.0`, tili's
-first public release), and it's already daily-drivable: tiling, workspaces,
+tili is at `v0.1.x` and already daily-drivable: tiling, workspaces,
 hot-reloaded config, built-in hotkeys, floating rules, multi-monitor,
 mouse/focus-follows-monitor, a menu bar workspace badge, and a real signed
 release pipeline. See [ROADMAP.md](ROADMAP.md) for what's planned next.
@@ -65,13 +64,9 @@ tili start
 ```
 
 That's it — `tili start` installs a background LaunchAgent (auto-restart,
-auto-start at login) and then **waits** for tili-daemon to actually finish
-starting before returning — it doesn't just report success the instant
-the LaunchAgent is registered. (Running plain `tili` with no subcommand
-does the same thing — it just asks you to press Enter first, so a typo
-can't silently start the daemon.) Press Ctrl-C any time to stop waiting
-without affecting the daemon itself, which keeps running/waiting
-independently under launchd either way. First run:
+auto-start at login) and **waits** for tili-daemon to actually finish
+starting before returning. Ctrl-C stops the wait without affecting the
+daemon, which keeps running independently under launchd. First run:
 - Triggers the **Accessibility permission** prompt, then the **Input
   Monitoring** one — grant both whenever you get to it; tili waits (up to
   a minute) and reports "running" the moment you do, no restart needed. If

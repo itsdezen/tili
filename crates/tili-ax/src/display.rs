@@ -235,7 +235,7 @@ const RESOLUTION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// case this mirrors), and pure mode-switch reconfiguration events appear to
 /// need that context to be delivered, unlike hot-plug/sleep-wake which don't.
 /// So this is the third sanctioned exception to the "no polling" invariant
-/// (see CLAUDE.md's Project status section) — the run loop below is bounded
+/// (see docs/architecture/invariants.md) — the run loop below is bounded
 /// to `RESOLUTION_POLL_INTERVAL` chunks instead of running forever
 /// unattended, and after every wake (whether from a real callback or a
 /// timeout) it diffs a fresh `list_monitors()` against the last snapshot,
