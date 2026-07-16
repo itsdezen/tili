@@ -148,7 +148,16 @@ mirrors `summon`'s body (resolve a window, switch to/reveal its workspace
 or just retarget `focused_monitor` if already visible elsewhere, then raise
 it) but resolves the target window via `AxWindow::focused_id_for_pid(pid)`
 instead of a title/bundle-id text query, and silently no-ops instead of
-erroring since there's no CLI caller to report a failure to.
+erroring since there's no CLI caller to report a failure to. One
+exception to "always follow": macOS reactivates the previously-frontmost
+app when the current one closes its last window, producing the same kind
+of pid-change edge a real Cmd-Tab does — `reveal_frontmost` tracks
+`last_frontmost_pid` across calls and skips the workspace switch if that
+previous pid no longer owns any live window, so closing the last window
+on a workspace doesn't silently jump the display to wherever that
+reactivated app lives (confirmed on real hardware to otherwise land back
+on `default_workspace` more often than not, since that's typically
+wherever the user was before switching away).
 
 ## Layout commands, config, and dispatch
 

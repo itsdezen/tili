@@ -434,6 +434,12 @@ pub struct WmState {
     /// target. `switch_workspace` updates this on every switch (including a
     /// `WorkspaceBack`-triggered one), so back-and-forth toggles correctly.
     previous_workspace: Option<String>,
+    /// The pid last passed to `reveal_frontmost`, so the next call can tell
+    /// a genuine user-driven app switch (Cmd-Tab, Mission Control) apart
+    /// from macOS reactivating the previous app because the current
+    /// frontmost app just lost its last window — see that function's doc
+    /// comment.
+    last_frontmost_pid: Option<i32>,
 }
 
 impl Default for WmState {
@@ -474,6 +480,7 @@ impl Default for WmState {
             default_root_orientation: None,
             fullscreen_focus: HashMap::new(),
             previous_workspace: None,
+            last_frontmost_pid: None,
         }
     }
 }
@@ -1583,7 +1590,21 @@ impl WmState {
     /// no-op if the pid has no focused window or that window has no
     /// placement (e.g. it's a `Popup`-classified element) — unlike `summon`,
     /// there's no user-facing error to report this to.
+    ///
+    /// One exception to "always follow": macOS itself changes the
+    /// frontmost app when the current one closes its last window — it
+    /// reactivates whichever app was frontmost before, producing the exact
+    /// same kind of pid-change edge `FrontmostAppChanged` fires on for a
+    /// real Cmd-Tab. Blindly following that yanks the display onto whatever
+    /// workspace the reactivated app happens to live in (often wherever the
+    /// user was before switching to the workspace they just emptied) even
+    /// though nothing was asked for. `last_frontmost_pid` distinguishes the
+    /// two: if the previously-seen pid no longer owns any live window at
+    /// all, this change is almost certainly that OS reactivation rather
+    /// than a user gesture, so the workspace jump is skipped.
     pub fn reveal_frontmost(&mut self, pid: i32) {
+        let previous_pid = self.last_frontmost_pid.replace(pid);
+
         let Some(id) = AxWindow::focused_id_for_pid(pid) else {
             return;
         };
@@ -1601,6 +1622,23 @@ impl WmState {
         match visible_on {
             Some(monitor_id) => self.focused_monitor = monitor_id,
             None => {
+                // `None` previous_pid (no prior event this run) never
+                // suppresses — only a *confirmed* "that pid has zero live
+                // windows left" does. Excludes `pending_removal` too, not
+                // just presence in `windows` — a just-closed window sits
+                // there for `removal_grace` before actually dropping out,
+                // so a `FrontmostAppChanged` arriving inside that window
+                // would otherwise still see it as "live" and fail to
+                // suppress.
+                let previous_lost_its_last_window = previous_pid.is_some_and(|prev| {
+                    !self
+                        .windows
+                        .iter()
+                        .any(|(wid, w)| w.pid() == prev && !self.pending_removal.contains_key(wid))
+                });
+                if previous_lost_its_last_window {
+                    return;
+                }
                 if self.switch_workspace(&workspace).is_err() {
                     return;
                 }

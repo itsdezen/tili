@@ -8,6 +8,26 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-07-16
+
+A fix release addressing one issue found after `v0.1.7`.
+
+### Fixed
+
+- **Closing the last window on a non-default workspace silently jumped
+  the display back to the default workspace.** macOS reactivates
+  whichever app was previously frontmost when the current frontmost app
+  closes its last window — the same kind of frontmost-app-changed signal
+  `tili-daemon` uses to follow a real Cmd-Tab/Mission-Control switch onto
+  a parked workspace (`WmState::reveal_frontmost`). With no way to tell
+  the two apart from the OS-level pid change alone, tili blindly followed
+  the reactivation too, most often landing back on whichever workspace
+  was active before the user ever switched away — commonly the default
+  one. `reveal_frontmost` now tracks the previously-seen frontmost pid and
+  skips the workspace switch when that pid no longer owns any live
+  window, since that's a reliable sign of this OS-driven reactivation
+  rather than a genuine user-initiated app switch.
+
 ## [0.1.7] - 2026-07-16
 
 A fix release addressing one issue found after `v0.1.6`.
