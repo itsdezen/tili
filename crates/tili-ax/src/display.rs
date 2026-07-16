@@ -250,11 +250,28 @@ pub fn spawn_display_watcher() -> std::sync::mpsc::Receiver<()> {
 
         let mut last = list_monitors();
         loop {
+            let cycle_start = std::time::Instant::now();
             core_foundation::runloop::CFRunLoop::run_in_mode(
                 unsafe { core_foundation::runloop::kCFRunLoopDefaultMode },
                 RESOLUTION_POLL_INTERVAL,
                 false,
             );
+            // `run_in_mode` returns immediately rather than blocking for
+            // `RESOLUTION_POLL_INTERVAL` whenever this thread's run loop has
+            // no input source/timer registered in `kCFRunLoopDefaultMode`
+            // (documented CoreFoundation behavior) — confirmed on real
+            // hardware via CPU sampling that this leaves the loop re-calling
+            // `list_monitors()` (several synchronous WindowServer `mach_msg`
+            // round-trips each) hundreds of times a second instead of once,
+            // sustaining ~40% of a CPU core at idle. Sleeping out whatever's
+            // left of the interval caps the fallback poll at the intended
+            // 1Hz regardless of how fast `run_in_mode` returns, without
+            // touching the real-time path — `reconfiguration_callback`
+            // still sends on `tx` the instant a real hot-plug/sleep-wake
+            // event fires, independent of this loop's cadence.
+            if let Some(remaining) = RESOLUTION_POLL_INTERVAL.checked_sub(cycle_start.elapsed()) {
+                std::thread::sleep(remaining);
+            }
             let current = list_monitors();
             if current != last {
                 let _ = tx.send(());

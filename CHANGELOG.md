@@ -8,6 +8,34 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-07-16
+
+A fix release addressing one issue found after `v0.1.6`.
+
+### Fixed
+
+- **`tili-daemon` kept ~40% of a CPU core busy at idle, even with zero
+  window/workspace activity, from the moment it started.** `spawn_display_watcher`'s
+  fallback poll loop calls `CFRunLoop::run_in_mode(..., 1s, false)` expecting
+  it to block for close to a second each iteration, then re-checks
+  `list_monitors()`. But `CFRunLoopRunInMode` returns immediately — a
+  documented CoreFoundation behavior — whenever the calling thread's run
+  loop has no input source or timer registered in that mode, which is the
+  case here since `CGDisplayRegisterReconfigurationCallback`'s delivery
+  mechanism doesn't register one. Confirmed via real CPU sampling: only
+  33 of 5955 samples (0.5%) over an 8-second window were inside
+  `run_in_mode` itself, while `list_monitors()` — several synchronous
+  `mach_msg` round-trips to WindowServer (`SLGetActiveDisplayList`,
+  `SLDisplayBounds`, `SLSMainDisplayID`) per call — accounted for the rest,
+  running hundreds of times a second instead of once. The loop now
+  explicitly sleeps out whatever's left of `RESOLUTION_POLL_INTERVAL`
+  after each `run_in_mode` call, capping the fallback poll at its intended
+  1Hz regardless of how fast `run_in_mode` returns. The real-time hot-plug/
+  sleep-wake path (`reconfiguration_callback` sending directly on `tx`) is
+  untouched and still fires instantly. Re-sampled after the fix: 99.97% of
+  the same thread's samples now fall inside `nanosleep`, and measured
+  daemon-wide average CPU dropped from ~40% to ~0.5% on real hardware.
+
 ## [0.1.6] - 2026-07-16
 
 A fix release addressing one issue reported after `v0.1.5`.
