@@ -201,11 +201,11 @@ jobs:
     name: sync Homebrew formula
     needs: publish
     runs-on: ubuntu-latest
-    # Needed to push the "📝 sync Formula/tili.rb" commit back to this
-    # repo's main branch (see below) — this only pushes a branch commit,
-    # never a tag, so it can't retrigger this workflow (`on.push.tags`).
+    # contents: write to push the sync branch (an *unprotected* ref, not
+    # main itself); pull-requests: write to open and merge the PR below.
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -230,19 +230,39 @@ jobs:
 
           echo "TILI_VERSION=$version" >> "$GITHUB_ENV"
 
-      - name: Commit the template copy back to this repo
+      # main is rule-protected ("changes must be made through a pull
+      # request", must pass the "fmt, clippy, test, build" check) — a
+      # direct `git push origin HEAD:main` here is rejected outright for
+      # the default GITHUB_TOKEN identity, which isn't in that ruleset's
+      # bypass list (confirmed on v0.1.7's release run: this step failed
+      # silently every time, leaving the formula stale). Opens a real PR
+      # instead so the *ruleset itself* is satisfied rather than needing a
+      # bypass — ci.yml already runs that exact check on every PR to main.
+      # Deliberately stops at opening the PR rather than merging it
+      # itself: merging main is a real, once-per-release, human-reviewable
+      # change, not something this job should wave through unattended.
+      # Merging is a single "Merge pull request" click in the GitHub UI
+      # once the check goes green — no CLI needed.
+      - name: Open a PR with the formula update
         working-directory: tili
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if git diff --quiet -- Formula/tili.rb; then
-            echo "Formula/tili.rb already up to date, nothing to commit"
+            echo "Formula/tili.rb already up to date, nothing to sync"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          branch="sync-formula-v${TILI_VERSION}"
+          git checkout -b "$branch"
           git add Formula/tili.rb
           git commit -m "📝 sync Formula/tili.rb with v${TILI_VERSION}'s released sha256/version"
-          git push origin HEAD:main
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "📝 sync Formula/tili.rb with v${TILI_VERSION}'s released sha256/version" \
+            --body "Automated formula sync for v${TILI_VERSION} — opened as a PR because main requires one. Merge once the required check passes; see release.yml's sync-homebrew-tap job."
 
       # The real formula homebrew reads (`brew install itsdezen/tap/tili`)
       # lives in a separate `itsdezen/homebrew-tap` repo, not this one —
