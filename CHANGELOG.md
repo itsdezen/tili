@@ -8,6 +8,21 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-16
+
+A fix release addressing one issue found after `v0.1.3`.
+
+### Fixed
+
+- **Config hot-reload never fired when `~/.config/tili/tili.kdl` was a
+  symlink** (e.g. a dotfiles repo managed via stow/chezmoi/a plain `ln -s`).
+  `spawn_config_watcher` watched the literal config path's parent
+  directory, but a write to the real file (elsewhere, through the symlink)
+  never touches that directory, so no filesystem event ever arrived —
+  edits only took effect after a manual `tili stop`/`tili start`. It now
+  resolves the config path with `std::fs::canonicalize` first and watches
+  the real target's directory instead.
+
 ## [0.1.3] - 2026-07-16
 
 A fix release addressing two issues found after `v0.1.2`, plus a small menu
