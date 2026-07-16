@@ -19,10 +19,19 @@ pub fn spawn_config_watcher(path: PathBuf) -> Receiver<Config> {
     let (config_tx, config_rx) = channel();
 
     std::thread::spawn(move || {
-        let Some(parent) = path.parent().map(Path::to_path_buf) else {
+        // Resolve symlinks before picking what to watch: dotfiles managers
+        // (stow, chezmoi, a plain `ln -s`) commonly make `path` itself a
+        // symlink into some other directory (e.g. a dotfiles repo). Writes
+        // to the real file only ever touch *that* directory — the literal
+        // `path`'s parent never sees an event — so watch the resolved
+        // target instead. Falls back to the literal path if it doesn't
+        // exist yet (nothing to resolve).
+        let watched_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+
+        let Some(parent) = watched_path.parent().map(Path::to_path_buf) else {
             eprintln!(
                 "tili-config: config path {} has no parent directory, not watching",
-                path.display()
+                watched_path.display()
             );
             return;
         };
@@ -56,7 +65,7 @@ pub fn spawn_config_watcher(path: PathBuf) -> Receiver<Config> {
             if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                 continue;
             }
-            if !event.paths.iter().any(|p| p == &path) {
+            if !event.paths.iter().any(|p| p == &watched_path) {
                 continue;
             }
             match std::fs::read_to_string(&path) {
