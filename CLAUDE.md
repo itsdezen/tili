@@ -469,7 +469,7 @@ preference):
   `_AXUIElementGetWindow` call in `tili-ax/src/window.rs`.
 - No polling — the daemon reacts to AXObserver/NSWorkspace/display
   notifications (`tili-ax`'s `watch.rs`/`workspace.rs`), it doesn't loop and
-  check state. Three sanctioned, narrowly-scoped exceptions:
+  check state. Four sanctioned, narrowly-scoped exceptions:
   `tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap` retries installing the
   `CGEventTap` every few seconds for the process's whole lifetime, since
   Input Monitoring can be granted at any point after the daemon starts
@@ -486,8 +486,24 @@ preference):
   `CGDisplayRegisterReconfigurationCallback` reliably fires for hot-plug/
   unplug and sleep/wake but never fires at all for a resolution-only change
   (same monitor id, no add/remove) in this process, which has no
-  `NSApplication`/UI-session-activation context by design. Don't add a
-  fourth polling loop without a similarly hard constraint forcing it.
+  `NSApplication`/UI-session-activation context by design; and
+  `tili-daemon/src/main.rs`'s `maintenance_tick`, an unconditional 30ms
+  `tokio::time::interval` branch of the main `select!` loop. Unlike the
+  other three, this isn't a fallback for a notification that sometimes
+  doesn't fire — every pid it processes already arrived via a real
+  AXObserver/NSWorkspace push into `pending_pids`; the tick is purely a
+  debounce/coalescing point (a pid re-signaled before its tick folds into
+  that one rescan instead of triggering a second) shared with rechecking
+  `pending_removal`'s grace-period expiry, so two "a little time has
+  passed, go recheck something" concerns don't need two branches. Per-tick
+  cost when idle (`pending_pids` empty, nothing due for removal) is one
+  `HashSet::is_empty()` check plus an O(pending removals) scan, normally
+  zero — CPU sampling on real hardware during the v0.1.7 investigation
+  (see CHANGELOG.md) confirmed this tick wasn't a meaningful CPU cost;
+  `display.rs`'s `spawn_display_watcher` was (that release fixed a bug
+  where its `CFRunLoop::run_in_mode` call returned immediately instead of
+  blocking for `RESOLUTION_POLL_INTERVAL`, sustaining ~40% CPU). Don't add
+  a fifth polling loop without a similarly hard constraint forcing it.
   Scoped to `tili-daemon`'s own event loop
   specifically — `tili-cli`'s `wait_for_daemon_ready` (a short-lived
   foreground wait with clear exit conditions, watching a *separate*
@@ -505,7 +521,7 @@ preference):
   `tili-daemon/src/main.rs` checks once at startup and, if not granted,
   unloads its own LaunchAgent (`stop_self`) and tells the user to run
   `tili start` again after granting it — no restart loop, no wait, no
-  fourth polling exception. Don't reintroduce an in-process
+  fifth polling exception. Don't reintroduce an in-process
   wait/retry/restart for this specific permission without new evidence
   that changes the above.
 - All real window-frame mutations go through `WindowFrameSetter`, never a
