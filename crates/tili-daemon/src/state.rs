@@ -1202,6 +1202,22 @@ impl WmState {
     /// stayed connected (resolution or arrangement change).
     pub fn on_displays_changed(&mut self) {
         let new_monitors = tili_ax::list_monitors();
+        if new_monitors.is_empty() {
+            // A momentary zero-display enumeration is, as far as observed,
+            // always the whole system going to sleep (lid close with no
+            // external display), not a real user action to react to — there's
+            // nothing to lay out with no displays anyway. Returning here
+            // without touching `self.monitors` keeps it as the pre-sleep
+            // snapshot indefinitely, however long the sleep lasts, so the
+            // eventual wake-time call diffs true before/after state and
+            // `match_monitors`'s rename-pairing (built for exactly this) has
+            // something to pair against instead of nothing — a disconnect
+            // signal processed eagerly right before suspend would otherwise
+            // zero `self.monitors` and strand the reconnect signal with no
+            // baseline to compare against, spuriously creating a fresh
+            // `monitor-<id>` workspace instead of restoring the real one.
+            return;
+        }
         let diff = tili_ax::match_monitors(&self.monitors, &new_monitors);
 
         self.monitors = new_monitors;

@@ -8,6 +8,33 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-07-16
+
+A fix release addressing one issue reported after `v0.1.5`.
+
+### Fixed
+
+- **Closing and reopening a MacBook's lid (system sleep/wake) could strand
+  the active workspace and spawn a fresh, empty `monitor-<id>` workspace
+  instead of restoring the one that was showing before sleep.**
+  `on_displays_changed` committed `list_monitors()`'s result to
+  `self.monitors` unconditionally on every raw
+  `CGDisplayRegisterReconfigurationCallback` signal — including a momentary
+  zero-display enumeration the callback fires as the system sleeps (the
+  built-in display "disconnecting" gets processed and committed before the
+  process itself is suspended for the sleep's actual duration, however long
+  that turns out to be). By the time the display reappeared on wake,
+  `self.monitors` had already been wiped, leaving nothing for
+  `match_monitors`'s origin-distance rename-pairing (built specifically to
+  recognize "same physical display, new `CGDirectDisplayID`" across
+  sleep/wake) to compare against — the reconnect was processed as a
+  brand-new monitor instead. `on_displays_changed` now returns immediately
+  on a fully empty enumeration without touching `self.monitors`, since
+  there's nothing to lay out with zero displays anyway; the pre-sleep
+  snapshot survives intact for however long the sleep lasts, so the
+  eventual wake-time call diffs genuine before/after state and restores the
+  correct workspace.
+
 ## [0.1.5] - 2026-07-16
 
 A fix release addressing two issues found after `v0.1.4`, plus a release-time
