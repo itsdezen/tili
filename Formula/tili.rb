@@ -8,17 +8,17 @@
 class Tili < Formula
   desc "i3-like tiling window manager for macOS"
   homepage "https://github.com/itsdezen/tili"
-  version "0.1.7"
+  version "0.1.8"
   license "MIT"
 
   on_arm do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-aarch64-apple-darwin.tar.gz"
-    sha256 "4f93bb0509220d7f0acb6209dbcef000353f6ec6a194b3e803262703388d8394"
+    sha256 "85f7170eed17773489a0a37bf9d54b07efa70bb778a8058049db5cfbddb9fd63"
   end
 
   on_intel do
     url "https://github.com/itsdezen/tili/releases/download/v#{version}/tili-#{version}-x86_64-apple-darwin.tar.gz"
-    sha256 "95da19c8decebdb45e0d8689cdf81ecbcba0d04c7d7489fdec81909990b5c526"
+    sha256 "89cd6229753dd731742e320247cb13d1352006c3467db967aca738776505db80"
   end
 
   def install
