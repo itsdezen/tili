@@ -1,10 +1,10 @@
 # Kept in sync with the `itsdezen/homebrew-tap` repository's Formula/tili.rb
 # (the one `brew install itsdezen/tap/tili` actually reads — see
 # CONTRIBUTING.md's "Release Engineering" section) — this copy is versioned
-# alongside the code it packages so it's easy to diff against a release,
-# but publishing a change means copying it into that separate repo too
-# (manually today; automating that copy in release.yml's `publish` job is
-# a reasonable future improvement).
+# alongside the code it packages so it's easy to diff against a release.
+# release.yml's `sync-homebrew-tap` job updates both this file and the
+# homebrew-tap copy automatically after every tagged release; don't hand-
+# edit `version`/`sha256` here, they get overwritten on the next release.
 class Tili < Formula
   desc "i3-like tiling window manager for macOS"
   homepage "https://github.com/itsdezen/tili"

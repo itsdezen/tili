@@ -196,3 +196,77 @@ jobs:
 
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
             for what changed.
+
+  sync-homebrew-tap:
+    name: sync Homebrew formula
+    needs: publish
+    runs-on: ubuntu-latest
+    # Needed to push the "📝 sync Formula/tili.rb" commit back to this
+    # repo's main branch (see below) — this only pushes a branch commit,
+    # never a tag, so it can't retrigger this workflow (`on.push.tags`).
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tili
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Update Formula/tili.rb with the released version + sha256s
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          arm_sha=$(cut -d' ' -f1 "dist/tili-${version}-aarch64-apple-darwin.tar.gz.sha256")
+          intel_sha=$(cut -d' ' -f1 "dist/tili-${version}-x86_64-apple-darwin.tar.gz.sha256")
+
+          formula="tili/Formula/tili.rb"
+          perl -0777 -pi -e "s/version \"[^\"]+\"/version \"$version\"/" "$formula"
+          perl -0777 -pi -e "s/(on_arm do.*?sha256 \")[^\"]+(\")/\${1}${arm_sha}\${2}/s" "$formula"
+          perl -0777 -pi -e "s/(on_intel do.*?sha256 \")[^\"]+(\")/\${1}${intel_sha}\${2}/s" "$formula"
+
+          echo "TILI_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Commit the template copy back to this repo
+        working-directory: tili
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Formula/tili.rb; then
+            echo "Formula/tili.rb already up to date, nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/tili.rb
+          git commit -m "📝 sync Formula/tili.rb with v${TILI_VERSION}'s released sha256/version"
+          git push origin HEAD:main
+
+      # The real formula homebrew reads (`brew install itsdezen/tap/tili`)
+      # lives in a separate `itsdezen/homebrew-tap` repo, not this one —
+      # the default GITHUB_TOKEN is scoped to this repo only, so pushing
+      # there needs its own PAT (`HOMEBREW_TAP_TOKEN`, a fine-grained token
+      # with contents:write on itsdezen/homebrew-tap, added as a repo
+      # secret here) — see CONTRIBUTING.md's "Homebrew tap" section.
+      - uses: actions/checkout@v4
+        with:
+          repository: itsdezen/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Push the same formula to itsdezen/homebrew-tap
+        working-directory: homebrew-tap
+        run: |
+          set -euo pipefail
+          cp ../tili/Formula/tili.rb Formula/tili.rb
+          if git diff --quiet -- Formula/tili.rb; then
+            echo "Formula/tili.rb already up to date, nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/tili.rb
+          git commit -m "📝 sync Formula/tili.rb with v${TILI_VERSION}'s released sha256/version"
+          git push origin HEAD:main

@@ -161,11 +161,16 @@ worth it once *any* of:
 ### Homebrew tap
 
 `Formula/tili.rb` in this repo is a **template** — Homebrew taps live in a
-separate `<owner>/homebrew-tap` repository by convention, so publishing a
-release means copying this file's current contents into that repo's
-`Formula/tili.rb` with the real `sha256` values from the just-built
-tarballs (printed by `xtask package`, or read from the `*.tar.gz.sha256`
-files attached to the GitHub release) substituted in. That repository
-doesn't exist as part of this codebase and isn't created automatically by
-any tili tooling — creating it (and deciding whether to automate the copy
-step above) is a separate, deliberate step outside this repo's scope.
+separate `itsdezen/homebrew-tap` repository by convention, so
+`brew install itsdezen/tap/tili` actually reads *that* repo's copy, not
+this one. `release.yml`'s `sync-homebrew-tap` job (runs after `publish`,
+on every tagged release) substitutes the real `version`/`sha256` values
+from the just-built tarballs into both this file and
+`homebrew-tap`'s `Formula/tili.rb`, commits each (`📝 sync Formula/tili.rb
+with vX.Y.Z's released sha256/version`), and pushes — no manual copy step
+needed anymore. That repo isn't created automatically by any tili tooling
+(a one-time human setup, same category as the signing certificate above);
+pushing to it needs a `HOMEBREW_TAP_TOKEN` repo secret here — a
+fine-grained PAT with `contents:write` scoped to `itsdezen/homebrew-tap`
+— since the default `GITHUB_TOKEN` a workflow gets is scoped only to the
+repo it runs in.
