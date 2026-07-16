@@ -8,6 +8,28 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-07-16
+
+A fix release addressing one issue found after `v0.1.8`.
+
+### Fixed
+
+- **Opening Spotlight over an empty workspace and dismissing it with Esc
+  could briefly jump the display to a different workspace before
+  settling back.** `v0.1.8` taught `WmState::reveal_frontmost` to skip a
+  workspace switch when the previously-frontmost pid no longer owns any
+  live window, to tell a real Cmd-Tab apart from macOS reactivating the
+  prior app after the current one closes its last window. Spotlight's
+  search panel is tracked like any other window and lands in whichever
+  workspace is active when it opens, but as AX-ambiguous chrome with no
+  close button it's classified `Popup` — a kind the "still owns a live
+  window" check didn't distinguish from a real window. Closing Spotlight
+  could therefore still read as "the previous pid is still alive," defeat
+  the suppression, and briefly reveal wherever that pid's real workspace
+  was. The check now excludes `Popup` placements specifically, leaving
+  `Minimized`/`NativeFullscreen`/`HiddenApplication` (real, still-open
+  windows in a special display state) counted as before.
+
 ## [0.1.8] - 2026-07-16
 
 A fix release addressing one issue found after `v0.1.7`.
