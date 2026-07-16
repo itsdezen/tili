@@ -1629,12 +1629,26 @@ impl WmState {
                 // there for `removal_grace` before actually dropping out,
                 // so a `FrontmostAppChanged` arriving inside that window
                 // would otherwise still see it as "live" and fail to
-                // suppress.
+                // suppress. Also excludes `Popup` placements (Spotlight's
+                // search panel, Dock context menus, ...): those get tracked
+                // like any other window, landing in whatever workspace was
+                // active when they opened, but they're transient system
+                // chrome rather than a real window the user is looking at —
+                // a still-open one shouldn't count as "the previous pid is
+                // still alive" and defeat the suppression below. Unlike
+                // `Minimized`/`NativeFullscreen`/`HiddenApplication`, which
+                // stay in `self.windows` too but represent a genuinely
+                // still-open window in a special display state, so those
+                // three are deliberately *not* excluded here.
                 let previous_lost_its_last_window = previous_pid.is_some_and(|prev| {
-                    !self
-                        .windows
-                        .iter()
-                        .any(|(wid, w)| w.pid() == prev && !self.pending_removal.contains_key(wid))
+                    !self.windows.iter().any(|(wid, w)| {
+                        w.pid() == prev
+                            && !self.pending_removal.contains_key(wid)
+                            && !matches!(
+                                self.placements.get(wid).map(|p| &p.kind),
+                                Some(PlacementKind::Popup)
+                            )
+                    })
                 });
                 if previous_lost_its_last_window {
                     return;

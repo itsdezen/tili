@@ -157,7 +157,17 @@ previous pid no longer owns any live window, so closing the last window
 on a workspace doesn't silently jump the display to wherever that
 reactivated app lives (confirmed on real hardware to otherwise land back
 on `default_workspace` more often than not, since that's typically
-wherever the user was before switching away).
+wherever the user was before switching away). That "still owns a live
+window" check itself excludes `PlacementKind::Popup` windows (0.1.9) —
+system UI chrome like Spotlight's search panel gets tracked like any
+other window (landing in whatever workspace was active when it opened),
+but it's transient, not a real window the user is looking at, so a
+still-open one shouldn't count as "the previous pid is still alive" and
+defeat the suppression; opening Spotlight over an empty workspace and
+dismissing it with Esc was otherwise enough to trigger the same spurious
+jump. `Minimized`/`NativeFullscreen`/`HiddenApplication` placements are
+deliberately not excluded the same way — those represent a genuinely
+still-open window in a special display state, not transient chrome.
 
 ## Layout commands, config, and dispatch
 
