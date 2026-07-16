@@ -8,6 +8,44 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-16
+
+A fix release addressing two issues found after `v0.1.4`, plus a release-time
+safeguard against the first one recurring.
+
+### Fixed
+
+- **`tili --version` always reported `0.1.0`, no matter which version was
+  actually installed.** `[workspace.package] version` in the root
+  `Cargo.toml` — the source of `CARGO_PKG_VERSION`, which clap embeds into
+  the CLI's `--version` output at compile time — had never been bumped past
+  its initial scaffold value, even though `v0.1.1` through `v0.1.4` all
+  shipped. The version used for release tarball naming and packaging
+  (`xtask package --version <tag>`) came from the pushed git tag, entirely
+  decoupled from this field, so nothing ever caught the drift. Bumped to
+  match this release; `xtask bundle`/`package` now also refuse to build if
+  the release tag doesn't match `Cargo.toml`'s version, so a forgotten bump
+  fails the release instead of silently shipping a stale version string.
+- **`tili -v` didn't work** — only `--version` (and the clap-default `-V`)
+  did. Added `-v` as an explicit alias.
+- **Upgrading via `brew upgrade` never actually restarted a running
+  `tili-daemon`/`tili-menubar`**, despite `post_install` existing
+  specifically to do that. `post_install` runs inside Homebrew's install
+  sandbox, which fakes `$HOME`/`Dir.home` to a throwaway temp directory —
+  so the "is tili already running" check always saw a nonexistent path and
+  silently returned early — and separately denies filesystem writes outside
+  the Cellar/temp/log dirs, so even a corrected check would then fail to
+  rewrite the LaunchAgent plist `tili stop`/`tili start` needs. `post_install`
+  now resolves the real home via `Dir.home(ENV.fetch("USER"))` (bypassing
+  the faked `$HOME` env var, the same trick Homebrew's own sandbox code
+  uses) for the read-only existence check, and restarts by signaling the
+  running processes directly (`pkill -x`) rather than rewriting any file —
+  launchd's `KeepAlive` relaunches them immediately through the
+  `bin/tili-daemon`/`bin/tili-menubar` symlinks, which Homebrew has already
+  relinked to the new version by the time `post_install` runs. Confirmed on
+  real hardware (a live `tili-daemon`/`tili-menubar` restarting with new
+  PIDs under the actual Homebrew sandbox, not just a local `cargo run`).
+
 ## [0.1.4] - 2026-07-16
 
 A fix release addressing one issue found after `v0.1.3`.

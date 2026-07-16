@@ -12,9 +12,14 @@ use tili_ipc::{
 #[command(
     name = "tili",
     about = "CLI for the tili tiling window manager daemon",
-    version
+    version,
+    disable_version_flag = true
 )]
 struct Cli {
+    /// Print version
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: (),
+
     /// Defaults to `start` when no subcommand is given, so plain `tili`
     /// does the same thing as `tili start`.
     #[command(subcommand)]

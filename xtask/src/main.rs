@@ -73,7 +73,36 @@ fn app_bundle_path(target: &str) -> PathBuf {
     PathBuf::from(format!("target/{target}/release/tili.app"))
 }
 
+/// Guards against the release tag and `Cargo.toml`'s
+/// `[workspace.package] version` drifting apart — `tili`/`tili-daemon`
+/// embed `CARGO_PKG_VERSION` (via clap's `version` field) at compile time,
+/// so if a release is cut without bumping that field first, every binary
+/// in the tarball reports the *previous* release's version via
+/// `tili --version`/`-v` forever, with nothing catching the mismatch (this
+/// happened for real: 0.1.0 through 0.1.4 all shipped `tili --version` ==
+/// "0.1.0"). `xtask` shares `version.workspace = true` with every other
+/// crate, so its own `CARGO_PKG_VERSION` is exactly what got compiled into
+/// `tili`/`tili-daemon` in this same build — comparing it against the
+/// `--version` argument release.yml derives from the pushed git tag turns
+/// that drift into a hard build failure instead of a silent, permanent
+/// mismatch.
+fn check_version_matches_cargo_toml(version: &str) {
+    let cargo_version = env!("CARGO_PKG_VERSION");
+    if version != cargo_version {
+        eprintln!(
+            "xtask: release tag version 'v{version}' doesn't match \
+             [workspace.package] version '{cargo_version}' in Cargo.toml — \
+             bump Cargo.toml's workspace version to match before tagging, \
+             or every binary in this release will report the wrong version \
+             via `tili --version`/`-v`."
+        );
+        std::process::exit(1);
+    }
+}
+
 fn bundle(target: &str, version: &str) {
+    check_version_matches_cargo_toml(version);
+
     let app = app_bundle_path(target);
     let macos_dir = app.join("Contents/MacOS");
     std::fs::create_dir_all(&macos_dir)
