@@ -8,6 +8,10 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-07-17
+
+A fix release addressing one issue found after `v0.1.9`.
+
 ### Fixed
 
 - **Moving a window past a sibling that had previously been resized
