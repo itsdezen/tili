@@ -48,6 +48,15 @@ fn main() {
     // non-main thread onto a main queue.
     let (tx, rx) = mpsc::channel::<Option<menu::Snapshot>>();
     std::thread::spawn(move || {
+        // Polled once immediately, before ever blocking on
+        // `wait_for_change` — otherwise the very first poll only happens
+        // once *something changes*, which on a freshly-started daemon can
+        // be up to `Command::WaitForChange`'s own 30s idle timeout away.
+        // The badge would sit hidden (its `build_initial` state) that
+        // whole time, only appearing once the user did something like
+        // switch a workspace, instead of showing the daemon's actual
+        // current state right away.
+        let _ = tx.send(menu::poll_daemon());
         loop {
             match ipc::wait_for_change() {
                 // Either something really changed, or the daemon's own

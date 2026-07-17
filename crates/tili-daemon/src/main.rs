@@ -132,16 +132,22 @@ async fn main() -> std::io::Result<()> {
         // branch: doing so would wake every blocked `WaitForChange`
         // connection ~33 times/sec regardless of whether anything
         // happened, defeating the entire point of replacing polling with
-        // this. `Ping`/`ListWindows`/etc. reaching the generic socket arm
-        // still count as "changed" even though they're read-only — rare
-        // enough not to bother distinguishing, per `WaitForChange`'s own
-        // "deliberately coarse" doc comment. `MouseSignal::Moved` is the
-        // one left out entirely (not just gated): it fires every ~80ms
-        // during any cursor movement, which is exactly the kind of
-        // activity-independent-of-real-change cadence this is trying to
-        // avoid; a `focus-follows-monitor` switch it triggers is picked up
-        // on whatever the next genuinely-notifying event is, or worst
-        // case `WAIT_FOR_CHANGE_TIMEOUT`.
+        // this. The generic socket arm below excludes read-only commands
+        // (`Ping`/`ListWindows`/`ListWorkspaces`/`ListMonitors`) from this
+        // for the same reason, not just "rare enough not to bother" —
+        // `tili-menubar`'s own steady-state polling calls exactly those
+        // commands every time it wakes up, so counting them as "changed"
+        // made every poll re-wake itself: a self-sustaining loop that
+        // turned this long-poll design back into continuous polling (and
+        // starved a real command, like a menu click, queued behind it on
+        // this single-threaded accept loop) the instant the first real
+        // change ever happened. `MouseSignal::Moved` is excluded entirely
+        // (not just gated): it fires every ~80ms during any cursor
+        // movement, which is exactly the kind of activity-independent-of-
+        // real-change cadence this is trying to avoid; a
+        // `focus-follows-monitor` switch it triggers is picked up on
+        // whatever the next genuinely-notifying event is, or worst case
+        // `WAIT_FOR_CHANGE_TIMEOUT`.
         let mut changed = false;
         tokio::select! {
             accepted = listener.accept() => {
@@ -189,12 +195,24 @@ async fn main() -> std::io::Result<()> {
                         tokio::spawn(handle_wait_for_change(stream, notified));
                     }
                     Ok(command) => {
+                        // Read-only queries never mutate `WmState`, so they
+                        // can never be a change a blocked `WaitForChange`
+                        // caller would care about — see this loop's
+                        // top-of-body comment for why that distinction
+                        // matters now (it didn't always).
+                        let mutates = !matches!(
+                            command,
+                            Command::Ping
+                                | Command::ListWindows
+                                | Command::ListWorkspaces
+                                | Command::ListMonitors
+                        );
                         let response = dispatch(&mut state, command);
                         if let Err(e) = socket::write_response(&mut stream, &response).await {
                             eprintln!("tili-daemon: failed to write response: {e}");
                         }
                         sync_active_combos(&active_combos, &state);
-                        changed = true;
+                        changed = mutates;
                     }
                     Err(e) => eprintln!("tili-daemon: failed to read command: {e}"),
                 }

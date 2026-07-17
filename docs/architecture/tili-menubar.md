@@ -53,12 +53,54 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   during that gap used to be silently missed rather than merely delivered
   late; a rapid hotkey burst landed in it often enough to be noticeable
   even after the server-side fix above.
+  The background thread also polls once, unconditionally, *before* ever
+  calling `wait_for_change` the first time — otherwise the badge stays in
+  `build_initial`'s hidden state until the first real change happens
+  (which on a freshly-started daemon can be up to `WaitForChange`'s own
+  30s idle timeout away), rather than showing the daemon's actual current
+  state as soon as it's reachable.
   The one deliberate exception: a 1s backoff between reconnect attempts
   while the daemon is unreachable at all (not running, or between
   `tili stop`/`tili start`) — there's no notification to wait on when
   there's no connection to notify over.
+  `ListMonitors`/`ListWorkspaces` (and `Ping`/`ListWindows`) are excluded
+  from what counts as "changed" on the server side
+  (`tili-daemon/src/main.rs`'s socket command arm) precisely because this
+  poller calls the first two on every single wakeup: without the
+  exclusion, each poll's own read-only queries re-notified every blocked
+  `WaitForChange` connection — including whichever one this same poller
+  had just re-subscribed — turning the long-poll design back into a
+  continuously-spinning loop the instant the first real change of a
+  session happened. Worth fixing on its own (a "long-poll" design spinning
+  continuously defeats its entire purpose), but ruled out as the cause of
+  the known issue below via `tili workspace <name>` from a terminal (goes
+  through the identical socket path) staying fast throughout.
 - `src/actions.rs` handles menu clicks (`workspace:<name>` switches,
   `open-settings` opens the config via `$EDITOR`/`open`/`open -a TextEdit`
   in that fallback order, `quit` runs `tili stop` before exiting this
   process too) on its own background thread, since none of those reactions
   need the main thread.
+
+## Known issue: ~1s delay between clicking a menu item and its action firing
+
+Clicking a workspace item in the already-open dropdown consistently takes
+about a second before `actions::handle` (and thus `ipc::send`) even runs —
+confirmed via direct instrumentation. Ruled out: the status item's dropdown
+itself opens instantly (not a menu-build/layout cost); `ipc::send` measures
+in single-digit milliseconds once called (not IPC/socket/daemon — the
+`hotkey`/CLI paths, which skip `tili-menubar` and this crate's threads
+entirely, are always fast); the delay doesn't shrink on a second click
+fired immediately after the first (not App Nap throttling a backgrounded
+thread waking up — that would predict the opposite). That leaves the gap
+squarely inside AppKit's own `NSMenuItem` target-action dispatch
+(`fireMenuItemAction:`, wired synchronously in `muda`'s
+`fire_menu_item_click` — confirmed via that crate's source, both the
+predefined-item and regular-item paths use the same selector) between
+mouse-up on an open menu and that method actually being invoked — outside
+what either this crate or `muda` control, and not reproducible via reading
+source alone. Tried and reverted: calling
+`NSApplication::activateIgnoringOtherApps` at startup (a known workaround
+for a *different*, superficially similar accessory-app AppKit quirk —
+menus staying unresponsive until the app is tabbed away from and back) had
+no effect here. Unresolved; needs a profiler (e.g. Instruments) attached to
+a running `tili-menubar` to go further, not more source reading.
