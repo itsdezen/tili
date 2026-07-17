@@ -8,6 +8,56 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-07-17
+
+A fix release addressing two issues found after `v0.1.10`.
+
+### Fixed
+
+- **Activating an app that already had a window on a different workspace
+  (via Spotlight, or via Dock when the current workspace had no monitor)
+  changed focus to that app without switching to its workspace; dismissing
+  a notification banner's close button could conversely cause a spurious
+  jump/settle-back to a previous workspace.** `v0.1.9` taught
+  `WmState::reveal_frontmost` to exclude `Popup` windows from its "does
+  the previously-frontmost pid still own a live window" check, to stop
+  Spotlight's still-open search panel from defeating the OS-reactivation
+  suppression added in `v0.1.8`. But Spotlight and the Dock only ever own
+  `Popup` windows, so that check now read as "owns nothing" for *every*
+  transition away from them — suppressing the workspace switch whether
+  the user dismissed them passively (correct) or deliberately picked a
+  result/icon to switch to (wrong; both produced the same signal).
+  Notification Center's banner had the opposite problem: it wasn't forced
+  into `Popup` at all, leaving it exposed to the exact race the `v0.1.9`
+  exclusion was meant to close (now covered by `SYSTEM_UI_BUNDLE_IDS`
+  alongside Spotlight). `reveal_frontmost` no longer tries to distinguish a
+  deliberate switch from a passive dismissal when the previous pid was one
+  of these helpers — it always follows. A pid-history-based attempt at
+  telling the two apart correctly handled the passive case but went stale
+  (and suppressed every later reactivation of the same app) whenever an
+  in-between workspace switch never actually changed the OS-level
+  frontmost app, which is indistinguishable from this bug's own repro at
+  the AX level. Accepted trade-off: dismissing one of these helpers over a
+  literally empty workspace can once again produce the narrower `v0.1.9`
+  symptom (a one-frame jump before settling back).
+
+- **A Dock icon click for an app that already had a window on a different
+  workspace never revealed it, unlike the same activation via Spotlight.**
+  This turned out to be a different bug from the one above, confirmed via a
+  diagnostic build's logs: `Dock.app` never becomes the AX/`NSWorkspace`
+  frontmost application while handling an icon click the way `Spotlight.app`
+  does while its panel is open, so if the clicked app was already the OS's
+  nominal frontmost app (the common case when the current workspace is
+  empty), `frontmost_app_pid()` read identically before and after the
+  click — no pid edge for `WmEvent::FrontmostAppChanged` to ever fire on,
+  so `WmState::reveal_frontmost` never ran at all, at any polling interval.
+  `WmState::reveal_current_frontmost` now runs the same reveal logic on
+  every `MouseSignal::ButtonUp` (a real `CGEventTap` signal a Dock click
+  always produces) against whatever's frontmost *right now*, regardless of
+  whether it changed. `reveal_frontmost` treats an unchanged pid that was
+  already fully visible as a true no-op, so an ordinary click that isn't
+  reactivating anything costs one extra AX query and nothing more.
+
 ## [0.1.10] - 2026-07-17
 
 A fix release addressing one issue found after `v0.1.9`.

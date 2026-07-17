@@ -229,26 +229,39 @@ fn restore_for(kind: &PlacementKind) -> Restore {
 
 /// Bundle ids of macOS shell/system-UI processes whose windows are always
 /// transient chrome (context menus, thumbnail previews, toolbars,
-/// authorization prompts) rather than real user-facing windows — forced to
-/// `FloatingRuleMode::Ignore` regardless of `tili_ax::WindowKind`'s AX
-/// classification. A second, belt-and-suspenders layer on top of
-/// `classify_window_kind`'s own general
-/// `!is_regular_app && !has_close_button` gate (`tili-ax/src/window.rs`),
-/// which should already catch all of these structurally; kept as a
-/// guaranteed fix for the *specific*
-/// cases below in case that general signal ever doesn't apply (e.g. a
-/// future macOS version reports one of these processes as `.regular`
-/// activation policy) — confirmed in practice for the Dock's right-click
-/// context menu and the floating thumbnail preview shown after taking a
-/// screenshot (both misclassified `Standard` -> tiled) and
-/// `SecurityAgent`'s keychain-unlock prompt (misclassified `Dialog` ->
-/// re-centered/resized as a floating window instead of left exactly where
-/// macOS placed it). Extend only when a *specific* reported system surface
-/// is observed getting moved/resized, not preemptively.
+/// authorization prompts, Spotlight's search panel, notification banners)
+/// rather than real user-facing windows. Two uses:
+///
+/// - Forces `FloatingRuleMode::Ignore` regardless of `tili_ax::WindowKind`'s
+///   AX classification. A second, belt-and-suspenders layer on top of
+///   `classify_window_kind`'s own general
+///   `!is_regular_app && !has_close_button` gate (`tili-ax/src/window.rs`),
+///   which should already catch all of these structurally; kept as a
+///   guaranteed fix for the *specific* cases below in case that general
+///   signal ever doesn't apply (e.g. a future macOS version reports one of
+///   these processes as `.regular` activation policy) — confirmed in
+///   practice for the Dock's right-click context menu and the floating
+///   thumbnail preview shown after taking a screenshot (both misclassified
+///   `Standard` -> tiled) and `SecurityAgent`'s keychain-unlock prompt
+///   (misclassified `Dialog` -> re-centered/resized as a floating window
+///   instead of left exactly where macOS placed it). Extend only when a
+///   *specific* reported system surface is observed getting moved/resized,
+///   not preemptively.
+/// - `reveal_frontmost` uses it to recognize a pid as a transient
+///   activation source rather than an app the user is actually switching
+///   to/from (see that function's doc comment). Spotlight and Notification
+///   Center are here for this reason specifically — dismissing either
+///   (Esc, or a notification banner's close button) was confirmed to
+///   otherwise misread as a real app switch and jump/settle-back through
+///   whatever workspace the momentarily-reactivated app lives on, the same
+///   failure mode `SYSTEM_UI_BUNDLE_IDS`'s `Ignore` forcing prevents for
+///   the first use above.
 const SYSTEM_UI_BUNDLE_IDS: &[&str] = &[
     "com.apple.dock",
     "com.apple.screencaptureui",
     "com.apple.SecurityAgent",
+    "com.apple.Spotlight",
+    "com.apple.notificationcenterui",
 ];
 
 fn is_system_ui_bundle(bundle_id: Option<&str>) -> bool {
@@ -1602,8 +1615,41 @@ impl WmState {
     /// two: if the previously-seen pid no longer owns any live window at
     /// all, this change is almost certainly that OS reactivation rather
     /// than a user gesture, so the workspace jump is skipped.
+    ///
+    /// A second, similarly-shaped case is deliberately *not* suppressed the
+    /// same way: Spotlight, the Dock, and Notification Center
+    /// (`SYSTEM_UI_BUNDLE_IDS`) only ever own `Popup`-classified windows, so
+    /// the "owns zero live windows" check above is *always* true for them —
+    /// suppressing on every transition away from one regardless of whether
+    /// the user picked a result/icon (should follow) or dismissed it with
+    /// Esc/a banner's close button (arguably shouldn't). This process has
+    /// no signal to tell those apart — both look identical at the AX/pid
+    /// level (a system-UI pid frontmost, then some real pid frontmost
+    /// again, target workspace not visible) whenever whatever workspace was
+    /// active in between never actually changed the OS-level frontmost app
+    /// (e.g. it had nothing to focus). Picking "suppress on a match" over
+    /// "always follow" would make that ambiguity resolve toward a pid that
+    /// was merely the *last one this process happened to observe*, which
+    /// goes stale across exactly that kind of no-op workspace switch and
+    /// then permanently suppresses every later reactivation of the same
+    /// app — a worse, stuck failure than the one-frame flicker suppressing
+    /// would avoid. So a system-UI previous pid always means "follow,"
+    /// full stop; only a *normal app's* last window disappearing (below)
+    /// still suppresses.
+    ///
+    /// None of the above fires at all for a Dock icon click, though:
+    /// unlike Spotlight, `Dock.app` never becomes the AX/`NSWorkspace`
+    /// frontmost application while handling one, so if the clicked app was
+    /// already the OS's nominal frontmost app (nothing else was competing
+    /// for it — the common case when the current workspace is empty),
+    /// `frontmost_app_pid()` reads identically before and after the click.
+    /// There's no pid edge for `FrontmostAppChanged` to ever fire on, so
+    /// this function never runs at all — confirmed on real hardware (no
+    /// polling interval could fix this, however tight). See
+    /// `reveal_current_frontmost` for how that's handled instead.
     pub fn reveal_frontmost(&mut self, pid: i32) {
         let previous_pid = self.last_frontmost_pid.replace(pid);
+        let pid_unchanged = previous_pid == Some(pid);
 
         let Some(id) = AxWindow::focused_id_for_pid(pid) else {
             return;
@@ -1619,9 +1665,23 @@ impl WmState {
             .iter()
             .find(|(_, w)| **w == workspace)
             .map(|(&mid, _)| mid);
+        // Whether this call actually revealed/moved anything — distinct
+        // from `pid_unchanged` below, since `reveal_current_frontmost`
+        // (the mouse-click fallback) calls this with a pid that often
+        // hasn't changed at all, and a call that's a total no-op shouldn't
+        // re-raise (see `pid_unchanged` below).
+        let mut did_reveal = false;
         match visible_on {
-            Some(monitor_id) => self.focused_monitor = monitor_id,
+            Some(monitor_id) => {
+                if self.focused_monitor != monitor_id {
+                    self.focused_monitor = monitor_id;
+                    did_reveal = true;
+                }
+            }
             None => {
+                let previous_is_system_ui = previous_pid.is_some_and(|prev| {
+                    is_system_ui_bundle(tili_ax::bundle_id_for_pid(prev).as_deref())
+                });
                 // `None` previous_pid (no prior event this run) never
                 // suppresses — only a *confirmed* "that pid has zero live
                 // windows left" does. Excludes `pending_removal` too, not
@@ -1629,33 +1689,37 @@ impl WmState {
                 // there for `removal_grace` before actually dropping out,
                 // so a `FrontmostAppChanged` arriving inside that window
                 // would otherwise still see it as "live" and fail to
-                // suppress. Also excludes `Popup` placements (Spotlight's
-                // search panel, Dock context menus, ...): those get tracked
-                // like any other window, landing in whatever workspace was
-                // active when they opened, but they're transient system
-                // chrome rather than a real window the user is looking at —
-                // a still-open one shouldn't count as "the previous pid is
-                // still alive" and defeat the suppression below. Unlike
+                // suppress. Also excludes `Popup` placements: those get
+                // tracked like any other window, landing in whatever
+                // workspace was active when they opened, but they're
+                // transient system chrome rather than a real window the
+                // user is looking at — a still-open one shouldn't count
+                // as "the previous pid is still alive" and defeat the
+                // suppression below. Unlike
                 // `Minimized`/`NativeFullscreen`/`HiddenApplication`, which
                 // stay in `self.windows` too but represent a genuinely
                 // still-open window in a special display state, so those
-                // three are deliberately *not* excluded here.
-                let previous_lost_its_last_window = previous_pid.is_some_and(|prev| {
-                    !self.windows.iter().any(|(wid, w)| {
-                        w.pid() == prev
-                            && !self.pending_removal.contains_key(wid)
-                            && !matches!(
-                                self.placements.get(wid).map(|p| &p.kind),
-                                Some(PlacementKind::Popup)
-                            )
-                    })
-                });
-                if previous_lost_its_last_window {
+                // three are deliberately *not* excluded here. Skipped
+                // entirely when the previous pid was system UI — see this
+                // function's doc comment.
+                let suppress = !previous_is_system_ui
+                    && previous_pid.is_some_and(|prev| {
+                        !self.windows.iter().any(|(wid, w)| {
+                            w.pid() == prev
+                                && !self.pending_removal.contains_key(wid)
+                                && !matches!(
+                                    self.placements.get(wid).map(|p| &p.kind),
+                                    Some(PlacementKind::Popup)
+                                )
+                        })
+                    });
+                if suppress {
                     return;
                 }
                 if self.switch_workspace(&workspace).is_err() {
                     return;
                 }
+                did_reveal = true;
             }
         }
 
@@ -1666,7 +1730,33 @@ impl WmState {
             self.set_focused_node(node);
         }
 
-        self.raise_focused_window(id);
+        // A same-pid, nothing-moved call (only `reveal_current_frontmost`
+        // produces one) is a true no-op — skip re-focusing/re-warping the
+        // cursor for `mouse_follows_focus`. Any real pid transition (Cmd-Tab,
+        // Mission Control, ...) always raises, matching prior behavior,
+        // since `mouse_follows_focus` should track *those* too even when the
+        // target was already visible on the current monitor.
+        if !pid_unchanged || did_reveal {
+            self.raise_focused_window(id);
+        }
+    }
+
+    /// Fallback for a Dock icon click reactivating an app that was already
+    /// the OS's nominal frontmost application — see `reveal_frontmost`'s
+    /// doc comment for why that leaves no pid edge for
+    /// `WmEvent::FrontmostAppChanged` to fire on. Called on every
+    /// `MouseSignal::ButtonUp` (a real, event-driven `CGEventTap` signal,
+    /// not a poll — a Dock click always involves a real mouse down+up) with
+    /// whatever `frontmost_app_pid()` reports *right now*, regardless of
+    /// whether it differs from last time. Safe to call this often:
+    /// `reveal_frontmost` treats a same-pid, already-visible call as a true
+    /// no-op (see `pid_unchanged`/`did_reveal` there), so an ordinary click
+    /// that has nothing to do with switching apps costs one AX query and
+    /// does nothing further.
+    pub fn reveal_current_frontmost(&mut self) {
+        if let Some(pid) = tili_ax::workspace::frontmost_app_pid() {
+            self.reveal_frontmost(pid);
+        }
     }
 
     /// Raises/focuses `id` directly (not through `focused_node()` — used by

@@ -183,6 +183,56 @@ jump. `Minimized`/`NativeFullscreen`/`HiddenApplication` placements are
 deliberately not excluded the same way — those represent a genuinely
 still-open window in a special display state, not transient chrome.
 
+That 0.1.9 exclusion overshot, though: Spotlight, the Dock, and
+Notification Center (`SYSTEM_UI_BUNDLE_IDS`) *only ever* own `Popup`
+windows, so "still owns a live non-popup window" reads as false for them
+unconditionally — every transition away from one was suppressed
+regardless of whether the user picked a result/icon (a real switch that
+should follow) or just dismissed it passively (Esc, a Dock click that
+resolved to nothing new, or a notification banner's close button). Both
+produce the identical previous-pid-owns-nothing signal, so the check
+alone can't tell them apart. A pid-history-based attempt at disambiguating
+them (tracking a "last real, non-system-UI frontmost pid" and suppressing
+only on an exact match) correctly caught the passive-dismissal case, but
+that tracked pid goes stale whenever a workspace switch in between never
+actually changed the OS-level frontmost app (e.g. switching to an empty
+workspace) — the next reactivation of the same app then reads as a match
+and gets suppressed, permanently, until some other real frontmost change
+resets it. `reveal_frontmost` resolves this the other way instead: a
+`SYSTEM_UI_BUNDLE_IDS` previous pid always means "follow," full stop.
+This reopens the original, narrower 0.1.9 symptom (a one-frame flicker
+when dismissing one of these helpers over a literally empty workspace,
+before settling back) as an accepted trade-off — better than a stuck
+suppression on a routine, repeated action. The original
+`previous_lost_its_last_window` check is untouched for the case where the
+previous pid was a normal app (the actual 0.1.8 "closed its last window"
+scenario, unrelated to any of this).
+
+None of the above ever runs at all for a Dock icon click, confirmed on
+real hardware by grepping a diagnostic build's log for the whole
+interaction: unlike Spotlight, `Dock.app` never becomes the AX/`NSWorkspace`
+frontmost application while handling a click. If the clicked app was
+already the OS's nominal frontmost app — the common case when the current
+workspace is empty, since nothing else is competing for that status —
+`workspace::frontmost_app_pid()` reads identically before and after the
+click, so `watch.rs`'s poll (however tight `RESYNC_INTERVAL` is) never sees
+an edge and `FrontmostAppChanged` never fires; `reveal_frontmost` never
+runs. `WmState::reveal_current_frontmost` covers this instead: `main.rs`'s
+`MouseSignal::ButtonUp` arm (already wired for M10.1's drag-resize
+debounce) also calls it on every left click — a real `CGEventTap` signal,
+not a poll, so a Dock click's mouse down+up always triggers a check
+regardless of whether any pid ever "changed." It re-resolves whatever
+`frontmost_app_pid()` reports *right now* through the same
+`reveal_frontmost` logic, deliberately without checking whether that pid
+differs from last time. `reveal_frontmost` treats a same-pid,
+already-fully-visible call as a true no-op via `pid_unchanged`/`did_reveal`
+(only skipping the final `raise_focused_window` when *both* the pid didn't
+change *and* nothing was actually revealed/moved) — a real pid transition
+(Cmd-Tab, Mission Control) still always raises, so `mouse_follows_focus`
+keeps tracking those even when the target was already visible on the
+current monitor; only a click that turns out to have nothing to do with
+switching apps costs one extra AX query and does nothing further.
+
 ## Layout commands, config, and dispatch
 
 `toggle_layout`/`set_layout` (M7) wrap `Tree::toggle_layout` for

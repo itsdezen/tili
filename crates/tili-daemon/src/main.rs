@@ -258,6 +258,13 @@ async fn main() -> std::io::Result<()> {
                     }
                     tili_ax::MouseSignal::ButtonUp => {
                         state.on_mouse_button_up();
+                        // Catches a Dock icon click reactivating an app
+                        // that was already the OS's nominal frontmost
+                        // application (common when the current workspace
+                        // is empty) — see `WmState::reveal_current_frontmost`'s
+                        // doc comment for why `FrontmostAppChanged` never
+                        // fires for that case on its own.
+                        state.reveal_current_frontmost();
                         changed = true;
                     }
                 }
