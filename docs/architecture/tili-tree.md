@@ -27,3 +27,10 @@ direction `navigate`, `move`'s window-identity `swap_windows`, proportional
   is an `Accordion`, `dir` cycles (and wraps at the ends) which child is
   active instead of doing spatial `Split` navigation, since a stack of
   fully-overlapping children has no inherent left/right/up/down axis.
+- `apply_resize`'s `MIN_WEIGHT` floor is purely proportional (a share of a
+  container's weight total), with no relationship to real pixels or any
+  app's actual minimum window size — this crate has no `AXUIElement`
+  dependency and so has no way to know one. A tiled window resized past
+  its app's real minimum will overflow its assigned rect; this is a known
+  OS/app-level limitation, not something the layout engine tracks or
+  corrects.

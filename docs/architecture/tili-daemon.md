@@ -79,6 +79,20 @@ focused monitor (`relayout_active`), but anything that could touch a
 workspace visible on a *different* monitor (app termination, config reload)
 uses `relayout_all_visible`.
 
+`relayout_monitor` writes every tiled placement straight through
+`frame_setter.set_frame`, unconditionally, with no readback or retry —
+deliberately fire-and-forget, so a tiled window's size always matches
+exactly what `Tree::layout`'s weight model computed. A window whose app
+rounds/snaps a resize to its own grid (some terminal emulators do this)
+can therefore end up larger than its assigned rect and encroach on a
+neighboring tiled window's gap — a known, accepted OS/app-level
+limitation, not something the layout engine tries to correct: any
+after-the-fact size correction would violate the same invariant this
+function exists to uphold, and re-writing a frame in response to a
+notification the write itself caused risks a self-sustaining relayout
+loop (see `apply_windows_changed`'s unconditional `relayout_active()`
+call below, which is what would drive it).
+
 `park()` targets `tili_ax::parking_position` — a window's origin lands just
 a point inside the main monitor's own bottom-right corner (not pushed
 *outside* every monitor's bounds, `combined_bounds`'s original purpose):
