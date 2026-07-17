@@ -15,24 +15,38 @@ tree (M4 through M7's approach).
 Floating windows (M8: matched a `floating-rules` entry at creation time,
 via `compute_floating_frame`, which checks `AxWindow::bundle_id()` against
 each compiled rule in order and computes a centered/sized `Rect` from the
-rule's or the config's `defaults`' width/height-ratio) live entirely
-outside any `Tree` — floating ones only get repositioned at creation and
-when their workspace becomes active again, not on every layout-affecting
-event, so a user's manual drag of a floating window isn't undone by, say, a
-gap change.
+rule's or the config's `defaults`' width/height-ratio) join their
+workspace's `Tree` too, as a `tili_tree::Node::Floating` leaf — a normal
+child for insertion/removal/lookup, so `workspace_focus`/`focused_node()`
+can address a floating window exactly like a tiled one, but excluded
+entirely from `Tree::layout`'s `Tiles`/`Accordion` sizing (see
+`tili-tree.md`). Their actual on-screen frame is still owned by
+`placements`/`compute_floating_frame`, not the tree — floating windows only
+get repositioned at creation and when their workspace becomes active again,
+not on every layout-affecting event, so a user's manual drag of a floating
+window isn't undone by, say, a gap change. `state.rs` functions whose
+tree-topology operation is meaningless for a floating focus (`move_focused`,
+`join`, `resize`, `set_orientation`/`toggle_orientation`,
+`toggle_layout`/`set_layout`, `balance_sizes`, non-native
+`toggle_fullscreen`) check `focused_window_is_floating` up front and error
+instead of silently acting on the wrong node or having no visible effect;
+`focus`, `move_focused_to_workspace`, `set_floating`, `close_focused`, and
+native fullscreen all work correctly for a floating focus and don't guard.
 
-`workspace_focus` remembers each workspace's last-focused node so switching
-back restores where you left off. A new window joins the active workspace
-next to the current focus (if tiled) or just gets centered (if floating)
-*unless* it matches a `workspace-rules` entry (`matching_workspace_rule`,
-checked via `AxWindow::bundle_id()` — kept entirely separate from
-`matching_floating_rule`, since which workspace a window lands on has
-nothing to do with whether it tiles or floats). `apply_windows_changed`
-resolves that into a `target_workspace` and hands off to
-`place_new_window`, which inserts into that workspace's own `Tree` (keying
-its focus-hint lookup off `target_workspace`, not whatever's active, so it
-still respects where focus was last left there) or, for a floating window,
-just records the `Placement` against it. If `target_workspace` isn't the
+`workspace_focus` remembers each workspace's last-focused node — tiled or
+floating — so switching back restores where you left off. A new window
+joins the active workspace next to the current focus (as a `Node::Window`
+if tiled, a `Node::Floating` if floating — either way inserted into the
+tree the same way) *unless* it matches a `workspace-rules` entry
+(`matching_workspace_rule`, checked via `AxWindow::bundle_id()` — kept
+entirely separate from `matching_floating_rule`, since which workspace a
+window lands on has nothing to do with whether it tiles or floats).
+`apply_windows_changed` resolves that into a `target_workspace` and hands
+off to `place_new_window`, which inserts into that workspace's own `Tree`
+(keying its focus-hint lookup off `target_workspace`, not whatever's
+active, so it still respects where focus was last left there) — a floating
+window additionally gets its initial frame computed/written there too, but
+only if `target_workspace` is actually visible right now. If `target_workspace` isn't the
 one active on the focused monitor, the window is parked immediately and
 `resync_workspace_if_visible_elsewhere` (a fourth "thickness of relayout,"
 alongside `relayout_active`/`relayout_monitor`/`relayout_all_visible`
@@ -102,7 +116,23 @@ edge regardless of how far outside it's requested (it only constrains the
 origin, not the window's full frame). Keeping the origin legitimately
 on-screen and letting the window's own size extend past the corner (a
 technique other AX-based tiling WMs use too) avoids that clamp entirely
-instead of fighting it.
+instead of fighting it. Every parked window — however many are parked at
+once — targets this exact same coordinate; an earlier version offset each
+additional one inward by a step so they wouldn't all land on the identical
+point, but that shift moves the origin off the one spot the "hidden
+regardless of size" guarantee depends on, exposing a real on-screen strip
+as wide as the shift. Nothing actually needs parked windows to be
+spatially distinct (they're all invisible at the same point regardless of
+how many share it), so the offsetting was simply removed. This also keeps
+`park`'s own `set_position` write properly idempotent for
+`reconcile_existing_placement`'s re-assertion: that write fires a real
+`AXWindowMoved` notification (self-triggered writes aren't suppressed
+anywhere), which routes straight back through `apply_windows_changed` ->
+`reconcile_existing_placement` within one `maintenance_tick` — since every
+call now targets the same coordinate regardless of caller,
+`AxWindow::set_position`'s no-op-if-unchanged guard genuinely no-ops on
+that re-assertion instead of needing to track which offset a specific
+call used.
 
 Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
 parsed since M5) is intentionally still unwired — M9's bar is
@@ -154,7 +184,13 @@ several reactive-sync attempts (an AX per-window notification, then an
 never fire for a process like this one with no `NSApplication` instance,
 unlike the process-lifecycle Launch/Terminate notifications, which don't
 depend on window-server UI-activation machinery — then a poll on
-`watch.rs`'s resync tick) all failed to fully close.
+`watch.rs`'s resync tick) all failed to fully close. `sync_focus_from_pid`
+(the function `sync_focus_from_frontmost` actually calls) updates
+`workspace_focus` for both `Tiled` and `Floating` placements — since
+`Node::Floating` gave floating windows a tree node too (see the
+"WmState, placements, and floating windows" section above), a real click
+into a floating window is now correctly reflected before the next command
+runs, not just a tiled one.
 
 `handle_event`'s `WmEvent::FrontmostAppChanged { pid }` arm (0.1.1) calls
 `WmState::reveal_frontmost(pid)`, the only reaction to that event — it

@@ -75,6 +75,17 @@ pub enum Node {
     Window {
         window: WindowId,
     },
+    /// A floating window's focus/topology placeholder: a normal child for
+    /// insertion/removal/lookup/`mru` purposes (so `workspace_focus` can
+    /// address it exactly like a `Window` leaf), but excluded from every
+    /// `Tiles`/`Accordion` sizing computation in `layout` — a floating
+    /// window's real position/size is owned by `tili-daemon`'s
+    /// `placements`/`compute_floating_frame`, not by this tree. Still
+    /// carries a `weights` entry (kept index-parallel with `children`, like
+    /// every other child) even though `layout` never reads it.
+    Floating {
+        window: WindowId,
+    },
 }
 
 /// The container tree for one workspace: an n-ary tree of containers with
@@ -120,8 +131,8 @@ impl Tree {
 
     pub fn window_at(&self, node: NodeId) -> Option<WindowId> {
         match self.nodes.get(node)? {
-            Node::Window { window } => Some(*window),
-            _ => None,
+            Node::Window { window } | Node::Floating { window } => Some(*window),
+            Node::Container { .. } => None,
         }
     }
 
@@ -131,18 +142,33 @@ impl Tree {
     /// on any hot path.
     pub fn node_for_window(&self, window: WindowId) -> Option<NodeId> {
         self.nodes.iter().find_map(|(id, node)| match node {
-            Node::Window { window: w } if *w == window => Some(id),
+            Node::Window { window: w } | Node::Floating { window: w } if *w == window => Some(id),
             _ => None,
         })
     }
 
-    /// Every window currently in the tree, in no particular order.
+    /// Every window currently in the tree, tiled or floating, in no
+    /// particular order.
     pub fn window_ids(&self) -> Vec<WindowId> {
         self.nodes
             .values()
             .filter_map(|node| match node {
+                Node::Window { window } | Node::Floating { window } => Some(*window),
+                Node::Container { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Just the *tiled* windows currently in the tree — `window_ids` minus
+    /// any `Floating` leaves. Callers that need to lay out or park tiled
+    /// windows specifically (not just look one up) want this, not
+    /// `window_ids`.
+    pub fn tiled_window_ids(&self) -> Vec<WindowId> {
+        self.nodes
+            .values()
+            .filter_map(|node| match node {
                 Node::Window { window } => Some(*window),
-                _ => None,
+                Node::Container { .. } | Node::Floating { .. } => None,
             })
             .collect()
     }
@@ -150,7 +176,7 @@ impl Tree {
     /// Finds the leaf node for a window, if it's in the tree.
     pub fn find_node(&self, window: WindowId) -> Option<NodeId> {
         self.nodes.iter().find_map(|(id, node)| match node {
-            Node::Window { window: w } if *w == window => Some(id),
+            Node::Window { window: w } | Node::Floating { window: w } if *w == window => Some(id),
             _ => None,
         })
     }
@@ -173,7 +199,30 @@ impl Tree {
         near: Option<NodeId>,
         root_orientation: Orientation,
     ) -> NodeId {
-        let new_leaf = self.nodes.insert(Node::Window { window });
+        self.insert_leaf(Node::Window { window }, near, root_orientation)
+    }
+
+    /// Same sibling-insertion placement as `insert_window`, but for a
+    /// `Node::Floating` leaf — gives a floating window a `NodeId` so
+    /// `workspace_focus`/`focused_node()` can address it like any tiled
+    /// window, without it ever affecting `layout`'s sizing (see `Node`'s
+    /// `Floating` doc comment).
+    pub fn insert_floating(
+        &mut self,
+        window: WindowId,
+        near: Option<NodeId>,
+        root_orientation: Orientation,
+    ) -> NodeId {
+        self.insert_leaf(Node::Floating { window }, near, root_orientation)
+    }
+
+    fn insert_leaf(
+        &mut self,
+        leaf: Node,
+        near: Option<NodeId>,
+        root_orientation: Orientation,
+    ) -> NodeId {
+        let new_leaf = self.nodes.insert(leaf);
 
         let Some(root) = self.root else {
             self.root = Some(new_leaf);
@@ -391,16 +440,17 @@ impl Tree {
         let &parent = self.parents.get(&from)?;
         match self.nodes.get(parent)? {
             Node::Container { orientation, .. } => Some(*orientation),
-            Node::Window { .. } => None,
+            Node::Window { .. } | Node::Floating { .. } => None,
         }
     }
 
     /// The workspace root container's orientation, or `None` if the tree is
-    /// empty or the root is a lone window with no container.
+    /// empty or the root is a lone window (tiled or floating) with no
+    /// container.
     pub fn root_orientation(&self) -> Option<Orientation> {
         match self.nodes.get(self.root?)? {
             Node::Container { orientation, .. } => Some(*orientation),
-            Node::Window { .. } => None,
+            Node::Window { .. } | Node::Floating { .. } => None,
         }
     }
 
@@ -655,12 +705,24 @@ impl Tree {
                 && *orientation == axis
             {
                 let idx = children.iter().position(|&c| c == child)?;
-                let target_idx = if forward {
+                // Skips over `Floating` siblings — they have no spatial
+                // footprint in `layout`, so directional navigation treats
+                // them as if they weren't there rather than landing focus
+                // on one.
+                let mut cursor = if forward {
                     idx.checked_add(1)
                 } else {
                     idx.checked_sub(1)
                 };
-                if let Some(&target) = target_idx.and_then(|i| children.get(i)) {
+                while let Some(&target) = cursor.and_then(|i| children.get(i)) {
+                    if matches!(self.nodes.get(target), Some(Node::Floating { .. })) {
+                        cursor = if forward {
+                            cursor.and_then(|i| i.checked_add(1))
+                        } else {
+                            cursor.and_then(|i| i.checked_sub(1))
+                        };
+                        continue;
+                    }
                     return Some(self.mru_leaf(target));
                 }
             }
@@ -737,15 +799,29 @@ impl Tree {
         let Some(idx) = children.iter().position(|&c| c == from) else {
             return false;
         };
-        let target_idx = if forward {
+
+        // Skips over `Floating` siblings — they carry no footprint in
+        // `layout`, so they shouldn't block a tiled window from moving past
+        // them the way an actual tiled/container sibling does.
+        let mut cursor = if forward {
             idx.checked_add(1)
         } else {
             idx.checked_sub(1)
         };
-        let Some(&sibling) = target_idx.and_then(|i| children.get(i)) else {
-            return false;
+        let (target_idx, sibling) = loop {
+            let Some(&candidate) = cursor.and_then(|i| children.get(i)) else {
+                return false;
+            };
+            if matches!(self.nodes.get(candidate), Some(Node::Floating { .. })) {
+                cursor = if forward {
+                    cursor.and_then(|i| i.checked_add(1))
+                } else {
+                    cursor.and_then(|i| i.checked_sub(1))
+                };
+                continue;
+            }
+            break (cursor.expect("checked above"), candidate);
         };
-        let target_idx = target_idx.expect("checked above");
 
         match self.nodes.get(sibling) {
             Some(Node::Window { .. }) => {
@@ -767,7 +843,7 @@ impl Tree {
                 self.insert_sibling(from, anchor, forward);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -886,6 +962,11 @@ impl Tree {
     ) {
         match self.nodes.get(node) {
             Some(Node::Window { window }) => out.push((*window, area)),
+            // A floating leaf owns no space in its parent's split — its
+            // real frame is computed/written by `tili-daemon` separately
+            // (see `Node::Floating`'s doc comment), so it's simply skipped
+            // here rather than emitted with some placeholder rect.
+            Some(Node::Floating { .. }) => {}
             Some(Node::Container {
                 layout: Layout::Tiles,
                 orientation,
@@ -893,19 +974,33 @@ impl Tree {
                 weights,
                 ..
             }) => {
-                let n = children.len();
+                // Floating children are excluded from the split entirely —
+                // they take no share of `area` and don't count toward the
+                // inner-gap total, so tiled siblings divide the space
+                // exactly as if the floating child weren't there.
+                let sizeable: Vec<(NodeId, f32)> = children
+                    .iter()
+                    .zip(weights.iter())
+                    .filter(|&(&c, _)| !matches!(self.nodes.get(c), Some(Node::Floating { .. })))
+                    .map(|(&c, &w)| (c, w))
+                    .collect();
+                let n = sizeable.len();
                 if n == 0 {
                     return;
                 }
-                let total: f32 = weights.iter().sum::<f32>().max(f32::EPSILON);
+                let total: f32 = sizeable
+                    .iter()
+                    .map(|&(_, w)| w)
+                    .sum::<f32>()
+                    .max(f32::EPSILON);
                 let total_gap = inner_gap * (n.saturating_sub(1)) as f64;
                 let divisible = match orientation {
                     Orientation::Horizontal => (area.width - total_gap).max(0.0),
                     Orientation::Vertical => (area.height - total_gap).max(0.0),
                 };
                 let mut offset = 0.0_f64;
-                for (i, &child) in children.iter().enumerate() {
-                    let fraction = f64::from(weights[i] / total);
+                for (child, weight) in sizeable {
+                    let fraction = f64::from(weight / total);
                     let child_size = divisible * fraction;
                     let child_area = match orientation {
                         Orientation::Horizontal => Rect {
@@ -931,8 +1026,16 @@ impl Tree {
                 children,
                 ..
             }) => {
-                let n = children.len();
-                for (i, &child) in children.iter().enumerate() {
+                // Same exclusion as the `Tiles` branch above — a floating
+                // child doesn't get an accordion slot (or count toward
+                // its neighbors' peek padding).
+                let sizeable: Vec<NodeId> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| !matches!(self.nodes.get(c), Some(Node::Floating { .. })))
+                    .collect();
+                let n = sizeable.len();
+                for (i, &child) in sizeable.iter().enumerate() {
                     let mut child_area = area;
                     let pad_before = i > 0;
                     let pad_after = i + 1 < n;
@@ -1775,5 +1878,73 @@ mod tests {
         assert_eq!(tree.navigate(w2, Direction::Left), Some(w1));
         assert_eq!(tree.navigate(w3, Direction::Right), None);
         assert_eq!(tree.navigate(w1, Direction::Left), None);
+    }
+
+    #[test]
+    fn floating_leaf_is_addressable_but_invisible_to_layout() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let f = tree.insert_floating(2, Some(w1), Orientation::Horizontal);
+
+        assert_eq!(tree.window_at(f), Some(2));
+        assert_eq!(tree.find_node(2), Some(f));
+        assert_eq!(tree.node_for_window(2), Some(f));
+        assert_eq!(tree.window_ids(), vec![1, 2]);
+        assert_eq!(tree.tiled_window_ids(), vec![1]);
+
+        // The floating window gets no rect at all — the lone tiled sibling
+        // fills the whole area, as if the floating one weren't there.
+        let layout = tree.layout(area(), Gaps::default());
+        assert_eq!(layout, vec![(1, area())]);
+    }
+
+    #[test]
+    fn navigate_skips_over_a_floating_sibling() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        // Insert the floating leaf between w1 and w2's shared container so
+        // a naive index-based `navigate` would land on it instead of w2.
+        tree.insert_floating(99, Some(w1), Orientation::Horizontal);
+
+        assert_eq!(tree.navigate(w1, Direction::Right), Some(w2));
+    }
+
+    #[test]
+    fn move_within_skips_over_a_floating_sibling() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        tree.insert_floating(99, Some(w1), Orientation::Horizontal);
+
+        assert!(tree.move_in_direction(w1, Direction::Right));
+        assert_eq!(tree.window_at(w1), Some(1));
+        assert_eq!(tree.window_at(w2), Some(2));
+        // w1 and w2 swapped past the floating leaf; the floating window's
+        // own placement in `children` is untouched — it still resolves to
+        // the same window id.
+        assert_eq!(tree.window_ids().len(), 3);
+    }
+
+    #[test]
+    fn remove_window_works_for_a_floating_leaf() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        tree.insert_floating(2, Some(w1), Orientation::Horizontal);
+        assert_eq!(tree.window_ids().len(), 2);
+
+        let next_focus = tree.remove_window(2);
+        assert_eq!(tree.window_at(next_focus.unwrap()), Some(1));
+        assert_eq!(tree.window_ids(), vec![1]);
+    }
+
+    #[test]
+    fn lone_floating_root_lays_out_to_nothing() {
+        let mut tree = Tree::new();
+        let f = tree.insert_floating(1, None, Orientation::Horizontal);
+        assert_eq!(tree.root(), Some(f));
+        assert_eq!(tree.window_at(f), Some(1));
+        assert!(tree.layout(area(), Gaps::default()).is_empty());
+        assert_eq!(tree.default_focus(), Some(f));
     }
 }

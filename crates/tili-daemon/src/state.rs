@@ -18,22 +18,11 @@ const DEFAULT_WORKSPACE: &str = "main";
 /// hotkeys are bound yet, not an error.
 const DEFAULT_MODE: &str = "main";
 
-/// macOS has no public API to enumerate/control Spaces, so workspaces are
-/// virtual: only the active one's windows are actually laid out on screen.
-/// Every other workspace's windows are "parked" via `tili_ax::parking_position`
-/// — positioned so only a tiny sliver stays reachable at a real monitor's
-/// own corner, offset per-window so they don't all stack exactly on top of
-/// each other (irrelevant to the user, but keeps `tili list-windows` output
-/// sane to eyeball while debugging).
-///
-/// Confirmed on real hardware that pushing a window's position far *outside*
-/// every display's bounds instead (this constant's previous approach)
-/// doesn't work: AppKit clamps `kAXPositionAttribute` writes that would
-/// place a window's origin somewhere unreachable back to near a real
-/// screen's own edge regardless of how far outside it's requested — it
-/// only constrains the origin, not the window's full frame. See
-/// `parking_position`'s doc comment for the technique this uses instead.
-const PARK_OFFSET_STEP: f64 = 50.0;
+// macOS has no public API to enumerate/control Spaces, so workspaces are
+// virtual: only the active one's windows are actually laid out on screen.
+// Every other workspace's windows are "parked" via `tili_ax::parking_position`
+// — see `park`'s own doc comment for the technique and why every parked
+// window now shares the same coordinate.
 
 /// How close two frames need to be to count as "the same" when deciding
 /// whether a `Floating` window's live frame has drifted from what tili
@@ -50,6 +39,17 @@ const FLOAT_DRIFT_EPSILON: f64 = 0.5;
 /// value but is a field (not used directly) so tests can shrink it to zero
 /// instead of sleeping for real.
 const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
+
+/// How many times `apply_windows_changed` will defer a brand-new window's
+/// disposition when its `bundle_id()` is still unresolved (racing
+/// `NSRunningApplication`'s own registration right after a process
+/// launches) before giving up and falling back to the kind-based default
+/// anyway. Bounded so a process whose bundle id never resolves (e.g. an
+/// unbundled helper binary) doesn't sit unplaced forever — each retry rides
+/// a real `WindowsChanged` event (the next one for that pid, or the
+/// `FULL_RESYNC_MAX_INTERVAL` safety net in `tili-ax/src/watch.rs`), not a
+/// new poll.
+const MAX_BUNDLE_ID_RETRIES: u8 = 3;
 
 fn frames_match(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < FLOAT_DRIFT_EPSILON
@@ -378,6 +378,11 @@ pub struct WmState {
     /// (whole process quit) removes immediately/unconditionally and isn't
     /// affected by this grace period.
     pending_removal: HashMap<WindowId, Instant>,
+    /// Brand-new windows whose `bundle_id()` was unresolved the last time
+    /// `apply_windows_changed` saw them, and how many times that's happened
+    /// so far — see `MAX_BUNDLE_ID_RETRIES`. Cleared once the window is
+    /// actually placed (bundle id resolved, or retries exhausted).
+    pending_bundle_retries: HashMap<WindowId, u8>,
     /// How long a pending removal waits before being finalized — starts at
     /// `REMOVAL_GRACE_PERIOD`; a field rather than using the constant
     /// directly so tests can shrink it to zero instead of sleeping for real.
@@ -469,6 +474,7 @@ impl Default for WmState {
             windows: HashMap::new(),
             placements: HashMap::new(),
             pending_removal: HashMap::new(),
+            pending_bundle_retries: HashMap::new(),
             removal_grace: REMOVAL_GRACE_PERIOD,
             #[cfg(test)]
             relayout_calls: std::cell::Cell::new(0),
@@ -522,6 +528,7 @@ impl WmState {
             self.pending_removal.remove(&id);
             self.windows.remove(&id);
             self.remove_placement(id);
+            self.pending_bundle_retries.remove(&id);
         }
         // A finalized removal changes which windows the tree lays out —
         // without this, survivors keep their pre-removal frames and the
@@ -585,6 +592,27 @@ impl WmState {
             } else {
                 self.windows.get(&id).map(AxWindow::frame)
             };
+
+            // A brand-new window with no bundle id yet is usually racing
+            // `NSRunningApplication`'s own registration right after its
+            // process launched — `matching_floating_rule` below can't tell
+            // "no rule configured for this app" apart from "couldn't check
+            // because bundle id isn't resolved yet" without one, so
+            // finalizing disposition now would silently misclassify it via
+            // the kind-based fallback (e.g. `Standard -> Tile`) instead of
+            // the floating rule that would've matched a moment later.
+            // Defer, bounded by `MAX_BUNDLE_ID_RETRIES` so a process whose
+            // bundle id never resolves still eventually gets placed.
+            if is_new && window.bundle_id().is_none() {
+                let retries = self.pending_bundle_retries.entry(id).or_insert(0);
+                if *retries < MAX_BUNDLE_ID_RETRIES {
+                    *retries += 1;
+                    self.windows.insert(id, window);
+                    continue;
+                }
+            }
+            self.pending_bundle_retries.remove(&id);
+
             // Only resolved for brand-new windows — an existing placement's
             // disposition is never re-derived on a later scan or config
             // reload (see `resolve_disposition`'s doc comment). The two
@@ -675,19 +703,35 @@ impl WmState {
                     .entry(target_workspace.to_string())
                     .or_insert(node);
             }
-            PlacementKind::Floating { .. } if !inactive => {
-                let area = self.focused_monitor_area();
-                self.place_floating_window(id, area);
+            PlacementKind::Floating { .. } => {
+                // Joins the tree as a `Node::Floating` leaf exactly like the
+                // `Tiled` arm above, so `workspace_focus`/`focused_node()`
+                // can address it — its actual on-screen frame is separate
+                // (`place_floating_window` below), only written when its
+                // workspace is actually visible right now.
+                let near = self.workspace_focus.get(target_workspace).copied();
+                let root_orientation = self.root_orientation_hint();
+                let node = self
+                    .workspaces
+                    .entry(target_workspace.to_string())
+                    .or_default()
+                    .insert_floating(id, near, root_orientation);
+                self.workspace_focus
+                    .entry(target_workspace.to_string())
+                    .or_insert(node);
+                if !inactive {
+                    let area = self.focused_monitor_area();
+                    self.place_floating_window(id, area);
+                }
             }
-            // A floating window targeting an inactive workspace, and every
-            // "no positional action" kind: nothing to do here — parking
-            // below (if inactive) or simply leaving the window alone is
-            // correct either way.
+            // Every "no positional action" kind: nothing to do here —
+            // parking below (if inactive) or simply leaving the window
+            // alone is correct either way.
             _ => {}
         }
 
         if inactive {
-            self.park(id, 0);
+            self.park(id);
             self.resync_workspace_if_visible_elsewhere(target_workspace);
         }
     }
@@ -729,27 +773,31 @@ impl WmState {
         // without actually moving), nothing previously re-asserted it.
         // Every refresh of an already-known window re-checks this instead.
         // `park`'s target is idempotent (see `AxWindow::set_position`'s
-        // no-op-if-unchanged guard), so calling it redundantly here
-        // whenever the window truly is already parked costs nothing.
+        // no-op-if-unchanged guard) since every parked window shares the
+        // same coordinate now (see `park`'s doc comment) — calling it
+        // redundantly here whenever the window truly is already parked
+        // costs nothing.
         if self.parked_positionable_ids().contains(&id) {
-            self.park(id, 0);
+            self.park(id);
         }
     }
 
     /// Moves a window into a special (non-plain) placement state, removing
-    /// it from its workspace's tiled tree first if it was `Tiled` (a
-    /// minimized/hidden/fullscreen window has no business occupying a
-    /// tile) — `Floating` windows just get their kind swapped in place,
-    /// since they were never in a tree to begin with.
+    /// it from its workspace's tree first if it was `Tiled` or `Floating`
+    /// (both live there as leaves — see `tili_tree::Node` — and a
+    /// minimized/hidden/fullscreen window has no business occupying either
+    /// kind of slot).
     fn demote_to_special(&mut self, id: WindowId, special: SpecialKind, restore: Restore) {
         let Some(workspace) = self.placements.get(&id).map(|p| p.workspace.clone()) else {
             return;
         };
-        let was_tiled = self
-            .placements
-            .get(&id)
-            .is_some_and(|p| matches!(p.kind, PlacementKind::Tiled));
-        if was_tiled {
+        let was_in_tree = self.placements.get(&id).is_some_and(|p| {
+            matches!(
+                p.kind,
+                PlacementKind::Tiled | PlacementKind::Floating { .. }
+            )
+        });
+        if was_in_tree {
             self.remove_from_tree(id, &workspace);
         }
         let kind = match special {
@@ -790,6 +838,16 @@ impl WmState {
                 );
             }
             Restore::Floating => {
+                let near = self.workspace_focus.get(&workspace).copied();
+                let root_orientation = self.root_orientation_hint();
+                let node = self
+                    .workspaces
+                    .entry(workspace.clone())
+                    .or_default()
+                    .insert_floating(id, near, root_orientation);
+                self.workspace_focus
+                    .entry(workspace.clone())
+                    .or_insert(node);
                 self.placements.insert(
                     id,
                     Placement {
@@ -895,6 +953,7 @@ impl WmState {
             self.windows.remove(&id);
             self.remove_placement(id);
             self.pending_removal.remove(&id);
+            self.pending_bundle_retries.remove(&id);
         }
         self.relayout_all_visible();
     }
@@ -1256,13 +1315,13 @@ impl WmState {
                 let outgoing: Vec<WindowId> = self
                     .workspaces
                     .get(&name)
-                    .map(Tree::window_ids)
+                    .map(Tree::tiled_window_ids)
                     .unwrap_or_default()
                     .into_iter()
                     .chain(self.floating_windows_in(&name))
                     .collect();
-                for (i, wid) in outgoing.into_iter().enumerate() {
-                    self.park(wid, i);
+                for wid in outgoing {
+                    self.park(wid);
                 }
             }
         }
@@ -1325,11 +1384,12 @@ impl WmState {
     /// Syncs `workspace_focus` to reflect a real OS focus change for `pid`'s
     /// currently AX-focused/main window — see `sync_focus_from_frontmost`,
     /// the only real caller. A no-op if: the pid's focused window can't be
-    /// resolved, it isn't one of ours, it's not `Tiled` (floating/special
-    /// windows have no node to focus), or it's already the recorded focus
-    /// for its workspace — deliberately doesn't relayout or raise anything,
-    /// since the OS already did the actual focusing here; this only updates
-    /// internal bookkeeping to match reality.
+    /// resolved, it isn't one of ours, it's neither `Tiled` nor `Floating`
+    /// (every other special state has no tree node to focus), or it's
+    /// already the recorded focus for its workspace — deliberately doesn't
+    /// relayout or raise anything, since the OS already did the actual
+    /// focusing here; this only updates internal bookkeeping to match
+    /// reality.
     fn sync_focus_from_pid(&mut self, pid: i32) {
         let Some(window_id) = tili_ax::AxWindow::focused_id_for_pid(pid) else {
             return;
@@ -1337,7 +1397,10 @@ impl WmState {
         let Some(placement) = self.placements.get(&window_id) else {
             return;
         };
-        if !matches!(placement.kind, PlacementKind::Tiled) {
+        if !matches!(
+            placement.kind,
+            PlacementKind::Tiled | PlacementKind::Floating { .. }
+        ) {
             return;
         }
         let workspace = placement.workspace.clone();
@@ -1360,6 +1423,9 @@ impl WmState {
     /// so it stays "the focused one" without needing to look up a target.
     pub fn move_focused(&mut self, dir: Direction) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
+        if self.focused_window_is_floating(current) {
+            return Err("no tiled window is focused".to_string());
+        }
         if !self.active_tree_mut().move_in_direction(current, dir) {
             return Err("no window in that direction".to_string());
         }
@@ -1373,6 +1439,9 @@ impl WmState {
     /// perpendicular container.
     pub fn join(&mut self, dir: Direction) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
+        if self.focused_window_is_floating(current) {
+            return Err("no tiled window is focused".to_string());
+        }
         if self.active_tree_mut().join_with(current, dir) {
             self.relayout_active();
             Ok(())
@@ -1386,6 +1455,9 @@ impl WmState {
     /// `Tree::resize_weight`).
     pub fn resize(&mut self, amount: f32) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
+        if self.focused_window_is_floating(current) {
+            return Err("nothing to resize — no tiled container here".to_string());
+        }
         if self.active_tree_mut().resize_weight(current, amount) {
             self.relayout_active();
             Ok(())
@@ -1402,6 +1474,9 @@ impl WmState {
         root: bool,
     ) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
+        if !root && self.focused_window_is_floating(current) {
+            return Err("no tiled window is focused".to_string());
+        }
         let changed = if root {
             self.active_tree_mut().set_root_orientation(orientation)
         } else {
@@ -1444,6 +1519,9 @@ impl WmState {
     /// the target container is a lone window with no container to toggle.
     pub fn toggle_layout(&mut self, root: bool) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
+        if !root && self.focused_window_is_floating(current) {
+            return Err("no tiled window is focused".to_string());
+        }
         let toggled = if root {
             self.active_tree_mut().toggle_root_layout()
         } else {
@@ -1464,6 +1542,9 @@ impl WmState {
     /// "toggle away from the other one" are the same operation).
     pub fn set_layout(&mut self, kind: tili_ipc::LayoutKind, root: bool) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
+        if !root && self.focused_window_is_floating(current) {
+            return Err("no tiled window is focused".to_string());
+        }
         let is_accordion = if root {
             self.active_tree().is_root_accordion()
         } else {
@@ -1492,6 +1573,9 @@ impl WmState {
     /// `set_orientation`/`toggle_layout`.
     pub fn balance_sizes(&mut self, root: bool) -> Result<(), String> {
         let current = self.focused_node().ok_or("no window is focused")?;
+        if !root && self.focused_window_is_floating(current) {
+            return Err("no tiled window is focused".to_string());
+        }
         if self.active_tree_mut().balance_weights(current, root) {
             self.relayout_active();
             Ok(())
@@ -1525,6 +1609,9 @@ impl WmState {
             window.set_native_fullscreen(next);
             Ok(())
         } else {
+            if self.focused_window_is_floating(current) {
+                return Err("no tiled window is focused".to_string());
+            }
             let workspace = self.active_workspace_name();
             if self.fullscreen_focus.get(&workspace) == Some(&current) {
                 self.fullscreen_focus.remove(&workspace);
@@ -1569,7 +1656,13 @@ impl WmState {
             return Err("window has no placement".to_string());
         };
         let workspace = placement.workspace.clone();
-        let is_tiled = matches!(placement.kind, PlacementKind::Tiled);
+        // `Tiled` and `Floating` are both addressable via a tree `NodeId`
+        // (see `tili_tree::Node::Floating`) — every other kind (Popup,
+        // Minimized, ...) has no node for `find_node` below to return.
+        let addressable = matches!(
+            placement.kind,
+            PlacementKind::Tiled | PlacementKind::Floating { .. }
+        );
 
         let visible_on = self
             .active_workspace
@@ -1581,7 +1674,7 @@ impl WmState {
             None => self.switch_workspace(&workspace)?,
         }
 
-        if is_tiled
+        if addressable
             && let Some(tree) = self.workspaces.get(&workspace)
             && let Some(node) = tree.find_node(id)
         {
@@ -1658,7 +1751,13 @@ impl WmState {
             return;
         };
         let workspace = placement.workspace.clone();
-        let is_tiled = matches!(placement.kind, PlacementKind::Tiled);
+        // `Tiled` and `Floating` are both addressable via a tree `NodeId`
+        // (see `tili_tree::Node::Floating`) — every other kind (Popup,
+        // Minimized, ...) has no node for `find_node` below to return.
+        let addressable = matches!(
+            placement.kind,
+            PlacementKind::Tiled | PlacementKind::Floating { .. }
+        );
 
         let visible_on = self
             .active_workspace
@@ -1723,7 +1822,7 @@ impl WmState {
             }
         }
 
-        if is_tiled
+        if addressable
             && let Some(tree) = self.workspaces.get(&workspace)
             && let Some(node) = tree.find_node(id)
         {
@@ -1816,13 +1915,13 @@ impl WmState {
                     let outgoing: Vec<WindowId> = self
                         .workspaces
                         .get(displaced_name)
-                        .map(Tree::window_ids)
+                        .map(Tree::tiled_window_ids)
                         .unwrap_or_default()
                         .into_iter()
                         .chain(self.floating_windows_in(displaced_name))
                         .collect();
-                    for (i, id) in outgoing.into_iter().enumerate() {
-                        self.park(id, i);
+                    for id in outgoing {
+                        self.park(id);
                     }
                 }
             }
@@ -1870,41 +1969,46 @@ impl WmState {
 
     /// Toggles the focused window between `Tiled` and `Floating` at
     /// runtime, independent of any `floating-rules` match at creation time.
-    /// Turning floating *on* always targets the tree-focused window (the
-    /// only kind of window `focused_node()` can point at, by construction).
-    /// Turning it *off* has no equivalent tracked "focused floating window"
-    /// concept to fall back on, so it targets an arbitrary `Floating`
-    /// window in the active workspace instead — correct for the common
-    /// case of exactly one floating window at a time.
+    /// Always targets whatever `focused_node()` points at — since floating
+    /// windows are `Node::Floating` leaves in the same tree as tiled ones
+    /// (see `tili_tree::Node`), that's now exactly the real focused window
+    /// either way, no separate "arbitrary floating window" fallback needed.
     pub fn set_floating(&mut self, floating: bool) -> Result<(), String> {
         let workspace = self.active_workspace_name();
-        // `id` is resolved differently per direction — the tree-focused
-        // window when turning floating *on* (the only kind `focused_node()`
-        // can point at), an arbitrary already-`Floating` window in the
-        // workspace when turning it *off* (see this method's own doc
-        // comment) — so it's always already in the *other* state than
-        // requested; there's no "already there" case to short-circuit.
-        let id = if floating {
-            let current = self.focused_node().ok_or("no window is focused")?;
-            self.active_tree()
-                .window_at(current)
-                .ok_or("focused window not found")?
-        } else {
-            self.floating_windows_in(&workspace)
-                .first()
-                .copied()
-                .ok_or("no floating window to un-float")?
-        };
+        let current = self.focused_node().ok_or("no window is focused")?;
+        let id = self
+            .active_tree()
+            .window_at(current)
+            .ok_or("focused window not found")?;
+        let already_floating = matches!(
+            self.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Floating { .. })
+        );
+        if floating == already_floating {
+            return Err(if floating {
+                "focused window is already floating".to_string()
+            } else {
+                "focused window is already tiled".to_string()
+            });
+        }
 
+        self.remove_from_tree(id, &workspace);
         if floating {
-            self.remove_from_tree(id, &workspace);
             self.placements.insert(
                 id,
                 Placement {
-                    workspace,
+                    workspace: workspace.clone(),
                     kind: PlacementKind::Floating { manual: None },
                 },
             );
+            let near = self.workspace_focus.get(&workspace).copied();
+            let root_orientation = self.root_orientation_hint();
+            let node = self
+                .workspaces
+                .entry(workspace.clone())
+                .or_default()
+                .insert_floating(id, near, root_orientation);
+            self.set_focused_node(node);
             let area = self.focused_monitor_area();
             self.place_floating_window(id, area);
         } else {
@@ -1966,18 +2070,21 @@ impl WmState {
         // Captured before any parking/relayout so the incoming workspace's
         // windows can be brought on screen *first* (see below) — each AX
         // position write is a synchronous per-window round-trip, not an
-        // atomic swap, so parking the outgoing windows before the incoming
-        // ones arrive leaves a real (if brief) gap with nothing on screen
-        // but the desktop.
-        let outgoing: Vec<WindowId> = current.as_ref().map_or(Vec::new(), |outgoing_name| {
+        // atomic swap, so parking the outgoing *tiled* windows before the
+        // incoming ones arrive leaves a real (if brief) gap with nothing on
+        // screen but the desktop. Floating and tiled are tracked separately
+        // (see below) since that "avoid a blank gap" reasoning only applies
+        // to tiled windows, which fill the screen — floating ones don't.
+        let outgoing_tiled: Vec<WindowId> = current.as_ref().map_or(Vec::new(), |outgoing_name| {
             self.workspaces
                 .get(outgoing_name)
-                .map(Tree::window_ids)
+                .map(Tree::tiled_window_ids)
                 .unwrap_or_default()
-                .into_iter()
-                .chain(self.floating_windows_in(outgoing_name))
-                .collect()
         });
+        let outgoing_floating: Vec<WindowId> =
+            current.as_ref().map_or(Vec::new(), |outgoing_name| {
+                self.floating_windows_in(outgoing_name)
+            });
 
         if let Some(swap_id) = swap_monitor {
             match &current {
@@ -1994,19 +2101,18 @@ impl WmState {
 
         self.relayout_active();
         self.reposition_floating_in_active_workspace();
-        if let Some(swap_id) = swap_monitor {
-            // The outgoing workspace is now `swap_id`'s active one — laid
-            // out directly onto that monitor's own frame below, never
-            // parked at all (parking then immediately relaying out
-            // elsewhere would just be a second, needless flash).
-            self.relayout_monitor(swap_id);
-            self.reposition_floating_for_monitor(swap_id);
-        } else {
-            for (i, id) in outgoing.into_iter().enumerate() {
-                self.park(id, i);
-            }
-        }
 
+        // Raised *before* either outgoing park loop below, not after —
+        // `raise_focused` changes z-order/keyboard focus only, it doesn't
+        // draw anything, so moving it earlier can't uncover the "blank
+        // screen" gap `outgoing_tiled`'s comment above is about. Some apps
+        // animate a `kAXPositionAttribute` change instead of snapping
+        // instantly; if `name`'s app isn't topmost yet by the time a
+        // floating outgoing window's park write lands, that window (always
+        // above tiled content in z-order) can still render mid-animation on
+        // top of the just-shown incoming workspace even though its park
+        // write was issued first. Settling z-order here means any such
+        // animation plays out already-hidden behind `name`.
         let restore = self
             .workspace_focus
             .get(name)
@@ -2015,6 +2121,25 @@ impl WmState {
         if let Some(node) = restore {
             self.set_focused_node(node);
             self.raise_focused();
+        }
+
+        if swap_monitor.is_none() {
+            for id in outgoing_floating {
+                self.park(id);
+            }
+        }
+
+        if let Some(swap_id) = swap_monitor {
+            // The outgoing workspace is now `swap_id`'s active one — laid
+            // out directly onto that monitor's own frame below, never
+            // parked at all (parking then immediately relaying out
+            // elsewhere would just be a second, needless flash).
+            self.relayout_monitor(swap_id);
+            self.reposition_floating_for_monitor(swap_id);
+        } else {
+            for id in outgoing_tiled {
+                self.park(id);
+            }
         }
 
         Ok(())
@@ -2034,9 +2159,10 @@ impl WmState {
         self.switch_workspace(&target)
     }
 
-    /// Moves the focused window into a different workspace's tree and
-    /// parks it immediately, unless the target workspace happens to
-    /// already be visible on some other monitor — in that case it's
+    /// Moves the focused window — tiled or floating, whichever it actually
+    /// is — into a different workspace's tree and parks it immediately,
+    /// unless the target workspace happens to already be visible on some
+    /// other monitor — in that case it's
     /// relaid-out there right away instead of sitting parked. Focus moves
     /// to whatever the active workspace suggests next.
     pub fn move_focused_to_workspace(&mut self, target_name: &str) -> Result<(), String> {
@@ -2055,6 +2181,14 @@ impl WmState {
             .active_tree()
             .window_at(current_node)
             .ok_or("focused window not found")?;
+        // Preserves whatever `id` already was — moving a floating window to
+        // another workspace must keep it floating there, not force it back
+        // to tiled just because `Tree::remove_window`/`insert_*` need to
+        // know which leaf kind to recreate.
+        let was_floating = matches!(
+            self.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Floating { .. })
+        );
 
         let suggested = self.active_tree_mut().remove_window(id);
         match suggested {
@@ -2072,18 +2206,26 @@ impl WmState {
             .workspaces
             .get_mut(target_name)
             .expect("validated above");
-        let new_node = target_tree.insert_window(id, target_focus_hint, root_orientation);
+        let new_node = if was_floating {
+            target_tree.insert_floating(id, target_focus_hint, root_orientation)
+        } else {
+            target_tree.insert_window(id, target_focus_hint, root_orientation)
+        };
         self.workspace_focus
             .insert(target_name.to_string(), new_node);
         self.placements.insert(
             id,
             Placement {
                 workspace: target_name.to_string(),
-                kind: PlacementKind::Tiled,
+                kind: if was_floating {
+                    PlacementKind::Floating { manual: None }
+                } else {
+                    PlacementKind::Tiled
+                },
             },
         );
 
-        self.park(id, 0);
+        self.park(id);
         self.resync_workspace_if_visible_elsewhere(target_name);
         self.relayout_active();
         Ok(())
@@ -2121,13 +2263,17 @@ impl WmState {
     }
 
     /// Drops a window's placement entirely — from its workspace's `Tree`
-    /// if it was tiled (see `remove_from_tree`), or just from `placements`
-    /// otherwise (nothing else ever sat in a `Tree`).
+    /// if it was `Tiled` or `Floating` (see `remove_from_tree`), or just
+    /// from `placements` otherwise (every other kind never sat in a
+    /// `Tree`).
     fn remove_placement(&mut self, id: WindowId) {
         let Some(placement) = self.placements.remove(&id) else {
             return;
         };
-        if matches!(placement.kind, PlacementKind::Tiled) {
+        if matches!(
+            placement.kind,
+            PlacementKind::Tiled | PlacementKind::Floating { .. }
+        ) {
             self.remove_from_tree(id, &placement.workspace);
         }
     }
@@ -2158,6 +2304,21 @@ impl WmState {
         if removed_leaf.is_some() && self.fullscreen_focus.get(workspace) == removed_leaf.as_ref() {
             self.fullscreen_focus.remove(workspace);
         }
+    }
+
+    /// Whether `node` (a `focused_node()` result) is a `Floating` leaf —
+    /// every tiled-topology command (move/join/resize/orientation/layout/
+    /// balance, and non-native fullscreen) is meaningless for one, since
+    /// `layout` always excludes `Floating` nodes from sizing (see
+    /// `tili_tree::Node::Floating`'s doc comment). `focus`,
+    /// `move_focused_to_workspace`, `set_floating`, `close_focused`, and
+    /// native fullscreen all work correctly for a floating focus and don't
+    /// call this.
+    fn focused_window_is_floating(&self, node: NodeId) -> bool {
+        self.active_tree()
+            .window_at(node)
+            .and_then(|id| self.placements.get(&id))
+            .is_some_and(|p| matches!(p.kind, PlacementKind::Floating { .. }))
     }
 
     fn focused_node(&self) -> Option<NodeId> {
@@ -2238,14 +2399,23 @@ impl WmState {
     }
 
     /// Moves a window to hug a real monitor's own corner (see
-    /// `tili_ax::parking_position`) without resizing it. `offset_index`
-    /// spreads multiple simultaneously-parked windows apart so they don't
-    /// all land on the exact same coordinate — subtracted *inward* (toward
-    /// the center of the screen), never outward past the corner, since
-    /// going outward is exactly the "push it far away" approach confirmed
-    /// not to work (see `parking_position`'s doc comment); moving inward
-    /// stays safely on-screen regardless of how many windows need spreading.
-    fn park(&mut self, id: WindowId, offset_index: usize) {
+    /// `tili_ax::parking_position`) without resizing it. Every parked
+    /// window targets the exact same coordinate — `parking_position`'s
+    /// "hidden regardless of size" guarantee only holds with the origin
+    /// sitting exactly `PARK_EPSILON` inside the corner; an earlier version
+    /// of this function shifted each additional simultaneously-parked
+    /// window inward by a step so they wouldn't all land on the identical
+    /// point, but that shift itself moves the origin off the one spot the
+    /// hiding trick depends on, exposing a real on-screen strip as wide as
+    /// the shift — there's no way to "spread apart" and stay hidden at the
+    /// same time, and nothing actually needs them spread apart (they're all
+    /// invisible at the same point regardless of how many share it). This
+    /// also keeps re-parking idempotent for free: `reconcile_existing_placement`'s
+    /// re-assertion targets the same coordinate no matter which caller
+    /// parked the window first, so `AxWindow::set_position`'s
+    /// no-op-if-unchanged guard genuinely no-ops instead of needing to
+    /// remember which offset a specific call used.
+    fn park(&mut self, id: WindowId) {
         self.capture_manual_geometry_before_park(id);
         let Some(window) = self.windows.get_mut(&id) else {
             return;
@@ -2253,8 +2423,7 @@ impl WmState {
         let frame = window.frame();
         let (origin_x, origin_y) =
             tili_ax::parking_position(&self.monitors, (frame.width, frame.height));
-        let x = origin_x - (offset_index as f64 * PARK_OFFSET_STEP);
-        window.set_position(x, origin_y);
+        window.set_position(origin_x, origin_y);
     }
 
     fn monitor_frame(&self, monitor_id: u32) -> Option<Rect> {
@@ -2475,30 +2644,40 @@ impl WmState {
     }
 
     /// Computes and writes `id`'s floating frame within `area` (see
-    /// `initial_floating_frame_in`), then — if centering was requested —
-    /// reads back the window's *actual* resulting size and corrects its
-    /// position if the app silently clamped the requested size along one
-    /// axis (e.g. a fixed-width Settings window that only resizes
-    /// vertically). Centering math run against the *requested* size would
-    /// otherwise leave the window visibly off-center once the real,
-    /// clamped size is accounted for. A no-op correction (via
-    /// `AxWindow::set_position`'s own epsilon guard) when nothing was
-    /// actually clamped. The one place every floating-placement call site
-    /// should go through, rather than calling `frame_setter.set_frame`
-    /// directly.
+    /// `initial_floating_frame_in`). If centering wasn't requested, this is
+    /// a single `frame_setter.set_frame` write, like any other placement.
     ///
-    /// Note: this window is never inserted into a `tili_tree::Tree` (see
-    /// `place_new_window`'s `Floating` arm), so it structurally can never be
-    /// given a tiled frame by `relayout_active`/`relayout_monitor` — the
-    /// only frame this function or its caller ever writes is the floating
-    /// one computed here. A brief visible flash of the app/OS's own default
-    /// frame *before* this runs (i.e. before tili's `WindowsChanged` event
-    /// for the new window is even dispatched) is a separate, accepted
-    /// architectural limitation: reacting after window creation via AX
-    /// notifications has no way to intercept the very first paint, and
-    /// there's no reliable public-API way to hide a single window (only a
-    /// whole app) to mask it. Don't mistake the tree-insertion guarantee
-    /// above for "therefore no flicker is possible."
+    /// If centering *was* requested, resizes first — before ever writing a
+    /// position — and reads back the window's *actual* resulting size, so
+    /// centering math always runs against the real size instead of the
+    /// requested one. Some apps silently clamp the requested size along one
+    /// axis (e.g. System Settings' fixed width); computing the centered
+    /// position from the *requested* size first and correcting afterward
+    /// (as this used to do) moves the window once to a wrong center and
+    /// then again to the real one — two separate AX round-trips, and thus
+    /// two separate paints, a visible double-flick on every placement of a
+    /// fixed-one-axis app. Resizing first means the position is only ever
+    /// written once. `AxWindow::set_size`/`set_position`'s own
+    /// no-op-if-unchanged guards make both a no-op when nothing was
+    /// actually clamped, matching the old behavior for a normally-resizable
+    /// app. This bypasses `frame_setter` for the centered case (same
+    /// precedent as `park`'s direct `set_position` call — a narrow,
+    /// non-animateable write, not the tiled-layout seam `WindowFrameSetter`
+    /// exists for).
+    ///
+    /// Note: this window also lives in its workspace's `tili_tree::Tree` as
+    /// a `Node::Floating` leaf (see `place_new_window`'s `Floating` arm) so
+    /// `workspace_focus`/`focused_node()` can address it, but that leaf is
+    /// excluded from all `Tiles`/`Accordion` sizing — the only frame this
+    /// function or its caller ever writes is the floating one computed
+    /// here, never a tiled one from `relayout_active`/`relayout_monitor`. A
+    /// brief visible flash of the app/OS's own default frame *before* this
+    /// runs (i.e. before tili's `WindowsChanged` event for the new window
+    /// is even dispatched) is a separate, accepted architectural
+    /// limitation: reacting after window creation via AX notifications has
+    /// no way to intercept the very first paint, and there's no reliable
+    /// public-API way to hide a single window (only a whole app) to mask
+    /// it.
     fn place_floating_window(&mut self, id: WindowId, area: Rect) {
         let Some(window) = self.windows.get(&id) else {
             return;
@@ -2507,14 +2686,12 @@ impl WmState {
         let Some(window) = self.windows.get_mut(&id) else {
             return;
         };
-        self.frame_setter.set_frame(window, frame);
         if !center {
+            self.frame_setter.set_frame(window, frame);
             return;
         }
+        window.set_size(frame.width, frame.height);
         let actual = window.live_frame();
-        if frames_match(actual, frame) {
-            return;
-        }
         let corrected_x = area.x + (area.width - actual.width) / 2.0;
         let corrected_y = area.y + (area.height - actual.height) / 2.0;
         window.set_position(corrected_x, corrected_y);
@@ -3122,6 +3299,28 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_existing_placement_reparks_an_already_parked_window() {
+        // Regression test: every parked window targets the same coordinate
+        // now (see `park`'s doc comment), so `reconcile_existing_placement`'s
+        // re-assertion can call `park(id)` with no offset to remember or
+        // reproduce — this just confirms the call succeeds without a real
+        // `AxWindow` present (park's own AX write is best-effort/no-op'd).
+        let mut state = floating_test_state();
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: "parked".to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+        state.park(1);
+
+        state.reconcile_existing_placement(1, false, false, false);
+
+        assert!(state.parked_positionable_ids().contains(&1));
+    }
+
+    #[test]
     fn unpark_all_does_not_panic_with_no_real_windows() {
         let mut state = floating_test_state();
         state.placements.insert(
@@ -3606,19 +3805,24 @@ mod tests {
             state.placements.get(&1).map(|p| &p.kind),
             Some(PlacementKind::Floating { .. })
         ));
-        assert!(
-            state
-                .workspaces
-                .get(DEFAULT_WORKSPACE)
-                .unwrap()
-                .find_node(1)
-                .is_none()
-        );
+        let tree = state.workspaces.get(DEFAULT_WORKSPACE).unwrap();
+        // Still addressable — just no longer counted as tiled or laid out.
+        assert!(tree.find_node(1).is_some());
+        assert!(!tree.tiled_window_ids().contains(&1));
     }
 
     #[test]
     fn set_floating_false_moves_a_floating_window_into_the_tree() {
         let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+        let node = state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_floating(1, None, root_orientation);
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), node);
         state.placements.insert(
             1,
             Placement {
@@ -3638,8 +3842,8 @@ mod tests {
                 .workspaces
                 .get(DEFAULT_WORKSPACE)
                 .unwrap()
-                .find_node(1)
-                .is_some()
+                .tiled_window_ids()
+                .contains(&1)
         );
     }
 
@@ -3835,14 +4039,32 @@ mod tests {
     }
 
     #[test]
-    fn place_new_window_floating_into_the_active_workspace_never_enters_a_tree() {
+    fn place_new_window_floating_joins_the_tree_as_an_inert_leaf() {
         let mut state = floating_test_state();
         state.place_new_window(
             1,
             &PlacementKind::Floating { manual: None },
             DEFAULT_WORKSPACE,
         );
-        assert!(!state.active_tree().window_ids().contains(&1));
+        // Addressable (so `workspace_focus`/`focused_node()` can point at
+        // it — see `tili_tree::Node::Floating`), but never counted as a
+        // *tiled* window and never given a layout rect.
+        assert!(state.active_tree().window_ids().contains(&1));
+        assert!(!state.active_tree().tiled_window_ids().contains(&1));
+        assert!(
+            state
+                .active_tree()
+                .layout(
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1000.0,
+                        height: 800.0,
+                    },
+                    Gaps::default()
+                )
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3938,5 +4160,95 @@ mod tests {
 
         assert!(state.move_focused_to_workspace("b").is_ok());
         assert!(state.relayout_calls.get() > 0);
+    }
+
+    #[test]
+    fn move_focused_to_workspace_moves_the_floating_focus_not_a_stale_tiled_one() {
+        // Regression test: Ghostty (tiled) and Note (floating) both on the
+        // default workspace, with Note actually focused — before
+        // `Node::Floating` existed, `workspace_focus` could only ever point
+        // at a tiled node, so this command moved Ghostty instead of Note.
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+
+        let tiled_node = state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_window(1, None, root_orientation);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+
+        let floating_node = state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_floating(2, Some(tiled_node), root_orientation);
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), floating_node);
+        state.workspaces.insert("random".to_string(), Tree::new());
+
+        assert!(state.move_focused_to_workspace("random").is_ok());
+
+        assert_eq!(
+            state.placements.get(&2).map(|p| &p.workspace),
+            Some(&"random".to_string())
+        );
+        assert!(matches!(
+            state.placements.get(&2).map(|p| &p.kind),
+            Some(PlacementKind::Floating { .. })
+        ));
+        assert_eq!(
+            state.placements.get(&1).map(|p| &p.workspace),
+            Some(&DEFAULT_WORKSPACE.to_string()),
+            "the tiled window must stay put"
+        );
+        assert!(
+            state
+                .workspaces
+                .get(DEFAULT_WORKSPACE)
+                .unwrap()
+                .tiled_window_ids()
+                .contains(&1)
+        );
+    }
+
+    #[test]
+    fn move_focused_errors_when_the_focused_window_is_floating() {
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+        let floating_node = state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_floating(1, None, root_orientation);
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), floating_node);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+
+        assert!(state.move_focused(Direction::Right).is_err());
+        assert!(state.join(Direction::Right).is_err());
+        assert!(state.resize(0.1).is_err());
+        assert!(state.balance_sizes(false).is_err());
     }
 }

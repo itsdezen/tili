@@ -76,9 +76,11 @@ focus sync, polling/timing, multi-monitor handling, or release signing.**
   strings become `Command::Raw` and fail at `dispatch()` time, so a typo'd
   config still loads.
 - **`tili-daemon`** — the window manager process. `state.rs` holds
-  `WmState`: live `AxWindow` handles, one `Tree` per workspace for tiled
-  windows, a `placements` index for O(1) window→workspace lookup, and
-  floating windows outside any `Tree`. `dispatch.rs` has the single
+  `WmState`: live `AxWindow` handles, one `Tree` per workspace holding both
+  tiled and floating windows (a floating window is a `Node::Floating` leaf
+  — addressable via `workspace_focus` like any tiled one, but excluded from
+  layout sizing), and a `placements` index for O(1) window→workspace
+  lookup plus disposition. `dispatch.rs` has the single
   `dispatch(&mut WmState, Command) -> Response` both the socket and hotkey
   paths call (`Command::Shutdown` is the one documented exception — it's
   process lifecycle, handled in `main.rs`'s loop). `dispatch()` syncs

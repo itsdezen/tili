@@ -28,14 +28,18 @@ belt-and-suspenders bundle-id denylist forcing `FloatingRuleMode::Ignore`
 for a few specific confirmed cases, in case the general signal above
 doesn't apply to some future process.
 
-`AxWindow::set_frame`/`set_position`/`focus` are the only place real
-windows get moved/resized/raised — `set_frame` sets position before size
-(some apps clamp size based on current position), `set_position` only moves
-(used to park a window off-screen without needlessly resizing it, M4), and
-both writes are best-effort (`let _ =` on the AX result; a window that
-refuses a write is left alone, matching every other AX-based WM). Both also
-update the cached `frame` field to match what was just written, so
-`WmState::list_windows` reflects reality without a wasted AX read-back —
+`AxWindow::set_frame`/`set_position`/`set_size`/`focus` are the only place
+real windows get moved/resized/raised — `set_frame` sets position before
+size (some apps clamp size based on current position), `set_position` only
+moves (used to park a window off-screen without needlessly resizing it,
+M4), `set_size` only resizes (used by `tili-daemon`'s floating-window
+centering to discover an app's real, possibly-clamped size *before* writing
+a position, so centering a fixed-one-axis app like System Settings only
+ever needs one position write instead of one wrong-then-corrected pair),
+and all three writes are best-effort (`let _ =` on the AX result; a window
+that refuses a write is left alone, matching every other AX-based WM). All
+three also update the cached `frame` field to match what was just written,
+so `WmState::list_windows` reflects reality without a wasted AX read-back —
 this is why `WindowFrameSetter::set_frame` takes `&mut AxWindow`.
 
 ## frame_setter.rs — the animation seam

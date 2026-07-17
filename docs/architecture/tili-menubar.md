@@ -33,6 +33,26 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   results to the main thread over an `mpsc::channel` drained by a cheap
   50ms `NSTimer` tick (not itself a poll interval — the channel is normally
   empty; real work only happens right after `wait_for_change` unblocks).
+  Server-side, the accept arm calls `change_notify.clone().notified_owned()`
+  *synchronously*, before `tokio::spawn`-ing the task that awaits it — not
+  lazily inside the spawned task — since `Notify` snapshots its
+  wakeup-count baseline at the moment `notified()`/`notified_owned()` is
+  called; capturing it only after the task actually starts running on a
+  worker thread left a real gap where a rapid burst of changes (e.g.
+  spamming a workspace-switch hotkey) could fire `notify_waiters()` between
+  spawn and that first poll, silently missing the wakeup and leaving the
+  badge stuck on a stale workspace until the next unrelated change or the
+  30s timeout.
+  Client-side, `wait_for_change`'s own loop spawns `menu::poll_daemon()`
+  (the two follow-up round trips — `ListMonitors` then `ListWorkspaces` —
+  that fetch the state a wakeup implies changed) onto its own short-lived
+  thread instead of running it inline, so the loop re-issues the next
+  `wait_for_change` immediately rather than after those two round trips
+  finish. `Command::WaitForChange`'s server-side wakeup isn't a queue —
+  nothing is subscribed while no connection is open — so a change firing
+  during that gap used to be silently missed rather than merely delivered
+  late; a rapid hotkey burst landed in it often enough to be noticeable
+  even after the server-side fix above.
   The one deliberate exception: a 1s backoff between reconnect attempts
   while the daemon is unreachable at all (not running, or between
   `tili stop`/`tili start`) — there's no notification to wait on when

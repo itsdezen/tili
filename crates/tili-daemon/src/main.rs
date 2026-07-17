@@ -169,7 +169,24 @@ async fn main() -> std::io::Result<()> {
                         // "WmState mutates from one place only" invariant
                         // the rest of this loop relies on. Deliberately
                         // not counted as `changed` itself.
-                        tokio::spawn(handle_wait_for_change(stream, change_notify.clone()));
+                        //
+                        // `notified_owned()` is called *here*, synchronously,
+                        // rather than inside the spawned task — `Notify`
+                        // snapshots how many times `notify_waiters()` has
+                        // fired at the exact moment it's called, so a rapid
+                        // burst of changes (e.g. spamming a workspace-switch
+                        // hotkey) firing `notify_waiters()` between this
+                        // task being spawned and actually reaching its
+                        // `.await` would otherwise be invisible to it — a
+                        // silently missed wakeup that leaves the caller (the
+                        // menubar badge) stuck showing a stale workspace
+                        // until the next unrelated change or the timeout.
+                        // Capturing the baseline before `tokio::spawn` closes
+                        // that window; `Notify::notified_owned` exists
+                        // specifically for moving a pre-captured wait into a
+                        // spawned task like this.
+                        let notified = change_notify.clone().notified_owned();
+                        tokio::spawn(handle_wait_for_change(stream, notified));
                     }
                     Ok(command) => {
                         let response = dispatch(&mut state, command);
@@ -345,14 +362,17 @@ fn ensure_starter_config_exists(path: &std::path::Path) {
 }
 
 /// Handles one `Command::WaitForChange` connection entirely off the main
-/// select! loop: blocks on `change_notify` (or `WAIT_FOR_CHANGE_TIMEOUT`,
+/// select! loop: blocks on `notified` (or `WAIT_FOR_CHANGE_TIMEOUT`,
 /// whichever comes first), then responds `Ok` — never touches `WmState`,
 /// so running many of these concurrently alongside the main loop is safe.
+/// `notified` is an already-captured `OwnedNotified` (see the accept arm's
+/// comment for why it must be captured before this task is spawned, not
+/// inside it).
 async fn handle_wait_for_change(
     mut stream: tokio::net::UnixStream,
-    change_notify: Arc<tokio::sync::Notify>,
+    notified: tokio::sync::futures::OwnedNotified,
 ) {
-    let _ = tokio::time::timeout(WAIT_FOR_CHANGE_TIMEOUT, change_notify.notified()).await;
+    let _ = tokio::time::timeout(WAIT_FOR_CHANGE_TIMEOUT, notified).await;
     let _ = socket::write_response(&mut stream, &Response::Ok).await;
 }
 

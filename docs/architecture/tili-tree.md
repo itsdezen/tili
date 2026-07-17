@@ -34,3 +34,17 @@ direction `navigate`, `move`'s window-identity `swap_windows`, proportional
   its app's real minimum will overflow its assigned rect; this is a known
   OS/app-level limitation, not something the layout engine tracks or
   corrects.
+- `Node::Floating { window }` (a third leaf kind alongside `Container`/
+  `Window`) is a floating window's focus/topology placeholder: a normal
+  child for `insert_floating`/`remove_window`/`window_at`/`find_node`/
+  `node_for_window` — so `tili-daemon`'s `workspace_focus: NodeId` can
+  address a floating window exactly like a tiled one — but `layout`
+  excludes it entirely from `Tiles`/`Accordion` sizing (zero footprint, no
+  rect emitted, doesn't count toward sibling gaps), and `navigate`/
+  `move_within` skip over one as an immediate sibling rather than landing
+  spatial focus/movement on it. `window_ids()` returns both kinds;
+  `tiled_window_ids()` is `Window`-only, for callers that need to lay out
+  or park tiled windows specifically (e.g. `tili-daemon`'s workspace-switch
+  parking). A floating window's actual on-screen frame is owned by
+  `tili-daemon`'s `placements`/`compute_floating_frame`, never by this
+  crate — `Node::Floating` carries no position/size of its own.

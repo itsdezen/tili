@@ -53,9 +53,21 @@ fn main() {
                 // Either something really changed, or the daemon's own
                 // internal wait just timed out (both look the same here
                 // by design — see Command::WaitForChange's doc comment)
-                // — either way, fetch the real current state.
+                // — either way, fetch the real current state. Spawned onto
+                // its own short-lived thread rather than run inline: this
+                // loop needs to re-issue `wait_for_change` immediately, not
+                // after `poll_daemon`'s two extra round trips finish —
+                // `Command::WaitForChange`'s server-side wakeup isn't a
+                // queue (see its doc comment), so any change firing during
+                // that gap, while nothing here is subscribed yet, is missed
+                // outright rather than just delivered late. Spamming a
+                // workspace-switch hotkey landed in that gap often enough
+                // to leave the badge stuck.
                 Ok(_) => {
-                    let _ = tx.send(menu::poll_daemon());
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(menu::poll_daemon());
+                    });
                 }
                 // Connection failed outright — the daemon isn't reachable
                 // at all (not running, or between `tili stop`/`tili

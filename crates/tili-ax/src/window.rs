@@ -359,6 +359,28 @@ impl AxWindow {
         self.frame.y = y;
     }
 
+    /// Resizes the window without touching its position — used by
+    /// `tili-daemon`'s floating-window centering to discover an app's real
+    /// (possibly clamped) size before computing where to center it, so that
+    /// step only ever needs one subsequent `set_position` call instead of
+    /// moving the window once to a wrong center (computed against the
+    /// requested size) and again to the right one (computed against the
+    /// real, clamped size) — a visible double-move on every placement of a
+    /// fixed-one-axis app like System Settings. Same no-op-if-unchanged
+    /// guard as `set_frame`, and for the same feedback-loop reason.
+    pub fn set_size(&mut self, width: f64, height: f64) {
+        if (self.frame.width - width).abs() < FRAME_EPSILON
+            && (self.frame.height - height).abs() < FRAME_EPSILON
+        {
+            return;
+        }
+        let _ = self
+            .element
+            .set_size_attribute(kAXSizeAttribute, AXSize { width, height });
+        self.frame.width = width;
+        self.frame.height = height;
+    }
+
     /// Raises and focuses this window — used when tiling changes which
     /// window should be frontmost (e.g. after `focus`/`move`).
     /// `kAXRaiseAction`/`kAXFocusedAttribute` alone only raise the window
