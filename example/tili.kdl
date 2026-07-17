@@ -153,9 +153,11 @@ keybindings mode="main" {
     bind "alt-shift-slash" "layout toggle-orientation"
 
     // Grows/shrinks the focused window's share of its nearest tiled
-    // container.
+    // container, or resets that container's children back to equal
+    // shares.
     bind "alt-shift-minus" "resize -0.1"
     bind "alt-shift-equal" "resize 0.1"
+    bind "alt-shift-0" "balance"
 
     // Cycles which connected monitor the above all target — a no-op with
     // only one monitor. See ROADMAP.md M9.
