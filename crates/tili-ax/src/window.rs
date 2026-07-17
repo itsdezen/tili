@@ -38,20 +38,17 @@ pub enum WindowKind {
 /// (`.accessory`/`.prohibited` — system-UI helpers like the Dock,
 /// `SecurityAgent`, or the screenshot toolbar, none of which show a Dock
 /// icon or appear in Cmd-Tab) presenting a window with no close button is
-/// essentially always transient chrome, not a real user-facing window —
-/// this is the one general, broadly-applicable heuristic AeroSpace's own
-/// `isWindowHeuristic` uses unconditionally (`activationPolicy ==
-/// .accessory && closeButton == nil`), ported here because it replaces an
-/// open-ended per-bundle-id denylist with a single structural check. A
-/// regular app's own dialogs/popups still fall through to the subrole logic
-/// below unaffected, since `is_regular_app` is `true` for them.
+/// essentially always transient chrome, not a real user-facing window — a
+/// single structural check (`activationPolicy == .accessory && closeButton
+/// == nil`) instead of an open-ended per-bundle-id denylist. A regular
+/// app's own dialogs/popups still fall through to the subrole logic below
+/// unaffected, since `is_regular_app` is `true` for them.
 ///
 /// Below that: a known dialog subrole is `Dialog`; the standard subrole is
 /// `Standard`; a missing/ambiguous subrole falls back to whether the window
 /// has *any* window-chrome button (close/fullscreen/zoom/minimize) — a
 /// window with none of them and an ambiguous subrole is essentially always
-/// a tooltip/context-menu/popover rather than a real top-level window
-/// (mirrors AeroSpace's `isWindowHeuristicOld`'s "no buttons at all" gate).
+/// a tooltip/context-menu/popover rather than a real top-level window.
 fn classify_window_kind(
     subrole: Option<&str>,
     has_any_chrome_button: bool,
@@ -448,11 +445,10 @@ mod tests {
 
     #[test]
     fn non_regular_app_without_close_button_is_popup_even_with_standard_subrole() {
-        // Mirrors AeroSpace's `isWindowHeuristic`'s unconditional
-        // `activationPolicy == .accessory && closeButton == nil` gate —
-        // catches Dock context menus, SecurityAgent's keychain prompt, the
-        // screenshot toolbar's thumbnail preview, etc. regardless of what
-        // subrole they happen to report.
+        // The unconditional `activationPolicy == .accessory && closeButton
+        // == nil` gate catches Dock context menus, SecurityAgent's keychain
+        // prompt, the screenshot toolbar's thumbnail preview, etc.
+        // regardless of what subrole they happen to report.
         assert_eq!(
             classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), true, false, false),
             WindowKind::Popup

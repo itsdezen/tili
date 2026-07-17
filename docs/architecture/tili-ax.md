@@ -18,9 +18,9 @@ checked before subrole matching (M-fix 0.1.1): a non-regular-activation-
 policy process (`workspace::is_regular_app`, i.e. no Dock icon/Cmd-Tab
 entry — the Dock itself, `SecurityAgent`, the screenshot toolbar, ...)
 presenting a window with no close button is always `Popup` regardless of AX
-role/subrole, ported from AeroSpace's own unconditional `isWindowHeuristic`
-rule after live-hardware testing showed system-UI chrome occasionally
-slipping through the old subrole-only check and getting tiled/re-centered.
+role/subrole, after live-hardware testing showed system-UI chrome
+occasionally slipping through the old subrole-only check and getting
+tiled/re-centered.
 A missing/ambiguous subrole otherwise falls back to whether the window has
 *any* chrome button (close/fullscreen/zoom/minimize), not just fullscreen.
 `tili-daemon/src/state.rs`'s `SYSTEM_UI_BUNDLE_IDS` is a second,

@@ -233,9 +233,9 @@ fn restore_for(kind: &PlacementKind) -> Restore {
 /// `FloatingRuleMode::Ignore` regardless of `tili_ax::WindowKind`'s AX
 /// classification. A second, belt-and-suspenders layer on top of
 /// `classify_window_kind`'s own general
-/// `!is_regular_app && !has_close_button` gate (`tili-ax/src/window.rs` —
-/// ported from AeroSpace's `isWindowHeuristic`), which should already catch
-/// all of these structurally; kept as a guaranteed fix for the *specific*
+/// `!is_regular_app && !has_close_button` gate (`tili-ax/src/window.rs`),
+/// which should already catch all of these structurally; kept as a
+/// guaranteed fix for the *specific*
 /// cases below in case that general signal ever doesn't apply (e.g. a
 /// future macOS version reports one of these processes as `.regular`
 /// activation policy) — confirmed in practice for the Dock's right-click

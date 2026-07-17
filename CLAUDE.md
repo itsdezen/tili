@@ -32,6 +32,17 @@ against `AXUIElement`/Core Graphics/Core Foundation, and needs full Xcode
 dependencies by design; prefer adding logic there over `tili-ax` when
 possible so it stays testable without a Mac.
 
+## Comments
+
+A comment stays scoped to the function/logic it sits next to: why *this*
+code is written the way it is, not the history of how it got there. Don't
+reference other bugs, session narrative ("this was reverted because...",
+"an earlier attempt tried..."), other tools/projects, or issue-tracker-style
+context — that belongs in a commit message or PR description, not in the
+source. If a comment needs a sentence about a rejected alternative, phrase
+it as a property of *this* code ("not X, because Y" is fine; "we used to do
+X but changed it after Z happened" is not).
+
 ## Architecture
 
 This is a Cargo workspace; the crate split and one-way dependency
