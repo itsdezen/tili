@@ -749,8 +749,12 @@ impl Tree {
 
         match self.nodes.get(sibling) {
             Some(Node::Window { .. }) => {
-                if let Some(Node::Container { children, .. }) = self.nodes.get_mut(parent) {
+                if let Some(Node::Container {
+                    children, weights, ..
+                }) = self.nodes.get_mut(parent)
+                {
                     children.swap(idx, target_idx);
+                    weights.swap(idx, target_idx);
                 }
                 true
             }
@@ -1452,6 +1456,31 @@ mod tests {
         let b_rect_after = *after.iter().find(|(w, _)| *w == 2).unwrap();
         assert_eq!(a_rect_after.1, b_rect_before.1);
         assert_eq!(b_rect_after.1, a_rect_before.1);
+    }
+
+    #[test]
+    fn move_within_swaps_weights_along_with_windows() {
+        // Give window 1 a bigger share of the split before moving it, so
+        // a swap that only reorders `children` (forgetting `weights`) would
+        // leave the *sizes* bound to array position instead of following
+        // each window across the move.
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(a));
+        assert!(tree.resize_weight(a, 0.2));
+
+        let before = tree.layout(area(), Gaps::default());
+        let a_width_before = before.iter().find(|(w, _)| *w == 1).unwrap().1.width;
+        let b_width_before = before.iter().find(|(w, _)| *w == 2).unwrap().1.width;
+        assert_ne!(a_width_before, b_width_before);
+
+        assert!(tree.move_in_direction(a, Direction::Right));
+
+        let after = tree.layout(area(), Gaps::default());
+        let a_width_after = after.iter().find(|(w, _)| *w == 1).unwrap().1.width;
+        let b_width_after = after.iter().find(|(w, _)| *w == 2).unwrap().1.width;
+        assert_eq!(a_width_after, a_width_before);
+        assert_eq!(b_width_after, b_width_before);
     }
 
     #[test]

@@ -8,6 +8,16 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Moving a window past a sibling that had previously been resized
+  unevenly could silently reassign sizes instead of moving with the
+  window.** `Tree::move_within`'s swap only reordered a container's
+  `children`, not its parallel `weights` array, so after an uneven
+  `resize_weight` a subsequent `move_in_direction` bound each window to
+  whatever weight already sat at its new array position rather than
+  carrying its own weight along. The swap now moves both arrays together.
+
 ## [0.1.9] - 2026-07-16
 
 A fix release addressing one issue found after `v0.1.8`.
