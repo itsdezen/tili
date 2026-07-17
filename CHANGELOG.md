@@ -8,6 +8,89 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-07-18
+
+A fix release addressing six issues found while daily-driving floating
+windows and the menu bar badge after `v0.1.11`.
+
+### Fixed
+
+- **A newly-opened window (System Settings, most reliably) occasionally
+  got tiled instead of floated, permanently, until closed and reopened.**
+  `apply_windows_changed` resolves a brand-new window's tiled/floating
+  disposition exactly once, and the floating-rule matcher needs
+  `AxWindow::bundle_id()` — resolved via `NSRunningApplication`, with no
+  retry — to be populated. If the window's process had only just launched
+  and `NSRunningApplication` hadn't registered it yet at that exact
+  moment, the matcher silently read as "no rule configured" instead of
+  "couldn't check yet," falling through to the kind-based `Tile` default.
+  Disposition is now deferred (bounded by `MAX_BUNDLE_ID_RETRIES`) instead
+  of resolved against an unresolved bundle id, riding the next
+  `WindowsChanged` event or the existing 20s full-resync safety net.
+
+- **A hotkey bound to move the focused window to another workspace moved
+  the wrong window whenever the actually-focused window was floating.**
+  `workspace_focus` (and the 11 other commands keyed off it — resize,
+  join, orientation, layout, balance, close, ...) could only ever point at
+  a tiled `tili_tree::Tree` node; floating windows lived entirely outside
+  any `Tree`, so clicking one didn't update what the daemon considered
+  "focused," leaving stale tiled-window state behind for these commands to
+  act on. Floating windows are now `Node::Floating` leaves in the same
+  tree as tiled ones — addressable via `workspace_focus`/`focused_node()`
+  like any tiled window, but excluded from `Tiles`/`Accordion` sizing and
+  skipped by directional navigation. Commands that are inherently
+  tiled-only now error clearly instead of silently hitting the wrong
+  window when the real focus is floating.
+
+- **A floating window switching away from its workspace flickered
+  visibly instead of parking cleanly out of sight.** `park()` used to
+  offset each additional simultaneously-parked window inward by a step so
+  multiple windows parked at once wouldn't share the exact same
+  coordinate — but `tili_ax::parking_position`'s "hidden regardless of
+  size" guarantee only holds with the window's origin sitting exactly
+  `PARK_EPSILON` inside the monitor's corner; any inward offset exposes a
+  real on-screen strip as wide as the shift. A second, independent bug
+  (`reconcile_existing_placement` re-parking at a hardcoded offset of `0`
+  regardless of what a window was actually parked at) had been
+  accidentally self-correcting this for months by snapping every parked
+  window back to the true corner roughly 30ms later; fixing that bug on
+  its own is what surfaced this one. Removed the offsetting entirely —
+  every parked window now targets the identical hidden coordinate, since
+  nothing actually needs them spread apart.
+
+- **The menu bar badge could get stuck showing a stale workspace when a
+  workspace-switch hotkey was pressed rapidly.** `tokio::spawn` deferred
+  `Notify::notified()` until the spawned task actually started running,
+  so a `notify_waiters()` firing in the gap between spawning and that
+  first poll was silently missed. Fixed via `Notify::notified_owned()`,
+  which snapshots the wakeup baseline synchronously before the task is
+  ever spawned.
+
+- **The menu bar badge stayed blank on a freshly-started daemon until the
+  user made some change (e.g. a workspace switch).** The background
+  poller went straight into blocking on `Command::WaitForChange`, which
+  doesn't unblock until something actually changes or its own 30s idle
+  timeout fires — so a quiet daemon left the badge in its initial hidden
+  state that whole time. It now polls once, unconditionally, before ever
+  waiting.
+
+- **The menu bar's long-poll design degraded into a continuously-spinning
+  loop shortly after the first real change of a session.** Read-only
+  queries (`Ping`/`ListWindows`/`ListWorkspaces`/`ListMonitors`) counted
+  as "changed" on the daemon's socket handler the same as any mutating
+  command — harmless for occasional CLI use, but the menu bar's own
+  poller calls two of those on every single wakeup, so each wakeup
+  re-notified the very `WaitForChange` connection it had just
+  re-subscribed. Only commands that can actually mutate state count as a
+  change now.
+
+A ~1s delay between clicking a workspace item in the menu bar's dropdown
+and the switch happening is still open — ruled out IPC/socket overhead,
+App Nap, and the two menu-bar fixes above; narrowed to AppKit's own
+`NSMenuItem` target-action dispatch, undiagnosable further without a
+profiler attached to a running process. See
+`docs/architecture/tili-menubar.md`'s "Known issue" section.
+
 ## [0.1.11] - 2026-07-17
 
 A fix release addressing two issues found after `v0.1.10`.
