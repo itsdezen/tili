@@ -84,6 +84,13 @@ to stop it and remove the LaunchAgent (so it stays stopped until you run
 `tili --version`/`tili help` for the installed version and full command
 list.
 
+> [!TIP]
+> If a three-finger swipe up (Mission Control) shows tiled windows at
+> tiny or wildly mismatched sizes, enable **Group windows by
+> application** under **System Settings → Desktop & Dock → Mission
+> Control** — this is a macOS Mission Control layout setting, not
+> something tili controls.
+
 ## Menu bar badge
 
 `tili start` also installs and starts `tili-menubar` alongside the daemon —
