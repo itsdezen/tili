@@ -15,6 +15,8 @@ i3-style workflow · public Accessibility API only · Rust · no SIP disable
 
 [Getting started](#getting-started) · [Commands](#commands) · [Roadmap](ROADMAP.md) · [Contributing](#contributing) · [Architecture](#architecture)
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/itsdezen)
+
 </div>
 
 ---
