@@ -122,6 +122,23 @@ async fn main() -> std::io::Result<()> {
     // `WmState::reveal_current_frontmost`'s doc comment for why this isn't
     // the primary defense against the spurious switch.
     let mut pending_reveal_deadline: Option<tokio::time::Instant> = None;
+    // Snapshot of `WmState::switch_epoch()` taken whenever
+    // `pending_reveal_deadline` above is armed — only meaningful while
+    // that deadline is `Some`. Lets `maintenance_tick` detect a newer,
+    // explicit `switch_workspace` call (a rapid workspace-switch hotkey,
+    // e.g.) that superseded whatever triggered this deferred reveal, and
+    // skip running it instead of reverting the user's later navigation.
+    let mut pending_reveal_epoch: u64 = 0;
+    // Whether the *most recent* arm of `pending_reveal_deadline` was a real
+    // `MouseSignal::ButtonUp` click rather than a poll-detected
+    // `WmEvent::FrontmostAppChanged` edge — forwarded to
+    // `WmState::reveal_current_frontmost` as `allow_unchanged_pid`. A click
+    // needs `true` (see that function's doc comment for the legitimate
+    // Dock-icon-reactivation case this covers); a poll edge needs `false`,
+    // since by the time the deferred check actually runs a same-pid read
+    // means nothing really changed and chasing it would revert whatever
+    // workspace switch the user made in the meantime.
+    let mut pending_reveal_allow_unchanged = false;
     // Drains `pending_pids`, rechecks Phase 5's `pending_removal` grace
     // period, and now also the reveal debounce above and
     // `pending_launch_pids`'s grace period — one combined periodic-
@@ -261,6 +278,8 @@ async fn main() -> std::io::Result<()> {
                             &mut state,
                             &mut pending_pids,
                             &mut pending_reveal_deadline,
+                            &mut pending_reveal_epoch,
+                            &mut pending_reveal_allow_unchanged,
                             event,
                         );
                     }
@@ -283,7 +302,14 @@ async fn main() -> std::io::Result<()> {
                 let reveal_due = pending_reveal_deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
                 if reveal_due {
                     pending_reveal_deadline = None;
-                    state.reveal_current_frontmost();
+                    // A newer, explicit `switch_workspace` call (e.g. a
+                    // rapid workspace-switch hotkey) already superseded
+                    // whatever armed this deferred reveal — that call is
+                    // authoritative, so drop the stale reveal instead of
+                    // reverting the user's later navigation.
+                    if pending_reveal_epoch == state.switch_epoch() {
+                        state.reveal_current_frontmost(pending_reveal_allow_unchanged);
+                    }
                 }
                 changed = pids_changed || reveal_due;
             }
@@ -349,6 +375,8 @@ async fn main() -> std::io::Result<()> {
                         // `REVEAL_DEBOUNCE` rather than called here directly
                         // — see `pending_reveal_deadline`'s doc comment.
                         pending_reveal_deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
+                        pending_reveal_epoch = state.switch_epoch();
+                        pending_reveal_allow_unchanged = true;
                         changed = true;
                     }
                 }
@@ -447,6 +475,8 @@ fn handle_event(
     state: &mut WmState,
     pending_pids: &mut HashSet<i32>,
     pending_reveal_deadline: &mut Option<tokio::time::Instant>,
+    pending_reveal_epoch: &mut u64,
+    pending_reveal_allow_unchanged: &mut bool,
     event: WmEvent,
 ) {
     match event {
@@ -501,6 +531,12 @@ fn handle_event(
             // see its doc comment) raced the same way a stale click read
             // did.
             *pending_reveal_deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
+            *pending_reveal_epoch = state.switch_epoch();
+            // Unlike a real click, a poll-detected edge alone never
+            // justifies chasing a same-pid read once the deferred check
+            // actually runs — see `WmState::reveal_frontmost`'s
+            // `allow_unchanged_pid` doc comment.
+            *pending_reveal_allow_unchanged = false;
         }
     }
 }

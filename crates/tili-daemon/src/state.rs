@@ -481,6 +481,16 @@ pub struct WmState {
     /// (`apply_windows_changed`), it terminates (`remove_app`), or
     /// `LAUNCH_GRACE_PERIOD` elapses (`finalize_expired_launches`).
     pending_launch_pids: HashMap<i32, Instant>,
+    /// Bumped once per real (non-no-op, non-error) `switch_workspace`
+    /// call. `main.rs` snapshots this when arming a deferred
+    /// `reveal_current_frontmost` check (`pending_reveal_deadline`) and
+    /// compares against a fresh read here before running it — if an
+    /// explicit, more recent `switch_workspace` call already happened in
+    /// the meantime, that call is authoritative and the stale deferred
+    /// reveal is dropped instead of reverting the user's newer
+    /// navigation. See `docs/architecture/tili-daemon.md` for the race
+    /// this closes.
+    switch_epoch: u64,
 }
 
 impl Default for WmState {
@@ -525,6 +535,7 @@ impl Default for WmState {
             previous_workspace: None,
             last_frontmost_pid: None,
             pending_launch_pids: HashMap::new(),
+            switch_epoch: 0,
         }
     }
 }
@@ -1825,13 +1836,40 @@ impl WmState {
     /// rather than calling this function directly: see that function's doc
     /// comment and `pending_launch_pids`'s doc comment on `WmState` for the
     /// full mechanism.
-    pub fn reveal_frontmost(&mut self, pid: i32) {
-        let previous_pid = self.last_frontmost_pid.replace(pid);
-        let pid_unchanged = previous_pid == Some(pid);
-
+    ///
+    /// `allow_unchanged_pid` controls whether the `None`/not-visible branch
+    /// below is allowed to switch workspaces when `pid` is the *same* pid
+    /// `last_frontmost_pid` already recorded (`pid_unchanged`). A Dock icon
+    /// click needs `true`: per this doc comment's "Dock icon click" section
+    /// above, re-clicking an already-frontmost app produces no pid edge at
+    /// all, so `pid_unchanged` is expected to be true for the one legitimate
+    /// case this function exists to handle for a click. A poll-detected
+    /// `WmEvent::FrontmostAppChanged` needs `false`: by the time this
+    /// deferred call actually runs, a same-pid read means nothing has
+    /// *really* changed since `last_frontmost_pid` was last set to a real,
+    /// window-owning pid — chasing it anyway reverts a workspace switch the
+    /// user made in the meantime for no reason (confirmed on real hardware:
+    /// rapidly hopping to an empty workspace can transiently reassign
+    /// AX-frontmost to a windowless system process — WindowServer, Dock —
+    /// during `park()`'s off-screen window move, immediately reverting back;
+    /// see `last_frontmost_pid`'s update point below for the other half of
+    /// this fix).
+    pub fn reveal_frontmost(&mut self, pid: i32, allow_unchanged_pid: bool) {
+        // Deliberately updated only once `pid` is confirmed to own a real
+        // focused window, not unconditionally at the top of the function —
+        // a windowless system process (WindowServer, Dock) transiently and
+        // spuriously becoming AX-frontmost during `park()`'s off-screen
+        // window move would otherwise overwrite `last_frontmost_pid` with a
+        // pid that has nothing to do with any real transition, making the
+        // *next* call (for the real, unchanged app) wrongly compute
+        // `pid_unchanged = false` and chase it as if it were a genuine
+        // Cmd-Tab.
         let Some(id) = AxWindow::focused_id_for_pid(pid) else {
             return;
         };
+        let previous_pid = self.last_frontmost_pid.replace(pid);
+        let pid_unchanged = previous_pid == Some(pid);
+
         let Some(placement) = self.placements.get(&id) else {
             return;
         };
@@ -1905,7 +1943,15 @@ impl WmState {
                 // the real enforcement point; `reveal_current_frontmost`'s
                 // own top-of-function check is just a short-circuit on top
                 // of it, not a separate guard.
-                if suppress || !self.pending_launch_pids.is_empty() {
+                // See this function's doc comment on `allow_unchanged_pid`:
+                // a same-pid read this function didn't already permit
+                // chasing means nothing really changed since the last
+                // resolved-to-a-real-window pid, so there's nothing to
+                // reveal.
+                if (pid_unchanged && !allow_unchanged_pid)
+                    || suppress
+                    || !self.pending_launch_pids.is_empty()
+                {
                     return;
                 }
                 if self.switch_workspace(&workspace).is_err() {
@@ -1959,21 +2005,42 @@ impl WmState {
     /// to keep distrusting reads" question is answered by that pid actually
     /// getting a window (`apply_windows_changed`) or `LAUNCH_GRACE_PERIOD`
     /// expiring, not by the fixed debounce.
-    pub fn reveal_current_frontmost(&mut self) {
+    ///
+    /// `allow_unchanged_pid` is forwarded to `reveal_frontmost` as-is — see
+    /// its doc comment. `main.rs` passes `true` when a `MouseSignal::ButtonUp`
+    /// contributed to the pending deferred check, `false` otherwise (a pure
+    /// `WmEvent::FrontmostAppChanged` poll edge).
+    pub fn reveal_current_frontmost(&mut self, allow_unchanged_pid: bool) {
         if !self.pending_launch_pids.is_empty() {
             return;
         }
         if let Some(pid) = tili_ax::workspace::frontmost_app_pid() {
-            self.reveal_frontmost(pid);
+            self.reveal_frontmost(pid, allow_unchanged_pid);
         }
     }
 
     /// Raises/focuses `id` directly (not through `focused_node()` — used by
     /// `summon`, which may target a `Floating` window that has no tracked
     /// tree focus at all).
-    fn raise_focused_window(&self, id: WindowId) {
+    ///
+    /// Updates `last_frontmost_pid` synchronously, right here at the moment
+    /// tili itself changes real macOS frontmost state — not left for
+    /// `reveal_frontmost` to eventually catch up to reactively. Without
+    /// this, a self-inflicted focus change (e.g. `switch_workspace` raising
+    /// a different app when entering a non-empty workspace) shows up to
+    /// `watch.rs`'s 250ms poll as indistinguishable from a real, external
+    /// Cmd-Tab; if the user has already navigated elsewhere by the time
+    /// that poll edge is detected and its deferred `reveal_frontmost` call
+    /// finally runs, `pid_unchanged` would wrongly read `false` (since
+    /// `last_frontmost_pid` was still whatever it was *before* this raise)
+    /// and chase back to the workspace this very call just left — confirmed
+    /// on real hardware via diagnostic logging: rapidly hopping through
+    /// empty workspaces after switching out of one with a real app
+    /// produces exactly this late, self-inflicted "edge."
+    fn raise_focused_window(&mut self, id: WindowId) {
         if let Some(window) = self.windows.get(&id) {
             window.focus();
+            self.last_frontmost_pid = Some(window.pid());
             if self.mouse_follows_focus {
                 let frame = window.frame();
                 tili_ax::warp_cursor_to(frame.x + frame.width / 2.0, frame.y + frame.height / 2.0);
@@ -2169,6 +2236,8 @@ impl WmState {
             return Ok(());
         }
 
+        self.switch_epoch += 1;
+
         let swap_monitor = self
             .active_workspace
             .iter()
@@ -2267,6 +2336,13 @@ impl WmState {
             .clone()
             .ok_or("no previous workspace to switch back to")?;
         self.switch_workspace(&target)
+    }
+
+    /// Current value of `switch_epoch` — see its doc comment on `WmState`.
+    /// `main.rs` is a separate module and the field itself is private, so
+    /// this is the only way it can read it.
+    pub fn switch_epoch(&self) -> u64 {
+        self.switch_epoch
     }
 
     /// Moves the focused window — tiled or floating, whichever it actually
@@ -2479,12 +2555,16 @@ impl WmState {
         }
     }
 
-    fn raise_focused(&self) {
+    /// See `raise_focused_window`'s doc comment for why `last_frontmost_pid`
+    /// is updated synchronously here rather than left for `reveal_frontmost`
+    /// to catch up to reactively.
+    fn raise_focused(&mut self) {
         if let Some(node) = self.focused_node()
             && let Some(id) = self.active_tree().window_at(node)
             && let Some(window) = self.windows.get(&id)
         {
             window.focus();
+            self.last_frontmost_pid = Some(window.pid());
             if self.mouse_follows_focus {
                 let frame = window.frame();
                 tili_ax::warp_cursor_to(frame.x + frame.width / 2.0, frame.y + frame.height / 2.0);
@@ -3631,7 +3711,7 @@ mod tests {
         let mut state = floating_test_state();
         state.note_app_launched(1234);
 
-        state.reveal_current_frontmost();
+        state.reveal_current_frontmost(false);
 
         // The guard must return before ever touching `last_frontmost_pid`
         // (only `reveal_frontmost` sets it) or triggering a relayout —
@@ -4146,6 +4226,39 @@ mod tests {
 
         assert!(state.switch_to_previous_workspace().is_ok());
         assert_eq!(state.active_workspace_name(), "b");
+    }
+
+    #[test]
+    fn switch_epoch_bumps_only_on_a_real_switch() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            workspaces {
+                workspace "a"
+                workspace "b"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        let epoch0 = state.switch_epoch();
+
+        // No-op: already on "a".
+        assert!(state.switch_workspace("a").is_ok());
+        assert_eq!(state.switch_epoch(), epoch0);
+
+        // Error: unknown workspace.
+        assert!(state.switch_workspace("nope").is_err());
+        assert_eq!(state.switch_epoch(), epoch0);
+
+        // Real switch.
+        assert!(state.switch_workspace("b").is_ok());
+        assert_eq!(state.switch_epoch(), epoch0 + 1);
+
+        // Real switch back.
+        assert!(state.switch_to_previous_workspace().is_ok());
+        assert_eq!(state.switch_epoch(), epoch0 + 2);
     }
 
     #[test]

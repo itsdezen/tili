@@ -8,6 +8,32 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-07-18
+
+### Fixed
+
+- **Rapidly switching workspaces in succession, when the sequence ended on
+  an empty workspace, could flick back to a previous, non-empty workspace
+  a fraction of a second later.** `switch_workspace` raises/focuses a
+  window when entering a workspace that already has one, which changes
+  real macOS frontmost state — but `last_frontmost_pid` (the bookkeeping
+  `reveal_frontmost` uses to tell a genuine Cmd-Tab apart from noise) only
+  used to get updated *reactively*, whenever `reveal_frontmost` itself
+  next happened to run. If the user hotkeyed onward before the 250ms poll
+  thread noticed that self-inflicted frontmost change, `reveal_frontmost`
+  read stale bookkeeping, mistook its own recent transition for a fresh
+  external switch, and chased the display back to it. `raise_focused`/
+  `raise_focused_window` now update `last_frontmost_pid` synchronously at
+  the moment they focus a window, so a later, self-caused poll detection
+  is recognized as already-accounted-for. Two smaller hardening changes
+  ride along: `switch_workspace` now tracks a `switch_epoch` so a deferred
+  reveal armed before a newer, explicit workspace switch drops instead of
+  firing stale; and `reveal_frontmost` only chases a same-pid read when
+  the trigger was a real click (not a poll edge), closing a related case
+  where a windowless system process (WindowServer, Dock) transiently and
+  spuriously becoming AX-frontmost during a switch could poison the same
+  bookkeeping.
+
 ## [0.1.14] - 2026-07-18
 
 ### Fixed

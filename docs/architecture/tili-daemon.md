@@ -364,6 +364,83 @@ an unconfirmed reliability benefit against the launch race — an accepted
 trade given `pending_launch_pids` costs little either way, not a value
 tuned to be imperceptible.
 
+A third race lives in the same debounce window: rapid, deliberate
+workspace-switch hotkey presses landing on an empty target workspace.
+`WmState::switch_workspace` never calls `raise_focused`/
+`AxWindow::focus()` when the target has nothing to restore or
+default-focus (its `restore` block only runs `if let Some(node) =
+restore`), so real macOS frontmost-app state is left pointing at
+whatever was focused on the *previous* workspace. If `pending_reveal_deadline`
+was armed (a poll edge or a click) before the user starts hopping through
+empty workspaces, it can still be pending when it fires — up to ~250ms
+(poll) + `REVEAL_DEBOUNCE` + one `maintenance_tick` after the trigger —
+by which point one or more explicit, synchronous `Command::WorkspaceSwitch`
+calls (via `dispatch()`) have already moved the display on.
+`reveal_current_frontmost` re-derives the still-unchanged frontmost pid,
+finds its workspace no longer visible, and calls `switch_workspace` back
+to it, reverting the user's later navigation. `WmState::switch_epoch: u64`
+closes this: incremented once per real (non-no-op, non-error)
+`switch_workspace` call. Both `pending_reveal_deadline` call sites in
+`main.rs` snapshot `state.switch_epoch()` into a sibling
+`pending_reveal_epoch` when arming the deadline; `maintenance_tick` only
+calls `reveal_current_frontmost()` if that snapshot still matches
+`state.switch_epoch()` once the deadline fires — otherwise a newer,
+authoritative switch has already superseded whatever triggered the
+reveal, and it's dropped (the deadline itself is still always cleared). A
+reveal that *does* still run and switches workspaces bumps the epoch
+again itself, which is inert — nothing reads it again that tick.
+
+`switch_epoch` alone doesn't close every variant of the same race, though:
+confirmed on real hardware, hopping to an empty workspace can transiently
+reassign AX-frontmost to a windowless system process (WindowServer, Dock)
+during `park()`'s off-screen window move, before reverting back to the
+real app one poll tick later — two genuine, non-`None` pid edges,
+`FrontmostAppChanged` firing for each. `reveal_frontmost` used to update
+`last_frontmost_pid` unconditionally at the top of the function, before
+checking whether `pid` even owns a focused window
+(`AxWindow::focused_id_for_pid`) — so the windowless system pid's
+transient edge would overwrite `last_frontmost_pid`, making the *next*
+call (for the real, unchanged app reverting back) wrongly compute
+`pid_unchanged = false` and chase it as a "genuine transition," even
+though nothing the user did actually changed. Fixed in two parts:
+`last_frontmost_pid` is now only updated once `pid` is confirmed to own a
+real window, so a windowless system pid can't poison it; and
+`reveal_frontmost`/`reveal_current_frontmost` take an `allow_unchanged_pid`
+bool — the `None`/not-visible branch only switches workspaces when either
+that's `true` or `pid_unchanged` is `false`. `main.rs` tracks this
+alongside `pending_reveal_epoch` as `pending_reveal_allow_unchanged`: a
+`MouseSignal::ButtonUp` arm sets it `true` (the legitimate Dock-icon
+reactivation case above genuinely needs `pid_unchanged` to be true and
+still switch); a `WmEvent::FrontmostAppChanged` arm sets it `false` (a
+poll edge alone never justifies chasing a same-pid read once the
+deferred check actually runs).
+
+The actual dominant cause of the rapid-workspace-switch flicker, confirmed
+via temporary diagnostic logging while reproducing it on real hardware,
+turned out to be simpler than either race above: `switch_workspace` itself
+raises/focuses a window (`raise_focused`) when entering a workspace that
+already has one, which changes real macOS frontmost state — but
+`last_frontmost_pid` used to only get updated *reactively*, inside
+`reveal_frontmost`, whenever that function next happened to run. Between
+"tili raises app X" and "the poll notices X is now frontmost" there's up
+to `RESYNC_INTERVAL` (250ms) of lag; if the user has already hotkeyed
+onward to a different (often empty) workspace by the time that late,
+self-inflicted edge is detected, `reveal_frontmost` computed
+`pid_unchanged` against a `last_frontmost_pid` that was still whatever it
+was *before* tili's own raise — reading `false`, i.e. "a genuine
+transition," and chasing back to the workspace the raise happened on.
+`raise_focused`/`raise_focused_window` (both now `&mut self`) set
+`self.last_frontmost_pid = Some(window.pid())` synchronously at the same
+point they call `window.focus()`, so `reveal_frontmost` sees the
+already-known, unchanged pid whenever the poll's detection of a
+tili-caused focus change eventually arrives — `pid_unchanged` correctly
+reads `true`, and (per `allow_unchanged_pid` above) a poll-triggered
+reveal skips it instead of chasing. `switch_epoch` and
+`allow_unchanged_pid` remain valid defense-in-depth for the races
+described above (a real external Cmd-Tab racing a rapid switch, and the
+windowless-system-pid edge respectively) — this fix closes the specific
+mechanism that was actually firing in the reported repro.
+
 ## Layout commands, config, and dispatch
 
 `toggle_layout`/`set_layout` (M7) wrap `Tree::toggle_layout` for
