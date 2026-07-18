@@ -114,6 +114,11 @@ fn bundle(target: &str, version: &str) {
         std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("copy {}: {e}", src.display()));
     }
 
+    let resources_dir = app.join("Contents/Resources");
+    std::fs::create_dir_all(&resources_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", resources_dir.display()));
+    build_icns(&resources_dir.join("AppIcon.icns"));
+
     // LSUIElement: tili-daemon is a background process, not a Dock app —
     // no icon, no app-switcher entry. CFBundleExecutable points at the
     // daemon specifically (not the CLI) since that's what a LaunchAgent
@@ -135,6 +140,10 @@ fn bundle(target: &str, version: &str) {
     <string>{version}</string>
     <key>CFBundleExecutable</key>
     <string>tili-daemon</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>
@@ -151,6 +160,66 @@ fn bundle(target: &str, version: &str) {
         .unwrap_or_else(|e| panic!("write Info.plist: {e}"));
 
     println!("xtask: bundled {}", app.display());
+}
+
+/// Builds `Contents/Resources/AppIcon.icns` from `assets/icon.png` (a
+/// committed 1024x1024 source) via a temporary `.iconset` — the same
+/// `sips`/`iconutil` pipeline Xcode uses under the hood, both stock macOS
+/// tools. This is what makes tili-daemon/tili-menubar show a real icon
+/// instead of a generic one in System Settings > Privacy & Security >
+/// Accessibility and > General > Login Items & Extensions, since both
+/// processes run from inside this same bundle.
+fn build_icns(out_path: &Path) {
+    let source = PathBuf::from("assets/icon.png");
+    let iconset_dir = PathBuf::from("target/xtask-appicon.iconset");
+    let _ = std::fs::remove_dir_all(&iconset_dir);
+    std::fs::create_dir_all(&iconset_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", iconset_dir.display()));
+
+    for (size, scale) in [
+        (16, 1),
+        (16, 2),
+        (32, 1),
+        (32, 2),
+        (128, 1),
+        (128, 2),
+        (256, 1),
+        (256, 2),
+        (512, 1),
+        (512, 2),
+    ] {
+        let px = size * scale;
+        let suffix = if scale == 1 {
+            format!("icon_{size}x{size}.png")
+        } else {
+            format!("icon_{size}x{size}@2x.png")
+        };
+        let dst = iconset_dir.join(suffix);
+        let status = Command::new("sips")
+            .args(["-z", &px.to_string(), &px.to_string()])
+            .arg(&source)
+            .arg("--out")
+            .arg(&dst)
+            .status()
+            .expect("run sips — is it available on PATH?");
+        if !status.success() {
+            eprintln!("xtask: sips failed with {status}");
+            std::process::exit(1);
+        }
+    }
+
+    let status = Command::new("iconutil")
+        .args(["-c", "icns", "-o"])
+        .arg(out_path)
+        .arg(&iconset_dir)
+        .status()
+        .expect("run iconutil — is it available on PATH?");
+    if !status.success() {
+        eprintln!("xtask: iconutil failed with {status}");
+        std::process::exit(1);
+    }
+
+    let _ = std::fs::remove_dir_all(&iconset_dir);
 }
 
 /// `xtask/entitlements.plist` is a bare `<dict/>` — tili isn't sandboxed

@@ -8,6 +8,20 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-07-18
+
+### Fixed
+
+- **`tili-daemon`/`tili-menubar` showed a generic icon instead of tili's
+  logo in System Settings' Privacy & Security > Accessibility list and
+  General > Login Items & Extensions list.** The bundled `tili.app` these
+  two run from (see CONTRIBUTING.md's release engineering) never set
+  `CFBundleIconFile`/`CFBundleIconName` in its `Info.plist`, and the repo
+  had no icon asset at all. `xtask bundle` now converts a committed
+  1024x1024 `assets/icon.png` into `Contents/Resources/AppIcon.icns` and
+  embeds it — both processes pick it up since they run from the same
+  bundle.
+
 ## [0.1.15] - 2026-07-18
 
 ### Fixed

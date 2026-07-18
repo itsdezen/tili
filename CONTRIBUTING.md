@@ -138,7 +138,9 @@ release.yml just calls `cargo run -p xtask -- package --target <triple>
 --version <ver>` per target:
 1. `bundle` — wraps `tili-daemon`/`tili` in a minimal `tili.app` (gives
    Accessibility permission and codesigning a stable, nameable bundle
-   identifier — `com.tili.daemon` — instead of a bare Unix executable).
+   identifier — `com.tili.daemon` — instead of a bare Unix executable),
+   converting the committed `assets/icon.png` into `AppIcon.icns` along the
+   way so the bundle shows a real icon in System Settings.
 2. `codesign` — hardened runtime + `xtask/entitlements.plist` (minimal;
    tili isn't sandboxed and needs no special entitlements), only if
    `TILI_SIGN_IDENTITY` is set in the environment.

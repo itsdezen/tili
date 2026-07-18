@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/icon.png" width="120" alt="tili logo" />
+
 # tili
 
 **A tiling window manager for macOS, built for speed.**

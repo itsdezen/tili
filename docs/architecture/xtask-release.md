@@ -15,6 +15,13 @@ target. `bundle`/`package` refuse to build if the release tag doesn't match
 `Cargo.toml`'s workspace version (0.1.5), so a forgotten bump fails the
 release instead of silently shipping a stale `--version` string.
 
+`bundle` also converts the committed `assets/icon.png` (1024x1024) into
+`Contents/Resources/AppIcon.icns` via `sips`/`iconutil` and sets
+`CFBundleIconFile`/`CFBundleIconName` in `Info.plist` — this is what gives
+`tili-daemon`/`tili-menubar` a real icon (instead of a generic one) in
+System Settings > Privacy & Security > Accessibility and > General > Login
+Items & Extensions, since both processes run from inside this same bundle.
+
 Certificate generation itself is deliberately *not* automated anywhere (see
 CONTRIBUTING.md's "Release engineering" section) — it's a one-time, human,
 Keychain Access step, because the entire point of the self-signed-cert
