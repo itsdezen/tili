@@ -17,6 +17,18 @@ use tili_ipc::{Command, Response};
 /// comment in `tili-ipc`).
 const WAIT_FOR_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long `pending_reveal_deadline` waits before `maintenance_tick`
+/// actually runs the deferred `WmState::reveal_current_frontmost`. Kept
+/// short: `WmEvent::AppLaunched` doesn't reliably fire for every app launch
+/// that ends up racing this reveal, so `pending_launch_pids` can't be
+/// counted on to be populated by the time this deadline expires — the
+/// actual defense against a spurious switch is `reveal_frontmost`'s
+/// `suppress` check (a previous pid owning zero live windows), which is
+/// independent of this delay. A longer delay buys no proven benefit against
+/// that gap while making ordinary Cmd-Tab/Dock-click-reveal feel laggy, so
+/// this stays short rather than growing to cover a full app launch.
+const REVEAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// The daemon's bundle id, duplicated from `xtask/src/main.rs`'s `BUNDLE_ID`
 /// const (used when wrapping the daemon in `tili.app`) — keep the two in
 /// sync if either changes. Used only to target `tccutil reset` at our own
@@ -96,9 +108,25 @@ async fn main() -> std::io::Result<()> {
     // that moment — a pid re-signaled before its tick naturally coalesces
     // into that one pass rather than triggering a second rescan.
     let mut pending_pids: HashSet<i32> = HashSet::new();
-    // Drains `pending_pids` and rechecks Phase 5's `pending_removal` grace
-    // period — one combined periodic-maintenance branch rather than two,
-    // since both are just "a little time has passed, go recheck something."
+    // Armed by `MouseSignal::ButtonUp` *and* `WmEvent::FrontmostAppChanged`
+    // (both funnel into this one deferred check rather than calling
+    // `WmState::reveal_frontmost`/`reveal_current_frontmost` synchronously)
+    // — gives a same-trigger `WmEvent::AppLaunched` (a separate,
+    // independently-timed async source with no ordering guarantee against
+    // either trigger) a window to land in `pending_launch_pids` before the
+    // deferred check runs, on the chance it closes a race where a
+    // stale/transient `frontmost_app_pid()` read during a cold app launch
+    // causes a spurious workspace switch. A real bounded deadline rather
+    // than "next `maintenance_tick`" (30ms), since `AppLaunched`'s latency
+    // isn't bounded by that tick's own interval. See `REVEAL_DEBOUNCE` and
+    // `WmState::reveal_current_frontmost`'s doc comment for why this isn't
+    // the primary defense against the spurious switch.
+    let mut pending_reveal_deadline: Option<tokio::time::Instant> = None;
+    // Drains `pending_pids`, rechecks Phase 5's `pending_removal` grace
+    // period, and now also the reveal debounce above and
+    // `pending_launch_pids`'s grace period — one combined periodic-
+    // maintenance branch rather than several, since all of these are just
+    // "a little time has passed, go recheck something."
     let mut maintenance_tick = tokio::time::interval(std::time::Duration::from_millis(30));
 
     let config_path = tili_config::default_config_path();
@@ -220,25 +248,44 @@ async fn main() -> std::io::Result<()> {
             event = events.recv() => {
                 match event {
                     Some(event) => {
-                        // AppLaunched/WindowFocused are no-ops in
-                        // handle_event (see its own doc comments) — not
-                        // worth waking a blocked WaitForChange caller for.
+                        // AppLaunched only updates internal bookkeeping
+                        // (`pending_launch_pids`) and WindowFocused is a
+                        // true no-op (see handle_event's own doc comments)
+                        // — neither is worth waking a blocked WaitForChange
+                        // caller for.
                         changed = matches!(
                             event,
                             WmEvent::WindowsChanged { .. } | WmEvent::AppTerminated { .. }
                         );
-                        handle_event(&mut state, &mut pending_pids, event);
+                        handle_event(
+                            &mut state,
+                            &mut pending_pids,
+                            &mut pending_reveal_deadline,
+                            event,
+                        );
                     }
                     None => eprintln!("tili-daemon: event watcher channel closed unexpectedly"),
                 }
             }
             _ = maintenance_tick.tick() => {
-                changed = !pending_pids.is_empty();
+                let pids_changed = !pending_pids.is_empty();
                 for pid in pending_pids.drain() {
                     let windows = tili_ax::list_windows_for_pid(pid);
                     state.apply_windows_changed(pid, windows);
                 }
                 state.finalize_expired_removals();
+                state.finalize_expired_launches();
+
+                // Checked after the pids above so a WindowsChanged for a
+                // just-launched pid that lands in the same tick the
+                // deadline expires already cleared it from
+                // `pending_launch_pids` before this decides whether to skip.
+                let reveal_due = pending_reveal_deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
+                if reveal_due {
+                    pending_reveal_deadline = None;
+                    state.reveal_current_frontmost();
+                }
+                changed = pids_changed || reveal_due;
             }
             Some(config) = config_updates.recv() => {
                 println!("tili-daemon: config reloaded from {}", config_path.display());
@@ -298,8 +345,10 @@ async fn main() -> std::io::Result<()> {
                         // application (common when the current workspace
                         // is empty) — see `WmState::reveal_current_frontmost`'s
                         // doc comment for why `FrontmostAppChanged` never
-                        // fires for that case on its own.
-                        state.reveal_current_frontmost();
+                        // fires for that case on its own. Deferred by
+                        // `REVEAL_DEBOUNCE` rather than called here directly
+                        // — see `pending_reveal_deadline`'s doc comment.
+                        pending_reveal_deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
                         changed = true;
                     }
                 }
@@ -394,7 +443,12 @@ async fn handle_wait_for_change(
     let _ = socket::write_response(&mut stream, &Response::Ok).await;
 }
 
-fn handle_event(state: &mut WmState, pending_pids: &mut HashSet<i32>, event: WmEvent) {
+fn handle_event(
+    state: &mut WmState,
+    pending_pids: &mut HashSet<i32>,
+    pending_reveal_deadline: &mut Option<tokio::time::Instant>,
+    event: WmEvent,
+) {
     match event {
         // Debounced (M-Phase 6): queued for `maintenance_tick` rather than
         // rescanned right here — a burst of notifications for the same pid
@@ -409,9 +463,14 @@ fn handle_event(state: &mut WmState, pending_pids: &mut HashSet<i32>, event: WmE
             pending_pids.remove(&pid);
             state.remove_app(pid);
         }
-        WmEvent::AppLaunched { .. } => {
-            // No-op: the watcher always follows this with a WindowsChanged
-            // for the same pid once it has windows to report.
+        WmEvent::AppLaunched { pid, .. } => {
+            // The watcher always follows this with a `WindowsChanged` for
+            // the same pid once it has windows to report — this just marks
+            // `pid` in `pending_launch_pids` in the meantime, so
+            // `reveal_current_frontmost` knows not to trust a
+            // `frontmost_app_pid()` read until then (see that field's doc
+            // comment on `WmState`).
+            state.note_app_launched(pid);
         }
         WmEvent::WindowFocused { .. } => {
             // No-op: `WmState`'s own focus tracking is instead resolved
@@ -423,12 +482,25 @@ fn handle_event(state: &mut WmState, pending_pids: &mut HashSet<i32>, event: WmE
             // two. Reacting to this event too would be redundant with that
             // synchronous resync, not a fallback for it.
         }
-        WmEvent::FrontmostAppChanged { pid } => {
+        WmEvent::FrontmostAppChanged { .. } => {
             // Unlike `WindowFocused` above, this fires for a pure OS-level
             // frontmost-app change (Cmd-Tab, Mission Control/Control Center)
-            // that never routes through `dispatch()` at all — the only
-            // place that reveals a parked workspace.
-            state.reveal_frontmost(pid);
+            // that would otherwise never route through `dispatch()` at all
+            // — the only path that reveals a parked workspace. Deferred
+            // through the same `pending_reveal_deadline` mechanism as
+            // `MouseSignal::ButtonUp` (re-deriving whatever's frontmost
+            // fresh via `reveal_current_frontmost` once the deadline fires,
+            // rather than trusting this event's own `pid`) instead of
+            // calling `WmState::reveal_frontmost(pid)` directly — see
+            // `REVEAL_DEBOUNCE`'s doc comment for why: this event fires for
+            // *real* AX transitions (unlike a stale click-time read), but
+            // dismissing Spotlight right after launching a cold app
+            // produces a real, transient transition back to whatever was
+            // frontmost before Spotlight, and following that unconditionally
+            // (`reveal_frontmost` always follows a system-UI previous pid —
+            // see its doc comment) raced the same way a stale click read
+            // did.
+            *pending_reveal_deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
         }
     }
 }

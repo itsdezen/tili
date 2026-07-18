@@ -47,13 +47,10 @@ off to `place_new_window`, which inserts into that workspace's own `Tree`
 active, so it still respects where focus was last left there) — a floating
 window additionally gets its initial frame computed/written there too, but
 only if `target_workspace` is actually visible right now. If `target_workspace` isn't the
-one active on the focused monitor, the window is parked immediately and
-`resync_workspace_if_visible_elsewhere` (a fourth "thickness of relayout,"
-alongside `relayout_active`/`relayout_monitor`/`relayout_all_visible`
-below) checks whether it's visible on some *other* monitor and, if so,
-relayouts/repositions it there right away instead of leaving it parked
-until an unrelated later switch — `move_focused_to_workspace` uses the same
-helper for the same reason.
+one active on the focused monitor, `place_new_window` immediately calls
+`switch_workspace` on it, so a window auto-placed by a `workspace-rules`
+match is never left off-screen — `move_focused_to_workspace` does the same
+after moving the focused window into the target tree, for the same reason.
 
 ## Multi-monitor (M9)
 
@@ -192,9 +189,11 @@ depend on window-server UI-activation machinery — then a poll on
 into a floating window is now correctly reflected before the next command
 runs, not just a tiled one.
 
-`handle_event`'s `WmEvent::FrontmostAppChanged { pid }` arm (0.1.1) calls
-`WmState::reveal_frontmost(pid)`, the only reaction to that event — it
-mirrors `summon`'s body (resolve a window, switch to/reveal its workspace
+`handle_event`'s `WmEvent::FrontmostAppChanged { .. }` arm (0.1.1) reacts by
+(eventually — see the debounce note further down) calling
+`WmState::reveal_frontmost(pid)` with whatever's actually frontmost at
+execution time. `reveal_frontmost` itself mirrors `summon`'s body (resolve
+a window, switch to/reveal its workspace
 or just retarget `focused_monitor` if already visible elsewhere, then raise
 it) but resolves the target window via `AxWindow::focused_id_for_pid(pid)`
 instead of a title/bundle-id text query, and silently no-ops instead of
@@ -268,6 +267,66 @@ change *and* nothing was actually revealed/moved) — a real pid transition
 keeps tracking those even when the target was already visible on the
 current monitor; only a click that turns out to have nothing to do with
 switching apps costs one extra AX query and does nothing further.
+
+`reveal_current_frontmost`'s "re-resolve whatever's frontmost *right now*"
+approach above has its own race: launching a brand-new app (a Dock click or
+Spotlight selection that's a cold launch, not a reveal-already-running one)
+also produces a `MouseSignal::ButtonUp`/`FrontmostAppChanged`, but at that
+instant `frontmost_app_pid()` can still report the *previous* app — the new
+process hasn't taken over AX-frontmost status yet, cold-launch latency
+being real (Spotlight genuinely does become AX-frontmost while handling a
+selection, unlike the Dock, so dismissing it right after launching a cold
+app produces a real, if transient, frontmost-app edge back to whatever was
+frontmost *before* Spotlight). `reveal_frontmost` then "reveals" that
+stale/transient, unrelated pid, switching the display to wherever *it*
+lives; moments later the new app's window actually appears and its own
+placement (`place_new_window`) switches again to the real target, producing
+a visible double-jump.
+
+`WmEvent::AppLaunched { pid, .. }` (from `NSWorkspaceDidLaunchApplicationNotification`
+via `tili-ax`'s workspace watcher) calls `WmState::note_app_launched(pid)`,
+recording `pid` in `pending_launch_pids: HashMap<i32, Instant>` until it
+either gets a real window (`apply_windows_changed` clears it once `fresh`
+is non-empty), terminates (`remove_app`), or `launch_grace`
+(`LAUNCH_GRACE_PERIOD`, 2s — a bound against a launched-but-windowless
+process permanently wedging this) elapses (`finalize_expired_launches`).
+`reveal_frontmost` won't switch workspaces while this set is non-empty —
+the guard sits alongside the existing `suppress` check in its
+not-currently-visible (`None`) branch, the only branch that can switch
+workspaces, so it protects both callers (`reveal_current_frontmost` and
+`handle_event`'s `WmEvent::FrontmostAppChanged` arm) from one place.
+Neither caller invokes `reveal_frontmost` synchronously: both just arm
+`pending_reveal_deadline: Option<tokio::time::Instant>` to `now +
+REVEAL_DEBOUNCE`, and `maintenance_tick` runs the deferred
+`state.reveal_current_frontmost()` once that deadline passes (after that
+tick's own `pending_pids` processing, so a same-tick `WindowsChanged` for a
+just-launched pid already clears `pending_launch_pids` first) — re-deriving
+whatever's actually frontmost fresh at execution time rather than trusting
+either trigger's own captured pid, which also lets `FrontmostAppChanged`'s
+handler ignore the `pid` its event carries entirely.
+
+`AppLaunched` isn't a reliable signal in practice, though:
+`NSWorkspaceDidLaunchApplicationNotification` doesn't fire for every launch
+this race can involve, so `pending_launch_pids` can end up empty for the
+exact case it exists to catch — `REVEAL_DEBOUNCE` waiting longer buys
+nothing against that gap, only added latency on ordinary Cmd-Tab/
+Dock-click-reveal. What does reliably prevent the spurious switch is the
+pre-existing `suppress` check above (a previous pid owning zero live
+windows) — unrelated to anything in this section, already there before any
+of this. `pending_launch_pids`/`REVEAL_DEBOUNCE` stay in place as a
+secondary layer for whichever launches *do* get an `AppLaunched` event, at
+low fixed cost (a `HashMap` lookup, a short deadline), but `suppress` is
+the mechanism actually load-bearing for the common case. `REVEAL_DEBOUNCE`
+is kept short (100ms) rather than grown to reliably beat
+`NSWorkspaceDidLaunchApplicationNotification` latency, since that would
+mean covering a full cold launch (hundreds of ms) to be dependable — the
+same "two different timescales" problem `apply_config`'s doc comment
+elsewhere argues against conflating. The cost: every reveal (Dock-click
+*and* Cmd-Tab/Mission Control) is delayed by up to 100ms instead of the
+click case's old ~0-30ms or the `FrontmostAppChanged` case's old 0ms, for
+an unconfirmed reliability benefit against the launch race — an accepted
+trade given `pending_launch_pids` costs little either way, not a value
+tuned to be imperceptible.
 
 ## Layout commands, config, and dispatch
 

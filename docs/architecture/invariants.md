@@ -41,10 +41,18 @@ Four sanctioned, narrowly-scoped exceptions:
    AXObserver/NSWorkspace push into `pending_pids`; the tick is purely a
    debounce/coalescing point (a pid re-signaled before its tick folds into
    that one rescan instead of triggering a second) shared with rechecking
-   `pending_removal`'s grace-period expiry, so two "a little time has
-   passed, go recheck something" concerns don't need two branches. Per-tick
-   cost when idle (`pending_pids` empty, nothing due for removal) is one
-   `HashSet::is_empty()` check plus an O(pending removals) scan, normally
+   `pending_removal`'s grace-period expiry, `pending_launch_pids`'s
+   grace-period expiry, and polling whether `pending_reveal_deadline`
+   (armed by `MouseSignal::ButtonUp` or `WmEvent::FrontmostAppChanged`, a
+   bounded `REVEAL_DEBOUNCE` — a fixed duration, not tied to this tick's own
+   30ms interval — after either) has passed, to run the deferred
+   `WmState::reveal_current_frontmost` (see `tili-daemon.md`'s notes on
+   `reveal_current_frontmost`/`REVEAL_DEBOUNCE` for what this debounce does
+   and doesn't actually protect against) — several "a little time has
+   passed, go recheck something" concerns
+   sharing one branch rather than each getting its own. Per-tick cost when
+   idle (`pending_pids` empty, nothing due for removal, no launch pending,
+   no reveal pending) is a couple of cheap emptiness checks, normally
    zero — CPU sampling on real hardware during the v0.1.7 investigation
    (see CHANGELOG.md) confirmed this tick wasn't a meaningful CPU cost;
    `display.rs`'s `spawn_display_watcher` was (that release fixed a bug

@@ -40,6 +40,15 @@ const FLOAT_DRIFT_EPSILON: f64 = 0.5;
 /// instead of sleeping for real.
 const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
+/// How long a pid stays in `WmState::pending_launch_pids` after
+/// `AppLaunched` before being dropped even without ever getting a window —
+/// a bound so a launched-but-windowless process (a background helper, or
+/// one that fails to start) can't permanently suppress
+/// `reveal_current_frontmost`. Generous relative to a normal GUI app's
+/// cold-launch time on purpose: the cost of leaving it too long is a rare
+/// missed reveal-on-click, not a wrong one.
+const LAUNCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
+
 /// How many times `apply_windows_changed` will defer a brand-new window's
 /// disposition when its `bundle_id()` is still unresolved (racing
 /// `NSRunningApplication`'s own registration right after a process
@@ -387,6 +396,10 @@ pub struct WmState {
     /// `REMOVAL_GRACE_PERIOD`; a field rather than using the constant
     /// directly so tests can shrink it to zero instead of sleeping for real.
     removal_grace: Duration,
+    /// How long a `pending_launch_pids` entry survives without a window —
+    /// starts at `LAUNCH_GRACE_PERIOD`; a field for the same reason as
+    /// `removal_grace` above.
+    launch_grace: Duration,
     /// Test-only instrumentation: how many times `relayout_monitor` actually
     /// proceeded to a real layout pass (not an early no-op return). Lets
     /// tests assert "a relayout happened" without needing a real `AxWindow`
@@ -458,6 +471,16 @@ pub struct WmState {
     /// frontmost app just lost its last window — see that function's doc
     /// comment.
     last_frontmost_pid: Option<i32>,
+    /// pid -> when `AppLaunched` was last recorded for it. Presence means
+    /// the pid launched but doesn't have a window yet — during that
+    /// window, `frontmost_app_pid()` can still report the *previous*
+    /// frontmost pid (the new process hasn't taken over yet), so
+    /// `reveal_current_frontmost` can't trust that read and skips instead
+    /// of risking a spurious `switch_workspace` to wherever the stale pid
+    /// lives. Cleared once the pid actually gets a window
+    /// (`apply_windows_changed`), it terminates (`remove_app`), or
+    /// `LAUNCH_GRACE_PERIOD` elapses (`finalize_expired_launches`).
+    pending_launch_pids: HashMap<i32, Instant>,
 }
 
 impl Default for WmState {
@@ -476,6 +499,7 @@ impl Default for WmState {
             pending_removal: HashMap::new(),
             pending_bundle_retries: HashMap::new(),
             removal_grace: REMOVAL_GRACE_PERIOD,
+            launch_grace: LAUNCH_GRACE_PERIOD,
             #[cfg(test)]
             relayout_calls: std::cell::Cell::new(0),
             workspaces,
@@ -500,6 +524,7 @@ impl Default for WmState {
             fullscreen_focus: HashMap::new(),
             previous_workspace: None,
             last_frontmost_pid: None,
+            pending_launch_pids: HashMap::new(),
         }
     }
 }
@@ -538,6 +563,24 @@ impl WmState {
         self.relayout_all_visible();
     }
 
+    /// Records that `pid` just launched (`WmEvent::AppLaunched`) — see
+    /// `pending_launch_pids`'s doc comment for why `reveal_current_frontmost`
+    /// needs to know this.
+    pub fn note_app_launched(&mut self, pid: i32) {
+        self.pending_launch_pids.insert(pid, Instant::now());
+    }
+
+    /// Drops any `pending_launch_pids` entry older than `LAUNCH_GRACE_PERIOD`
+    /// — the bounded fallback for a launched pid that never gets a window.
+    /// Called from `main.rs`'s `maintenance_tick`, same "a little time has
+    /// passed, go recheck something" shape as `finalize_expired_removals`.
+    pub fn finalize_expired_launches(&mut self) {
+        let now = Instant::now();
+        let grace = self.launch_grace;
+        self.pending_launch_pids
+            .retain(|_, &mut since| now.duration_since(since) < grace);
+    }
+
     /// Replaces one process's windows with a freshly-scanned set, in
     /// response to a `WmEvent::WindowsChanged { pid }`: whatever isn't in
     /// the fresh scan is gone (removed from whichever workspace/placement
@@ -557,6 +600,14 @@ impl WmState {
             let frame = w.frame();
             frame.width > 0.0 && frame.height > 0.0
         });
+
+        // `pid` now genuinely has a window — whatever launched it is no
+        // longer a "just launched, no window yet" case `reveal_current_frontmost`
+        // needs to distrust a `frontmost_app_pid()` read over.
+        if !fresh.is_empty() {
+            self.pending_launch_pids.remove(&pid);
+        }
+
         let fresh_ids: std::collections::HashSet<WindowId> =
             fresh.iter().map(AxWindow::id).collect();
 
@@ -672,15 +723,13 @@ impl WmState {
     /// workspace's own `Tree` next to its own last focus, or floated/
     /// centered if `target_workspace` is the one currently active on the
     /// focused monitor. If `target_workspace` isn't active on the focused
-    /// monitor, the window is parked immediately and, only if
-    /// `target_workspace` happens to already be visible on some *other*
-    /// monitor, resynced there right away instead of sitting parked — the
-    /// same idempotent "park unconditionally, then relayout for real if it
-    /// turns out to be visible somewhere" pattern
-    /// `move_focused_to_workspace` uses. Deliberately keyed only by
-    /// `WindowId`/`PlacementKind`, no `AxWindow` — this is the seam that
-    /// makes per-app-workspace placement unit-testable without a live
-    /// `AXUIElement`, unlike `apply_windows_changed` itself.
+    /// monitor, the focused monitor switches to it immediately (via
+    /// `switch_workspace`, same as `move_focused_to_workspace`) so a window
+    /// auto-placed by a `workspace-rules` match is never left off-screen.
+    /// Deliberately keyed only by `WindowId`/`PlacementKind`, no `AxWindow`
+    /// — this is the seam that makes per-app-workspace placement
+    /// unit-testable without a live `AXUIElement`, unlike
+    /// `apply_windows_changed` itself.
     fn place_new_window(
         &mut self,
         id: WindowId,
@@ -731,8 +780,10 @@ impl WmState {
         }
 
         if inactive {
-            self.park(id);
-            self.resync_workspace_if_visible_elsewhere(target_workspace);
+            // Can only fail on an undeclared workspace, which can't happen
+            // here — `target_workspace` was just inserted into
+            // `self.workspaces` above via `entry(...).or_default()`.
+            let _ = self.switch_workspace(target_workspace);
         }
     }
 
@@ -955,6 +1006,7 @@ impl WmState {
             self.pending_removal.remove(&id);
             self.pending_bundle_retries.remove(&id);
         }
+        self.pending_launch_pids.remove(&pid);
         self.relayout_all_visible();
     }
 
@@ -1740,6 +1792,20 @@ impl WmState {
     /// this function never runs at all — confirmed on real hardware (no
     /// polling interval could fix this, however tight). See
     /// `reveal_current_frontmost` for how that's handled instead.
+    ///
+    /// One more guard lives inside the `None`/not-visible branch below: if
+    /// `pending_launch_pids` is non-empty, `pid` might be a stale or merely
+    /// transient read rather than the user's real target — e.g. Spotlight
+    /// closing right after launching a cold app briefly reports the
+    /// *previous* frontmost app again (a real, if short-lived, AX
+    /// transition `FrontmostAppChanged` genuinely fires on) before the new
+    /// app takes over; blindly following it would switch away to wherever
+    /// that previous pid happens to live. This is why both trigger sources
+    /// — a Dock click and a real `FrontmostAppChanged` transition — funnel
+    /// through `reveal_current_frontmost` and its `main.rs`-side debounce
+    /// rather than calling this function directly: see that function's doc
+    /// comment and `pending_launch_pids`'s doc comment on `WmState` for the
+    /// full mechanism.
     pub fn reveal_frontmost(&mut self, pid: i32) {
         let previous_pid = self.last_frontmost_pid.replace(pid);
         let pid_unchanged = previous_pid == Some(pid);
@@ -1812,7 +1878,15 @@ impl WmState {
                                 )
                         })
                     });
-                if suppress {
+                // `pending_launch_pids` non-empty means some pid launched
+                // moments ago but doesn't have a window yet — `pid` here
+                // could be a stale/transient read (the real target hasn't
+                // taken over AX-frontmost status yet), so don't trust it
+                // enough to switch away from wherever it points. This is
+                // the real enforcement point; `reveal_current_frontmost`'s
+                // own top-of-function check is just a short-circuit on top
+                // of it, not a separate guard.
+                if suppress || !self.pending_launch_pids.is_empty() {
                     return;
                 }
                 if self.switch_workspace(&workspace).is_err() {
@@ -1843,16 +1917,33 @@ impl WmState {
     /// Fallback for a Dock icon click reactivating an app that was already
     /// the OS's nominal frontmost application — see `reveal_frontmost`'s
     /// doc comment for why that leaves no pid edge for
-    /// `WmEvent::FrontmostAppChanged` to fire on. Called on every
-    /// `MouseSignal::ButtonUp` (a real, event-driven `CGEventTap` signal,
-    /// not a poll — a Dock click always involves a real mouse down+up) with
-    /// whatever `frontmost_app_pid()` reports *right now*, regardless of
+    /// `WmEvent::FrontmostAppChanged` to fire on. Called from `main.rs`'s
+    /// `maintenance_tick`, deferred by `REVEAL_DEBOUNCE` from the
+    /// triggering `MouseSignal::ButtonUp` *or* `WmEvent::FrontmostAppChanged`
+    /// — never called synchronously from either — with whatever
+    /// `frontmost_app_pid()` reports at that later point, regardless of
     /// whether it differs from last time. Safe to call this often:
     /// `reveal_frontmost` treats a same-pid, already-visible call as a true
-    /// no-op (see `pid_unchanged`/`did_reveal` there), so an ordinary click
-    /// that has nothing to do with switching apps costs one AX query and
-    /// does nothing further.
+    /// no-op (see `pid_unchanged`/`did_reveal` there), so a deferred check
+    /// that turns out to have nothing to do with switching apps costs one
+    /// AX query and does nothing further.
+    ///
+    /// The `pending_launch_pids` check up front is a short-circuit, not the
+    /// real guard — `reveal_frontmost` enforces it itself (see its doc
+    /// comment). Checking it here as well just skips a real
+    /// `frontmost_app_pid()` AX query when the answer is already known to
+    /// be discarded. `main.rs`'s deferral (through `pending_reveal_deadline`)
+    /// is what gives a same-trigger `AppLaunched` event (a different,
+    /// independent async source, no ordering guarantee against either
+    /// `MouseSignal::ButtonUp` or `WmEvent::FrontmostAppChanged`) time to
+    /// land in `pending_launch_pids` before this runs; the real "how long
+    /// to keep distrusting reads" question is answered by that pid actually
+    /// getting a window (`apply_windows_changed`) or `LAUNCH_GRACE_PERIOD`
+    /// expiring, not by the fixed debounce.
     pub fn reveal_current_frontmost(&mut self) {
+        if !self.pending_launch_pids.is_empty() {
+            return;
+        }
         if let Some(pid) = tili_ax::workspace::frontmost_app_pid() {
             self.reveal_frontmost(pid);
         }
@@ -2160,11 +2251,9 @@ impl WmState {
     }
 
     /// Moves the focused window — tiled or floating, whichever it actually
-    /// is — into a different workspace's tree and parks it immediately,
-    /// unless the target workspace happens to already be visible on some
-    /// other monitor — in that case it's
-    /// relaid-out there right away instead of sitting parked. Focus moves
-    /// to whatever the active workspace suggests next.
+    /// is — into a different workspace's tree, then switches the focused
+    /// monitor to that workspace (via `switch_workspace`) so the window is
+    /// never left off-screen after being moved.
     pub fn move_focused_to_workspace(&mut self, target_name: &str) -> Result<(), String> {
         if !self.workspaces.contains_key(target_name) {
             return Err(format!(
@@ -2225,9 +2314,7 @@ impl WmState {
             },
         );
 
-        self.park(id);
-        self.resync_workspace_if_visible_elsewhere(target_name);
-        self.relayout_active();
+        self.switch_workspace(target_name)?;
         Ok(())
     }
 
@@ -2539,26 +2626,6 @@ impl WmState {
                 }
                 None => self.place_floating_window(id, area),
             }
-        }
-    }
-
-    /// If `workspace` happens to already be the active workspace on some
-    /// *other* connected monitor, immediately re-lays-out its tiled
-    /// windows and re-centers its floating ones there, instead of leaving
-    /// whatever was just parked into it sitting off-screen until some
-    /// unrelated later switch. A no-op if `workspace` isn't visible
-    /// anywhere else right now. Calling both unconditionally is simpler
-    /// than parameterizing "which kind" — each is already a cheap no-op
-    /// when there's nothing of that kind on the target.
-    fn resync_workspace_if_visible_elsewhere(&mut self, workspace: &str) {
-        let visible_elsewhere = self
-            .active_workspace
-            .iter()
-            .find(|(mid, name)| **mid != self.focused_monitor && name.as_str() == workspace)
-            .map(|(&mid, _)| mid);
-        if let Some(mid) = visible_elsewhere {
-            self.relayout_monitor(mid);
-            self.reposition_floating_for_monitor(mid);
         }
     }
 
@@ -3427,6 +3494,56 @@ mod tests {
     }
 
     #[test]
+    fn finalize_expired_launches_drops_entries_past_the_grace_period() {
+        let mut state = WmState {
+            launch_grace: Duration::ZERO,
+            ..WmState::default()
+        };
+        state.pending_launch_pids.insert(1234, Instant::now());
+
+        state.finalize_expired_launches();
+
+        assert!(!state.pending_launch_pids.contains_key(&1234));
+    }
+
+    #[test]
+    fn finalize_expired_launches_keeps_entries_still_within_the_grace_period() {
+        let mut state = WmState {
+            launch_grace: Duration::from_secs(3600),
+            ..WmState::default()
+        };
+        state.pending_launch_pids.insert(1234, Instant::now());
+
+        state.finalize_expired_launches();
+
+        assert!(state.pending_launch_pids.contains_key(&1234));
+    }
+
+    #[test]
+    fn reveal_current_frontmost_skips_while_a_launch_is_pending() {
+        let mut state = floating_test_state();
+        state.note_app_launched(1234);
+
+        state.reveal_current_frontmost();
+
+        // The guard must return before ever touching `last_frontmost_pid`
+        // (only `reveal_frontmost` sets it) or triggering a relayout —
+        // proof the stale-pid AX query never ran.
+        assert_eq!(state.last_frontmost_pid, None);
+        assert_eq!(state.relayout_calls.get(), 0);
+    }
+
+    #[test]
+    fn remove_app_clears_pending_launch_pids() {
+        let mut state = floating_test_state();
+        state.note_app_launched(1234);
+
+        state.remove_app(1234);
+
+        assert!(!state.pending_launch_pids.contains_key(&1234));
+    }
+
+    #[test]
     fn toggle_orientation_flips_between_horizontal_and_vertical() {
         let mut state = floating_test_state();
         let root_orientation = state.root_orientation_hint();
@@ -3975,8 +4092,7 @@ mod tests {
     }
 
     #[test]
-    fn place_new_window_tiled_into_an_inactive_workspace_not_visible_anywhere_parks_and_skips_relayout()
-     {
+    fn place_new_window_tiled_into_an_inactive_workspace_switches_to_it_instead_of_parking() {
         let mut state = floating_test_state();
         state.workspaces.insert("side".to_string(), Tree::new());
 
@@ -3990,13 +4106,14 @@ mod tests {
                 .window_ids()
                 .contains(&1)
         );
-        assert!(!state.active_tree().window_ids().contains(&1));
-        assert_eq!(state.relayout_calls.get(), 0);
+        assert_eq!(state.active_workspace_name(), "side");
+        assert!(state.active_tree().window_ids().contains(&1));
+        assert!(state.relayout_calls.get() > 0);
     }
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
-    fn place_new_window_tiled_into_a_workspace_active_on_another_monitor_relayouts_it_immediately()
+    fn place_new_window_tiled_into_a_workspace_active_on_another_monitor_swaps_monitors_to_show_it()
     {
         let mut state = WmState::default();
         state.monitors = vec![
@@ -4036,6 +4153,16 @@ mod tests {
             "workspace 'b' is visible on monitor 2, so it should be relaid-out immediately \
              instead of left parked"
         );
+        assert_eq!(
+            state.active_workspace.get(&1),
+            Some(&"b".to_string()),
+            "the focused monitor should now show 'b', the workspace the new window landed on"
+        );
+        assert_eq!(
+            state.active_workspace.get(&2),
+            Some(&"a".to_string()),
+            "monitor 2 should pick up whatever monitor 1 was showing before, swap-style"
+        );
     }
 
     #[test]
@@ -4069,50 +4196,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
-    fn resync_workspace_if_visible_elsewhere_relayouts_the_monitor_showing_that_workspace() {
-        let mut state = WmState::default();
-        state.monitors = vec![
-            Monitor {
-                id: 1,
-                frame: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: true,
-            },
-            Monitor {
-                id: 2,
-                frame: Rect {
-                    x: 1920.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: false,
-            },
-        ];
-        state.workspaces.insert("b".to_string(), Tree::new());
-        state.active_workspace.clear();
-        state.active_workspace.insert(2, "b".to_string());
-        state.focused_monitor = 1;
-
-        state.resync_workspace_if_visible_elsewhere("b");
-
-        assert!(state.relayout_calls.get() > 0);
-    }
-
-    #[test]
-    fn resync_workspace_if_visible_elsewhere_is_a_no_op_when_not_visible_anywhere() {
-        let mut state = floating_test_state();
-        state.resync_workspace_if_visible_elsewhere("nowhere");
-        assert_eq!(state.relayout_calls.get(), 0);
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn move_focused_to_workspace_relayouts_the_target_when_visible_on_another_monitor() {
+    fn move_focused_to_workspace_swaps_monitors_when_target_visible_on_another_monitor() {
         let mut state = WmState::default();
         state.monitors = vec![
             Monitor {
@@ -4160,6 +4244,42 @@ mod tests {
 
         assert!(state.move_focused_to_workspace("b").is_ok());
         assert!(state.relayout_calls.get() > 0);
+        assert_eq!(
+            state.active_workspace.get(&1),
+            Some(&"b".to_string()),
+            "the focused monitor should now show 'b', the workspace the window was moved to"
+        );
+        assert_eq!(
+            state.active_workspace.get(&2),
+            Some(&"a".to_string()),
+            "monitor 2 should pick up whatever monitor 1 was showing before, swap-style"
+        );
+    }
+
+    #[test]
+    fn move_focused_to_workspace_switches_active_workspace() {
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+
+        let node = state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_window(1, None, root_orientation);
+        state.set_focused_node(node);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.workspaces.insert("side".to_string(), Tree::new());
+
+        assert!(state.move_focused_to_workspace("side").is_ok());
+
+        assert_eq!(state.active_workspace_name(), "side");
+        assert!(state.active_tree().window_ids().contains(&1));
     }
 
     #[test]

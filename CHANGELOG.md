@@ -8,6 +8,30 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-07-18
+
+### Added
+
+- **Moving a window to another workspace — via `move-node-to-workspace`, or
+  automatically because it matches a `workspace-rules` entry when it's
+  first created — now switches the display to that workspace**, instead of
+  leaving the window parked off-screen until a later, unrelated switch.
+  `move_focused_to_workspace` and `place_new_window` call `switch_workspace`
+  directly rather than only parking/resyncing.
+
+### Fixed
+
+- **Opening an app via a Dock click or Spotlight while on an empty
+  workspace could briefly switch the display to the wrong workspace before
+  landing on the right one.** A cold app launch leaves a short window where
+  `frontmost_app_pid()` still reports the previously-frontmost app;
+  `reveal_frontmost` could act on that stale read and switch away to
+  wherever that unrelated app lived. Its workspace-switch is now deferred a
+  short, bounded interval (`REVEAL_DEBOUNCE`) and guarded by
+  `pending_launch_pids`, a `WmEvent::AppLaunched`-keyed tracker — covering
+  both paths into `reveal_frontmost` (`reveal_current_frontmost`'s
+  click-driven fallback and `WmEvent::FrontmostAppChanged`'s direct call).
+
 ## [0.1.12] - 2026-07-18
 
 A fix release addressing six issues found while daily-driving floating
