@@ -8,6 +8,20 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opening and focusing a new window, then switching workspaces away and
+  back, could restore focus to whichever window was focused there before
+  instead of the new one** — until the next unrelated real focus change
+  happened to fix it. A window that's already real-OS-focused the instant
+  it's created can win the race against `apply_windows_changed` itself:
+  `sync_focus_from_pid` resolves the focused window via a live AX query
+  first, then looks it up in `self.placements`, which doesn't have an entry
+  yet for a window that function hasn't finished registering — so the sync
+  silently no-op'd with nothing to retry it. `apply_windows_changed` now
+  re-runs `sync_focus_from_pid` once after placing any brand-new window,
+  once its own placement is guaranteed to exist.
+
 ## [0.1.13] - 2026-07-18
 
 ### Added

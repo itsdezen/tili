@@ -628,6 +628,10 @@ impl WmState {
 
         let active_workspace = self.active_workspace_name();
         let app_hidden = tili_ax::is_app_hidden(pid);
+        // Set when a brand-new window actually gets placed this pass — lets
+        // the post-loop re-sync below skip the extra AX query on every
+        // ordinary reconciliation call, not just window-creation ones.
+        let mut placed_new_window = false;
         for window in fresh {
             let id = window.id();
             // Present in this scan after all — un-pend it, whether or not
@@ -712,6 +716,21 @@ impl WmState {
                 },
             );
             self.place_new_window(id, &placement_kind, &target_workspace);
+            placed_new_window = true;
+        }
+
+        // A window that's real-OS-focused the instant it's created can win
+        // that race against `apply_windows_changed` itself: `sync_focus_from_pid`
+        // (called reactively from `dispatch()`/`reveal_frontmost`) resolves
+        // the focused window via a live AX query first, then looks it up in
+        // `self.placements` — which doesn't have an entry yet for a window
+        // still being processed by this very function, so that sync silently
+        // no-ops and nothing retries it. Re-running it here, now that this
+        // pass's placements are guaranteed to exist, closes that gap instead
+        // of leaving the workspace's remembered focus on whatever was
+        // focused before.
+        if placed_new_window {
+            self.sync_focus_from_pid(pid);
         }
 
         if !self.mouse_button_down {

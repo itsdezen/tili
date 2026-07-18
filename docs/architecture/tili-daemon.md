@@ -52,6 +52,20 @@ one active on the focused monitor, `place_new_window` immediately calls
 match is never left off-screen — `move_focused_to_workspace` does the same
 after moving the focused window into the target tree, for the same reason.
 
+`apply_windows_changed` also re-runs `sync_focus_from_pid` once, right after
+its loop, whenever this pass actually placed a brand-new window — closing a
+real race where a window that's already real-OS-focused the instant it's
+created can beat this function's own placement-registration: the reactive
+sync paths (`dispatch()`'s `sync_focus_from_frontmost`, and
+`reveal_frontmost`) resolve the focused window via a live AX query and then
+look it up in `self.placements`, which has no entry yet for a window this
+function hasn't finished processing, so that lookup silently no-ops with
+nothing to retry it later. Without this, a workspace kept alive by one
+long-running app (e.g. a terminal) could keep restoring focus to that app
+instead of a just-opened, just-focused new window on the next switch away
+and back — until some later, unrelated real focus change happened to
+re-sync it.
+
 ## Multi-monitor (M9)
 
 `active_workspace: HashMap<u32, String>` maps each connected monitor's id
