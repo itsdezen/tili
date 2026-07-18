@@ -8,6 +8,8 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-07-18
+
 ### Fixed
 
 - **Opening and focusing a new window, then switching workspaces away and
@@ -21,6 +23,16 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   silently no-op'd with nothing to retry it. `apply_windows_changed` now
   re-runs `sync_focus_from_pid` once after placing any brand-new window,
   once its own placement is guaranteed to exist.
+
+- **Quitting the focused app in a still-visible workspace that had another
+  window could hand real keyboard focus to an unrelated app on a different
+  (possibly parked) workspace, instead of the remaining window right there.**
+  `remove_from_tree` already reassigned `workspace_focus` internally when the
+  removed window was its workspace's recorded focus, but never made real
+  macOS focus follow — leaving the OS's own, tili-oblivious app-reactivation
+  history (typically whatever was frontmost before the quit app) as the de
+  facto focus. `remove_placement` now re-raises the reassigned window for
+  real whenever its workspace is still on screen.
 
 ## [0.1.13] - 2026-07-18
 

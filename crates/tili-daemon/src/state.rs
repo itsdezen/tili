@@ -2380,7 +2380,23 @@ impl WmState {
             placement.kind,
             PlacementKind::Tiled | PlacementKind::Floating { .. }
         ) {
-            self.remove_from_tree(id, &placement.workspace);
+            // `id` is genuinely gone (unlike `demote_to_special`/`set_floating`'s
+            // calls below, where the same window is about to be reinserted) —
+            // if it was its workspace's real focus and that workspace is
+            // still on screen, real macOS focus needs to be reasserted onto
+            // whatever `remove_from_tree` reassigned. Left alone, real focus
+            // stays wherever macOS's own app-reactivation history happens to
+            // land when the quit app's process disappears — an app on a
+            // completely different, possibly-parked workspace, oblivious to
+            // this one still having another window.
+            if let Some(node) = self.remove_from_tree(id, &placement.workspace)
+                && let Some(raise_id) = self
+                    .workspaces
+                    .get(&placement.workspace)
+                    .and_then(|tree| tree.window_at(node))
+            {
+                self.raise_focused_window(raise_id);
+            }
         }
     }
 
@@ -2390,17 +2406,26 @@ impl WmState {
     /// fullscreened one") — without touching `self.placements`, so callers
     /// that are about to overwrite the placement with a new kind
     /// (`demote_to_special`) or drop it entirely (`remove_placement`) both
-    /// funnel through here.
-    fn remove_from_tree(&mut self, id: WindowId, workspace: &str) {
-        let Some(tree) = self.workspaces.get_mut(workspace) else {
-            return;
-        };
+    /// funnel through here. Returns the reassigned focus node when the
+    /// removed leaf actually was `workspace`'s recorded focus *and*
+    /// `workspace` is currently visible on some monitor — `None` otherwise
+    /// (including when the tree is now empty) — for `remove_placement` to
+    /// re-raise for real; `demote_to_special`/`set_floating` deliberately
+    /// ignore this, since both immediately reinsert the same window and
+    /// re-focus it themselves right after, making a mid-flight raise here
+    /// just a spurious flash.
+    fn remove_from_tree(&mut self, id: WindowId, workspace: &str) -> Option<NodeId> {
+        let tree = self.workspaces.get_mut(workspace)?;
         let removed_leaf = tree.find_node(id);
         let suggested = tree.remove_window(id);
+        let mut reassigned_visible_focus = None;
         if removed_leaf.is_some() && self.workspace_focus.get(workspace) == removed_leaf.as_ref() {
             match suggested {
                 Some(n) => {
                     self.workspace_focus.insert(workspace.to_string(), n);
+                    if self.active_workspace.values().any(|w| w == workspace) {
+                        reassigned_visible_focus = Some(n);
+                    }
                 }
                 None => {
                     self.workspace_focus.remove(workspace);
@@ -2410,6 +2435,7 @@ impl WmState {
         if removed_leaf.is_some() && self.fullscreen_focus.get(workspace) == removed_leaf.as_ref() {
             self.fullscreen_focus.remove(workspace);
         }
+        reassigned_visible_focus
     }
 
     /// Whether `node` (a `focused_node()` result) is a `Floating` leaf —
@@ -2997,6 +3023,68 @@ mod tests {
             state.placements.get(&id).map(|p| &p.kind),
             Some(PlacementKind::Minimized(Restore::Tiled))
         ));
+    }
+
+    #[test]
+    fn remove_from_tree_returns_the_reassigned_node_when_its_workspace_is_visible() {
+        let mut state = WmState::default();
+        let focused_id: WindowId = 1;
+        let sibling_id: WindowId = 2;
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let focused_node = tree.insert_window(focused_id, None, root_orientation);
+        let sibling_node = tree.insert_window(sibling_id, None, root_orientation);
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), focused_node);
+
+        let reassigned = state.remove_from_tree(focused_id, DEFAULT_WORKSPACE);
+
+        assert_eq!(
+            reassigned,
+            Some(sibling_node),
+            "remove_placement needs this to real-focus the sibling instead of leaving \
+             whatever macOS's own app-reactivation history picked"
+        );
+    }
+
+    #[test]
+    fn remove_from_tree_returns_none_when_the_workspace_is_parked() {
+        let mut state = WmState::default();
+        state.workspaces.insert("side".to_string(), Tree::new());
+        let focused_id: WindowId = 1;
+        let sibling_id: WindowId = 2;
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut("side").unwrap();
+        let focused_node = tree.insert_window(focused_id, None, root_orientation);
+        tree.insert_window(sibling_id, None, root_orientation);
+        state
+            .workspace_focus
+            .insert("side".to_string(), focused_node);
+        // "side" was never added to `active_workspace`, so it's parked —
+        // nothing should get real-focused on a workspace nobody can see.
+
+        let reassigned = state.remove_from_tree(focused_id, "side");
+
+        assert_eq!(reassigned, None);
+    }
+
+    #[test]
+    fn remove_from_tree_returns_none_when_the_removed_window_was_not_the_recorded_focus() {
+        let mut state = WmState::default();
+        let focused_id: WindowId = 1;
+        let other_id: WindowId = 2;
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let focused_node = tree.insert_window(focused_id, None, root_orientation);
+        tree.insert_window(other_id, None, root_orientation);
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), focused_node);
+
+        let reassigned = state.remove_from_tree(other_id, DEFAULT_WORKSPACE);
+
+        assert_eq!(reassigned, None);
     }
 
     #[test]

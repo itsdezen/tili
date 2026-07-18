@@ -66,6 +66,28 @@ instead of a just-opened, just-focused new window on the next switch away
 and back — until some later, unrelated real focus change happened to
 re-sync it.
 
+The mirror-image gap exists on removal: `remove_from_tree` (shared by
+`remove_placement`, `demote_to_special`, and `set_floating`) already
+reassigns `workspace_focus` when the removed leaf was its workspace's
+recorded focus, but that alone is only internal bookkeeping — it never
+called `AxWindow::focus()` to make real macOS focus follow. Quitting the
+real-focused app in a still-visible workspace left macOS free to reactivate
+whatever app its *own*, tili-oblivious app-activation history points to
+(commonly whatever was frontmost right before the quit app, which can live
+on an entirely different, possibly-parked workspace) instead of the
+sibling window still sitting in the same, on-screen workspace.
+`remove_from_tree` now returns the reassigned node when the removed leaf
+was the recorded focus *and* its workspace is currently visible on some
+monitor (`None` otherwise, including once the tree empties out);
+`remove_placement` — the only one of the three callers where the window is
+genuinely gone rather than about to be reinserted — uses that to call
+`raise_focused_window` for real. `demote_to_special` (minimize/hide/native
+fullscreen) and `set_floating` deliberately ignore the return value: both
+immediately reinsert the same window and re-focus it themselves right
+after, so raising a sibling mid-flight there would just be a spurious
+flash (and would be outright wrong for native fullscreen, where the same
+window legitimately keeps real focus on its own Space).
+
 ## Multi-monitor (M9)
 
 `active_workspace: HashMap<u32, String>` maps each connected monitor's id
