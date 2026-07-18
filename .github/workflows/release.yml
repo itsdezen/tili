@@ -149,53 +149,80 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Create release (signed)
+      # Pulls this tag's own section out of CHANGELOG.md so the release
+      # page shows what actually changed without a click-through — still
+      # linked below for the full history. Fails loudly (rather than
+      # shipping an empty body) if a release gets tagged without its
+      # CHANGELOG.md entry, the same "catch drift instead of shipping it"
+      # approach as xtask's version-match check.
+      - name: Extract this version's changelog section
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ "\\[" ver "\\]") { found = 1; next }
+              next
+            }
+            found { print }
+          ' CHANGELOG.md > changelog-section.md
+          if [ ! -s changelog-section.md ]; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section — add one before tagging"
+            exit 1
+          fi
+
+      - name: Compose release notes (signed)
         if: ${{ env.TILI_SIGNING_CERTIFICATE_P12 != '' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          prerelease: false
-          files: dist/*
-          body: |
-            **Recommended install:** `brew install itsdezen/tap/tili` —
-            Homebrew downloads via `curl`, which doesn't set macOS's
-            quarantine flag, so Gatekeeper never enters the picture.
+        run: |
+          cat > release-notes.md <<'EOF'
+          **Recommended install:** `brew install itsdezen/tap/tili` —
+          Homebrew downloads via `curl`, which doesn't set macOS's
+          quarantine flag, so Gatekeeper never enters the picture.
 
-            The tarballs below are codesigned with tili's self-signed
-            certificate (hardened runtime) — see
-            [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering).
-            That's for a *stable signing identity* across releases (so
-            your Accessibility grant survives an upgrade), not for
-            passing Gatekeeper — a self-signed cert isn't notarized. If
-            you download `tili.app` directly from this page instead of
-            using Homebrew, Gatekeeper will still prompt on first launch:
-            right-click → Open, or `xattr -d com.apple.quarantine tili.app`.
+          The tarballs below are codesigned with tili's self-signed
+          certificate (hardened runtime) — see
+          [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering).
+          That's for a *stable signing identity* across releases (so
+          your Accessibility grant survives an upgrade), not for
+          passing Gatekeeper — a self-signed cert isn't notarized. If
+          you download `tili.app` directly from this page instead of
+          using Homebrew, Gatekeeper will still prompt on first launch:
+          right-click → Open, or `xattr -d com.apple.quarantine tili.app`.
 
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
-            for what changed.
+          EOF
+          cat changelog-section.md >> release-notes.md
+          echo "" >> release-notes.md
+          echo "Full changelog: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)" >> release-notes.md
 
-      - name: Create release (unsigned)
+      - name: Compose release notes (unsigned)
         if: ${{ env.TILI_SIGNING_CERTIFICATE_P12 == '' }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          ⚠️ **Unsigned development build.** tili does not codesign or
+          notarize release binaries yet — the self-signed certificate this
+          project's release strategy depends on
+          (see [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering))
+          hasn't been generated. Installing via
+          `brew install itsdezen/tap/tili` is unaffected by any of
+          this (Homebrew's `curl` download doesn't set macOS's
+          quarantine flag). If you download `tili.app` directly from
+          this page instead, Gatekeeper will block it on first launch;
+          run `xattr -d com.apple.quarantine tili.app` or right-click →
+          Open to proceed. Not recommended for daily use before v1.0.
+
+          EOF
+          cat changelog-section.md >> release-notes.md
+          echo "" >> release-notes.md
+          echo "Full changelog: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)" >> release-notes.md
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          prerelease: true
+          prerelease: ${{ env.TILI_SIGNING_CERTIFICATE_P12 == '' }}
           files: dist/*
-          body: |
-            ⚠️ **Unsigned development build.** tili does not codesign or
-            notarize release binaries yet — the self-signed certificate this
-            project's release strategy depends on
-            (see [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering))
-            hasn't been generated. Installing via
-            `brew install itsdezen/tap/tili` is unaffected by any of
-            this (Homebrew's `curl` download doesn't set macOS's
-            quarantine flag). If you download `tili.app` directly from
-            this page instead, Gatekeeper will block it on first launch;
-            run `xattr -d com.apple.quarantine tili.app` or right-click →
-            Open to proceed. Not recommended for daily use before v1.0.
-
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
-            for what changed.
+          body_path: release-notes.md
 
   sync-homebrew-tap:
     name: sync Homebrew formula
