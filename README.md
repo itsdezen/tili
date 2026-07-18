@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon.png" width="120" alt="tili logo" />
+<img src="assets/icon-readme.png" width="128" alt="tili logo" />
 
 # tili
 
