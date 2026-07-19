@@ -33,6 +33,33 @@ instead of silently acting on the wrong node or having no visible effect;
 `focus`, `move_focused_to_workspace`, `set_floating`, `close_focused`, and
 native fullscreen all work correctly for a floating focus and don't guard.
 
+A brand-new window's disposition (`Tile`/`Float`/`Ignore`, resolved once at
+creation — see `resolve_disposition`/`classify_new_window`) is decided by
+`apply_windows_changed` in priority order: `is_system_ui_bundle` first,
+then `is_protected_finder_dialog`, then the user's own `floating-rules`
+(`matching_floating_rule`), then finally `tili_ax::WindowKind`'s AX-derived
+fallback. The first two are unconditional overrides — checked *before*
+`self.floating_rules` is consulted at all, so no config entry can win
+against them. `is_system_ui_bundle` force-`Ignore`s a small denylist of
+system UI bundle ids (Dock, Spotlight, SecurityAgent, etc. — see its own
+doc comment for the confirmed cases and why it's bundle-id-only).
+`is_protected_finder_dialog` does the same for exactly two Finder windows —
+the "Copy" progress sheet and the "Connect to Server" dialog — matched by
+bundle id *and* title, since (unlike the system UI cases) the rest of
+Finder's windows must still tile/float per the user's own config; only
+these two specific windows are unconditionally `Ignore`d. This is a
+confirmed real quirk, not preemptive: Finder's Copy dialog doesn't reliably
+self-report as a dialog via AX subrole (other tiling window managers hit
+the identical issue), so `tili_ax::WindowKind`'s structural classification
+alone can't be trusted to catch it — it's `Ignore`, not `Float`, because
+the user's ask was "never touch these windows at all," not "float them."
+Titles here are static (system-assigned, not content-derived), so the
+general title-not-yet-populated-at-window-creation risk that applies to
+user-authored `title=` rules is low in practice for this specific pair.
+Extend `is_protected_finder_dialog` only for another *confirmed* Finder
+window with the same problem, not preemptively — same rule as
+`is_system_ui_bundle`.
+
 `workspace_focus` remembers each workspace's last-focused node — tiled or
 floating — so switching back restores where you left off. A new window
 joins the active workspace next to the current focus (as a `Node::Window`

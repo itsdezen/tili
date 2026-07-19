@@ -240,10 +240,9 @@ floating-rules {
     // first and would make this one unreachable.
     // rule app-id="com.apple.systempreferences" { width 900; height 600; center #true }
 
-    // Only Finder's "Copy"/"Connect to Server" style dialogs float — other
-    // Finder windows are already covered by the plain rule above, so this
-    // one only matters for apps you'd otherwise want tiled.
-    rule app-id="com.apple.finder" title="^(Copy|Connect to Server)$" { center #true }
+    // Example: narrow a rule to specific dialogs of an app via `title` (a
+    // regex), leaving the app's other windows to tile/float normally.
+    // rule app-id="com.example.app" title="^(Preferences|About)$" { center #true }
 
     // mode="tile" rescues a window back into normal tiling even if tili's
     // AX heuristic classified it as a dialog (some apps mark an ordinary

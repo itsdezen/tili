@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
@@ -275,6 +276,28 @@ const SYSTEM_UI_BUNDLE_IDS: &[&str] = &[
 
 fn is_system_ui_bundle(bundle_id: Option<&str>) -> bool {
     bundle_id.is_some_and(|id| SYSTEM_UI_BUNDLE_IDS.contains(&id))
+}
+
+const FINDER_BUNDLE_ID: &str = "com.apple.finder";
+
+/// Compiled once — a fixed pattern, not a user-supplied regex, so
+/// `.unwrap()` is safe here (unlike `apply_config`'s user rules, which must
+/// handle an invalid pattern gracefully).
+static PROTECTED_FINDER_DIALOG_TITLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(Copy|Connect to Server)$").unwrap());
+
+/// Finder's "Copy" progress sheet and "Connect to Server" dialog: always
+/// left untouched (no tile, no float, no center), regardless of whatever
+/// `floating-rules` the user has configured for `com.apple.finder` — same
+/// unconditional-override mechanism as `SYSTEM_UI_BUNDLE_IDS` above, but
+/// scoped by title rather than bundle-id alone, since the rest of Finder
+/// must still tile/float per the user's own config. Titles here are static
+/// (system-assigned, not content-derived), so the title-not-yet-populated
+/// risk that applies to general user `title=` rules doesn't apply the same
+/// way to this pair.
+fn is_protected_finder_dialog(bundle_id: Option<&str>, title: &str) -> bool {
+    bundle_id.is_some_and(|id| id == FINDER_BUNDLE_ID)
+        && PROTECTED_FINDER_DIALOG_TITLE.is_match(title)
 }
 
 /// What a brand-new window's placement disposition should be: an explicit
@@ -686,7 +709,9 @@ impl WmState {
             // window lands on has nothing to do with whether it tiles or
             // floats.
             let rule_mode = if is_new {
-                if is_system_ui_bundle(window.bundle_id()) {
+                if is_system_ui_bundle(window.bundle_id())
+                    || is_protected_finder_dialog(window.bundle_id(), window.title())
+                {
                     Some(tili_config::FloatingRuleMode::Ignore)
                 } else {
                     self.matching_floating_rule(&window).map(|r| r.mode)
@@ -2999,6 +3024,28 @@ mod tests {
             classify_new_window(tili_config::FloatingRuleMode::Ignore, false, false, false),
             PlacementKind::Popup
         ));
+    }
+
+    #[test]
+    fn is_protected_finder_dialog_matches_only_the_two_named_titles() {
+        assert!(is_protected_finder_dialog(Some("com.apple.finder"), "Copy"));
+        assert!(is_protected_finder_dialog(
+            Some("com.apple.finder"),
+            "Connect to Server"
+        ));
+        assert!(!is_protected_finder_dialog(
+            Some("com.apple.finder"),
+            "Copy 5 Items"
+        ));
+        assert!(!is_protected_finder_dialog(
+            Some("com.apple.finder"),
+            "Downloads"
+        ));
+        assert!(!is_protected_finder_dialog(
+            Some("com.apple.TextEdit"),
+            "Copy"
+        ));
+        assert!(!is_protected_finder_dialog(None, "Copy"));
     }
 
     #[test]
