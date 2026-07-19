@@ -8,6 +8,18 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-07-19
+
+### Fixed
+
+- **Finder's "Copy" progress sheet and "Connect to Server" dialog could get
+  tiled instead of left alone.** Both windows don't reliably self-report as
+  AX dialogs, so `tili_ax::WindowKind`'s structural classification alone
+  couldn't be trusted to catch them. tili now protects these two windows
+  from tiling unconditionally and by default — no config needed, and no
+  `floating-rules` entry (not even one for `com.apple.finder`) can override
+  it.
+
 ## [0.1.16] - 2026-07-18
 
 ### Fixed
