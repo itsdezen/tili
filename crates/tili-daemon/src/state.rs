@@ -514,6 +514,13 @@ pub struct WmState {
     /// navigation. See `docs/architecture/tili-daemon.md` for the race
     /// this closes.
     switch_epoch: u64,
+    /// Floating windows that have already gone through `place_floating_window`
+    /// at least once. `reposition_floating_for_monitor` consults this so a
+    /// window with no captured `manual` geometry gets its rule-based frame
+    /// computed only the first time it's actually placed, not recomputed
+    /// from scratch on every later workspace switch. Cleared in
+    /// `remove_placement` alongside the placement itself.
+    floating_placed: HashSet<WindowId>,
 }
 
 impl Default for WmState {
@@ -559,6 +566,7 @@ impl Default for WmState {
             last_frontmost_pid: None,
             pending_launch_pids: HashMap::new(),
             switch_epoch: 0,
+            floating_placed: HashSet::new(),
         }
     }
 }
@@ -2474,6 +2482,7 @@ impl WmState {
     /// from `placements` otherwise (every other kind never sat in a
     /// `Tree`).
     fn remove_placement(&mut self, id: WindowId) {
+        self.floating_placed.remove(&id);
         let Some(placement) = self.placements.remove(&id) else {
             return;
         };
@@ -2746,11 +2755,15 @@ impl WmState {
 
     /// Re-centers/sizes every floating window belonging to whatever
     /// workspace is active on `monitor_id`. A window with captured manual
-    /// geometry (Phase 3 — the user dragged/resized it at some point) is
-    /// restored proportionally via `restore_floating_frame` instead of
-    /// being recomputed fresh from its floating rule, so a reactivated
-    /// workspace or a monitor swap doesn't silently discard the user's own
-    /// placement.
+    /// geometry (the user dragged/resized it at some point) is restored
+    /// proportionally via `restore_floating_frame` instead of being
+    /// recomputed fresh from its floating rule, so a reactivated workspace
+    /// or a monitor swap doesn't silently discard the user's own placement.
+    /// A window with no manual geometry but already in `floating_placed` is
+    /// left exactly as-is: it already got its one rule-based placement when
+    /// it first floated, and re-deriving that same frame on every later
+    /// switch would undo a resize the user made that hasn't been
+    /// AX-observed as "manual" yet (e.g. right before parking).
     fn reposition_floating_for_monitor(&mut self, monitor_id: u32) {
         let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
             return;
@@ -2774,7 +2787,10 @@ impl WmState {
                         self.frame_setter.set_frame(window, frame);
                     }
                 }
-                None => self.place_floating_window(id, area),
+                None if !self.floating_placed.contains(&id) => {
+                    self.place_floating_window(id, area);
+                }
+                None => {}
             }
         }
     }
@@ -2905,13 +2921,14 @@ impl WmState {
         };
         if !center {
             self.frame_setter.set_frame(window, frame);
-            return;
+        } else {
+            window.set_size(frame.width, frame.height);
+            let actual = window.live_frame();
+            let corrected_x = area.x + (area.width - actual.width) / 2.0;
+            let corrected_y = area.y + (area.height - actual.height) / 2.0;
+            window.set_position(corrected_x, corrected_y);
         }
-        window.set_size(frame.width, frame.height);
-        let actual = window.live_frame();
-        let corrected_x = area.x + (area.width - actual.width) / 2.0;
-        let corrected_y = area.y + (area.height - actual.height) / 2.0;
-        window.set_position(corrected_x, corrected_y);
+        self.floating_placed.insert(id);
     }
 }
 

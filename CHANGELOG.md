@@ -8,6 +8,19 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Floating windows that were never manually dragged/resized snapped back
+  to their floating-rule default frame on every workspace switch, not just
+  when first opened.** `reposition_floating_for_monitor` unconditionally
+  called `place_floating_window` — which recomputes size/position from
+  `floating-rules`/`floating-defaults` — for any window with no captured
+  `manual` geometry, on every reactivation of its workspace. `WmState` now
+  tracks which floating windows have already been placed once
+  (`floating_placed`); a window with no manual geometry is left exactly
+  where it is on later switches instead of being re-derived from the rule
+  each time.
+
 ## [0.1.17] - 2026-07-19
 
 ### Fixed
