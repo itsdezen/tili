@@ -8,6 +8,8 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-07-20
+
 ### Fixed
 
 - **Floating windows that were never manually dragged/resized snapped back
