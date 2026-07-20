@@ -502,6 +502,9 @@ fn handle_event(
             // comment on `WmState`).
             state.note_app_launched(pid);
         }
+        WmEvent::SystemDidWake => {
+            state.note_system_wake();
+        }
         WmEvent::WindowFocused { .. } => {
             // No-op: `WmState`'s own focus tracking is instead resolved
             // synchronously at the top of every `dispatch()` call (see

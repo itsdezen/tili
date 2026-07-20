@@ -20,6 +20,16 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   (`floating_placed`); a window with no manual geometry is left exactly
   where it is on later switches instead of being re-derived from the rule
   each time.
+- **Waking from sleep could, a few seconds later, silently switch away from
+  whichever workspace was active before sleep.** An app can take several
+  seconds to reconnect to the WindowServer/AX after wake — far longer than
+  `REMOVAL_GRACE_PERIOD`'s 100ms — so a still-open window could miss one
+  scan, get finalized as "closed," then reappear on the next scan and get
+  treated as brand new, re-triggering a matching `workspace-rules` entry
+  and force-switching the active workspace. tili now listens for
+  `NSWorkspaceDidWakeNotification` and temporarily widens the removal grace
+  period to 8s right after a real wake, so a merely-slow-to-reconnect
+  window isn't misread as closed.
 
 ## [0.1.17] - 2026-07-19
 

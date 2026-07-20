@@ -21,10 +21,20 @@ child for insertion/removal/lookup, so `workspace_focus`/`focused_node()`
 can address a floating window exactly like a tiled one, but excluded
 entirely from `Tree::layout`'s `Tiles`/`Accordion` sizing (see
 `tili-tree.md`). Their actual on-screen frame is still owned by
-`placements`/`compute_floating_frame`, not the tree — floating windows only
-get repositioned at creation and when their workspace becomes active again,
-not on every layout-affecting event, so a user's manual drag of a floating
-window isn't undone by, say, a gap change. `state.rs` functions whose
+`placements`/`compute_floating_frame`, not the tree — a floating window only
+ever gets its rule-based frame computed *once*, whichever moment it's first
+actually placed (immediately at creation if its workspace is already
+visible, or at the first reactivation of its workspace afterward if it
+wasn't). `WmState::floating_placed: HashSet<WindowId>` records that this has
+happened; `reposition_floating_for_monitor` (run every time a workspace
+becomes active again) leaves a window with no captured `manual` geometry
+alone once it's in that set, rather than re-deriving the same rule-based
+frame on every later switch — so neither a gap change nor a routine
+workspace switch undoes a user's manual drag, or silently re-centers a
+window the user never touched. A window *with* captured `manual` geometry
+(the user dragged/resized it) is still restored proportionally on every
+reactivation, so a monitor swap or resolution change scales it sensibly.
+`state.rs` functions whose
 tree-topology operation is meaningless for a floating focus (`move_focused`,
 `join`, `resize`, `set_orientation`/`toggle_orientation`,
 `toggle_layout`/`set_layout`, `balance_sizes`, non-native
@@ -514,3 +524,19 @@ just falls back to `Config::default()` like before M10.
 `maintenance_tick` is an unconditional 30ms `tokio::time::interval` branch
 of the main `select!` loop — see [invariants.md](invariants.md)'s
 polling-exceptions section for why it exists and what it costs.
+
+`WmEvent::SystemDidWake` (from `NSWorkspaceDidWakeNotification`, bridged via
+`tili-ax`'s workspace watcher — see [tili-ax.md](tili-ax.md)) calls
+`WmState::note_system_wake`, which boosts `finalize_expired_removals`'s
+effective grace period from `REMOVAL_GRACE_PERIOD` (100ms) to
+`WAKE_REMOVAL_GRACE` (8s) for the following 8 seconds. Without this, a still
+-open window whose owning app simply hasn't reconnected to the WindowServer/
+AX yet after wake (observed to take several seconds, far longer than
+100ms — apps don't all reconnect at once) missed a scan, got
+`finalize_expired_removals`'d as closed, then reappeared on the next scan
+and was treated as a brand-new window — re-triggering any matching
+`workspace-rules` entry and yanking the active workspace out from under
+whatever the user was looking at right before sleep, a few seconds after
+waking. `REMOVAL_GRACE_PERIOD` itself stays at 100ms for the ordinary case
+(a genuinely-closed window should disappear promptly, not linger up to 8s);
+the boost only applies in the bounded window right after a real wake.

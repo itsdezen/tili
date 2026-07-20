@@ -41,6 +41,18 @@ const FLOAT_DRIFT_EPSILON: f64 = 0.5;
 /// instead of sleeping for real.
 const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
+/// How long `removal_grace` is boosted to after `WmEvent::SystemDidWake`
+/// fires — real hardware has shown an app's AX/WindowServer connection can
+/// take several seconds to come back after wake, far longer than
+/// `REMOVAL_GRACE_PERIOD` tolerates. Without this, a still-open window that
+/// simply hasn't reconnected yet gets `finalize_expired_removals`'d as
+/// "closed," then reappears on the next scan and gets treated as brand new
+/// — re-triggering any `workspace-rules` match and yanking the active
+/// workspace out from under whatever the user was looking at before sleep.
+/// Bounded (not indefinite) so a window that's genuinely closed during this
+/// window is still eventually cleaned up.
+const WAKE_REMOVAL_GRACE: Duration = Duration::from_secs(8);
+
 /// How long a pid stays in `WmState::pending_launch_pids` after
 /// `AppLaunched` before being dropped even without ever getting a window —
 /// a bound so a launched-but-windowless process (a background helper, or
@@ -521,6 +533,11 @@ pub struct WmState {
     /// from scratch on every later workspace switch. Cleared in
     /// `remove_placement` alongside the placement itself.
     floating_placed: HashSet<WindowId>,
+    /// Set by `note_system_wake` to `now + WAKE_REMOVAL_GRACE` — while
+    /// `Instant::now()` is still before this, `finalize_expired_removals`
+    /// uses `WAKE_REMOVAL_GRACE` instead of `removal_grace`. `None` the rest
+    /// of the time.
+    wake_grace_until: Option<Instant>,
 }
 
 impl Default for WmState {
@@ -567,6 +584,7 @@ impl Default for WmState {
             pending_launch_pids: HashMap::new(),
             switch_epoch: 0,
             floating_placed: HashSet::new(),
+            wake_grace_until: None,
         }
     }
 }
@@ -581,7 +599,7 @@ impl WmState {
     /// this too, so it's rechecked even with no window events at all.
     pub fn finalize_expired_removals(&mut self) {
         let now = Instant::now();
-        let grace = self.removal_grace;
+        let grace = self.effective_removal_grace(now);
         let expired: Vec<WindowId> = self
             .pending_removal
             .iter()
@@ -610,6 +628,27 @@ impl WmState {
     /// needs to know this.
     pub fn note_app_launched(&mut self, pid: i32) {
         self.pending_launch_pids.insert(pid, Instant::now());
+    }
+
+    /// Records that the system just woke from sleep
+    /// (`WmEvent::SystemDidWake`) — boosts `finalize_expired_removals`'s
+    /// effective grace period to `WAKE_REMOVAL_GRACE` for the next
+    /// `WAKE_REMOVAL_GRACE` seconds, so a window whose owning app hasn't
+    /// reconnected to the WindowServer/AX yet doesn't get finalized as
+    /// closed and then re-placed as brand new (see `WAKE_REMOVAL_GRACE`'s
+    /// doc comment).
+    pub fn note_system_wake(&mut self) {
+        self.wake_grace_until = Some(Instant::now() + WAKE_REMOVAL_GRACE);
+    }
+
+    /// `removal_grace`, unless a recent `note_system_wake` call's boosted
+    /// window (`wake_grace_until`) is still in effect, in which case the
+    /// larger `WAKE_REMOVAL_GRACE` applies instead.
+    fn effective_removal_grace(&self, now: Instant) -> Duration {
+        match self.wake_grace_until {
+            Some(until) if now < until => self.removal_grace.max(WAKE_REMOVAL_GRACE),
+            _ => self.removal_grace,
+        }
     }
 
     /// Drops any `pending_launch_pids` entry older than `LAUNCH_GRACE_PERIOD`
@@ -3693,6 +3732,52 @@ mod tests {
 
         assert!(state.placements.contains_key(&id));
         assert!(state.pending_removal.contains_key(&id));
+    }
+
+    #[test]
+    fn note_system_wake_keeps_a_pending_removal_alive_past_zero_removal_grace() {
+        let mut state = WmState {
+            removal_grace: Duration::ZERO,
+            ..WmState::default()
+        };
+        state.note_system_wake();
+        let id: WindowId = 1;
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.pending_removal.insert(id, Instant::now());
+
+        state.finalize_expired_removals();
+
+        assert!(state.placements.contains_key(&id));
+        assert!(state.pending_removal.contains_key(&id));
+    }
+
+    #[test]
+    fn an_expired_wake_grace_falls_back_to_removal_grace() {
+        let mut state = WmState {
+            removal_grace: Duration::ZERO,
+            ..WmState::default()
+        };
+        state.wake_grace_until = Some(Instant::now() - Duration::from_secs(1));
+        let id: WindowId = 1;
+        state.placements.insert(
+            id,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.pending_removal.insert(id, Instant::now());
+
+        state.finalize_expired_removals();
+
+        assert!(!state.placements.contains_key(&id));
+        assert!(!state.pending_removal.contains_key(&id));
     }
 
     #[test]

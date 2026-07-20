@@ -79,7 +79,10 @@ is one of the four sanctioned polling exceptions (see
 
 ## workspace.rs — NSWorkspace bridge
 
-Bridges `NSWorkspace` app-launch/quit notifications via
+Bridges `NSWorkspace` app-launch/quit notifications, plus
+`NSWorkspaceDidWakeNotification` (forwarded as `AppEvent::SystemDidWake` →
+`WmEvent::SystemDidWake` → `WmState::note_system_wake`, see
+[tili-daemon.md](tili-daemon.md) for what that does), via
 `objc2`/`objc2-app-kit` — note it spawns its own dedicated `CFRunLoop`
 thread, since a process without `NSApplication` needs *some* thread pumping
 a run loop to receive Cocoa notifications at all (same reason

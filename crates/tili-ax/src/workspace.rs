@@ -15,16 +15,19 @@ unsafe extern "C" {
     fn CFRunLoopRun();
 }
 
-/// A process launching or quitting, as reported by `NSWorkspace`.
+/// A process launching or quitting, or the system waking from sleep, as
+/// reported by `NSWorkspace`.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Launched { pid: i32, bundle_id: Option<String> },
     Terminated { pid: i32 },
+    SystemDidWake,
 }
 
 /// Spawns a dedicated OS thread that registers for
-/// `NSWorkspaceDidLaunchApplicationNotification`/`DidTerminateApplication`
-/// and pumps a `CFRunLoop` on that thread for the lifetime of the process.
+/// `NSWorkspaceDidLaunchApplicationNotification`/`DidTerminateApplication`/
+/// `DidWakeNotification` and pumps a `CFRunLoop` on that thread for the
+/// lifetime of the process.
 ///
 /// This mirrors exactly the pattern `axuielement`'s own `AXNotificationStream`
 /// uses for AX notifications: Cocoa/AX notification delivery for a
@@ -67,6 +70,17 @@ pub fn spawn_workspace_watcher(tx: Sender<AppEvent>) {
                 None,
                 None::<&NSOperationQueue>,
                 &terminated_block,
+            );
+
+            let wake_tx = tx.clone();
+            let wake_block = RcBlock::new(move |_note: NonNull<NSNotification>| {
+                let _ = wake_tx.send(AppEvent::SystemDidWake);
+            });
+            center.addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWorkspaceDidWakeNotification),
+                None,
+                None::<&NSOperationQueue>,
+                &wake_block,
             );
 
             CFRunLoopGetCurrent();

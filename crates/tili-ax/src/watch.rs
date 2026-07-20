@@ -129,6 +129,13 @@ pub enum WmEvent {
     FrontmostAppChanged {
         pid: i32,
     },
+    /// The system just woke from sleep (`NSWorkspaceDidWakeNotification`).
+    /// Every AX-observing process can take several seconds to reconnect to
+    /// the WindowServer after wake, so a still-open window can easily miss
+    /// one `apply_windows_changed` scan right after this fires — see
+    /// `WmState::note_system_wake`'s doc comment for what reacting to this
+    /// actually does about it.
+    SystemDidWake,
 }
 
 /// Starts watching for window/app lifecycle events and returns a channel
@@ -213,6 +220,9 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
                         handle.abort();
                     }
                     debounce_deadline = Some(Instant::now() + FULL_RESYNC_DEBOUNCE);
+                }
+                Ok(AppEvent::SystemDidWake) => {
+                    let _ = event_tx.send(WmEvent::SystemDidWake);
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
