@@ -8,6 +8,8 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-21
+
 ### Fixed
 
 - **Reopening a single centered floating window no longer drifts
