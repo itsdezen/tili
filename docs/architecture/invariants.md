@@ -21,28 +21,32 @@ Three sanctioned, narrowly-scoped exceptions:
    Input Monitoring can be granted at any point after the daemon starts
    with no accompanying event to react to.
 2. **`tili-ax/src/watch.rs`'s window/app-watcher resync backstop** — a
-   cheap 250ms tick that polls `workspace::frontmost_app_pid()` for
-   `WmEvent::FrontmostAppChanged` (kept fast for Cmd-Tab responsiveness),
-   plus `resync_watchers` (attach/detach watchers, no relayout) on its own
-   slower `WATCHER_RESYNC_INTERVAL` (2s) cadence, plus a debounced-since-
-   quiet full-window resync capped at 20s
-   (`FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL`) — since `AXObserver`
-   window-level notifications have been observed to occasionally never
-   fire, and `NSWorkspace.runningApplications()` itself (not just its
-   notifications) can transiently omit a still-running pid. `resync_watchers`
-   used to run on the same 250ms cadence as the frontmost poll, back when
-   `NSWorkspace` launch/terminate notifications were also unreliable; now
-   that those are confirmed reliably delivered (`tili-daemon` has a real
-   `NSApplication`), it only needs to run as a rare-miss backstop, so it was
-   moved to its own, much less frequent cadence — see
-   `WATCHER_RESYNC_INTERVAL`'s doc comment. An earlier version of this tick
-   also carried a `SLEEP_GAP_THRESHOLD` wall-clock-gap wake-detection
-   backstop, added while `NSWorkspaceDidWakeNotification` was confirmed
-   undelivered to a `tili-daemon` with no `NSApplication`; removed once
-   `main.rs`'s `NSApplication` restructuring (see `tili-daemon.md`/
-   `tili-ax.md`'s `workspace.rs` section) was confirmed on real hardware,
-   across several repeated sleep/wake cycles, to make that notification
-   reliably delivered again without it.
+   `WATCHER_RESYNC_INTERVAL` (2s) tick running `resync_watchers` (attach/
+   detach watchers, no relayout), plus a debounced-since-quiet full-window
+   resync capped at 20s (`FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL`)
+   — since `AXObserver` window-level notifications have been observed to
+   occasionally never fire, and `NSWorkspace.runningApplications()` itself
+   (not just its notifications) can transiently omit a still-running pid.
+   This tick used to also poll `workspace::frontmost_app_pid()` for
+   `WmEvent::FrontmostAppChanged` at a much shorter 250ms (kept fast for
+   Cmd-Tab responsiveness despite having to poll for it); that poll is gone
+   now that `workspace::register_on_main` registers
+   `NSWorkspaceDidActivateApplicationNotification` and the tick reacts to
+   the push notification directly instead — confirmed on real hardware to
+   be reliably delivered, the same way `DidLaunchApplication`/
+   `DidWakeNotification` were separately confirmed. `resync_watchers` itself
+   used to also run on that same 250ms
+   cadence, back when `NSWorkspace` launch/terminate notifications were
+   also unreliable; now that those are confirmed reliably delivered
+   (`tili-daemon` has a real `NSApplication`), it only needs to run as a
+   rare-miss backstop, hence the slower shared cadence. An earlier version
+   of this tick also carried a `SLEEP_GAP_THRESHOLD` wall-clock-gap
+   wake-detection backstop, added while `NSWorkspaceDidWakeNotification`
+   was confirmed undelivered to a `tili-daemon` with no `NSApplication`;
+   removed once `main.rs`'s `NSApplication` restructuring (see
+   `tili-daemon.md`/`tili-ax.md`'s `workspace.rs` section) was confirmed on
+   real hardware, across several repeated sleep/wake cycles, to make that
+   notification reliably delivered again without it.
 3. **`tili-daemon/src/main.rs`'s `maintenance_tick`**, an unconditional
    30ms `tokio::time::interval` branch of the main `select!` loop. Unlike
    the other two, this isn't a fallback for a notification that sometimes

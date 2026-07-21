@@ -178,14 +178,14 @@ async fn async_daemon_main(
     // skip running it instead of reverting the user's later navigation.
     let mut pending_reveal_epoch: u64 = 0;
     // Whether the *most recent* arm of `pending_reveal_deadline` was a real
-    // `MouseSignal::ButtonUp` click rather than a poll-detected
+    // `MouseSignal::ButtonUp` click rather than a notification-detected
     // `WmEvent::FrontmostAppChanged` edge — forwarded to
     // `WmState::reveal_current_frontmost` as `allow_unchanged_pid`. A click
     // needs `true` (see that function's doc comment for the legitimate
-    // Dock-icon-reactivation case this covers); a poll edge needs `false`,
-    // since by the time the deferred check actually runs a same-pid read
-    // means nothing really changed and chasing it would revert whatever
-    // workspace switch the user made in the meantime.
+    // Dock-icon-reactivation case this covers); a notification edge needs
+    // `false`, since by the time the deferred check actually runs a
+    // same-pid read means nothing really changed and chasing it would
+    // revert whatever workspace switch the user made in the meantime.
     let mut pending_reveal_allow_unchanged = false;
     // Drains `pending_pids`, rechecks Phase 5's `pending_removal` grace
     // period, and now also the reveal debounce above and
@@ -566,7 +566,8 @@ fn handle_event(
             // two. Reacting to this event too would be redundant with that
             // synchronous resync, not a fallback for it.
         }
-        WmEvent::FrontmostAppChanged { .. } => {
+        WmEvent::FrontmostAppChanged { pid } => {
+            eprintln!("tili-daemon: NSWorkspace FrontmostAppChanged pid={pid}");
             // Unlike `WindowFocused` above, this fires for a pure OS-level
             // frontmost-app change (Cmd-Tab, Mission Control/Control Center)
             // that would otherwise never route through `dispatch()` at all
@@ -586,7 +587,7 @@ fn handle_event(
             // did.
             *pending_reveal_deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
             *pending_reveal_epoch = state.switch_epoch();
-            // Unlike a real click, a poll-detected edge alone never
+            // Unlike a real click, a notification-detected edge alone never
             // justifies chasing a same-pid read once the deferred check
             // actually runs — see `WmState::reveal_frontmost`'s
             // `allow_unchanged_pid` doc comment.

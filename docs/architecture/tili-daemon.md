@@ -249,12 +249,16 @@ noticed the click" and "the keypress got processed." Other AX-based tiling
 WMs resolve this the same way, synchronously at the top of every command —
 this is the fix for a long-reported "the first direction key press after
 switching windows manually does nothing/goes the wrong way" bug that
-several reactive-sync attempts (an AX per-window notification, then an
-`NSWorkspaceDidActivateApplicationNotification` subscription — confirmed to
-never fire for a process like this one with no `NSApplication` instance,
-unlike the process-lifecycle Launch/Terminate notifications, which don't
-depend on window-server UI-activation machinery — then a poll on
-`watch.rs`'s resync tick) all failed to fully close. `sync_focus_from_pid`
+several reactive-sync attempts (an AX per-window notification, an
+`NSWorkspaceDidActivateApplicationNotification` subscription — confirmed
+dead at the time for a process like this one with no `NSApplication`
+instance, since fixed and now used elsewhere for `WmEvent::FrontmostAppChanged`
+(see `tili-ax.md`'s `watch.rs` section) — then a poll on `watch.rs`'s
+resync tick) all failed to fully close: even a reliably-delivered push
+notification still races the very next hotkey press, since there's no
+ordering guarantee between "the notification arrived" and "the keypress got
+processed" — only a synchronous, on-demand resolve at the top of every
+command closes that gap. `sync_focus_from_pid`
 (the function `sync_focus_from_frontmost` actually calls) updates
 `workspace_focus` for both `Tiled` and `Floating` placements — since
 `Node::Floating` gave floating windows a tree node too (see the

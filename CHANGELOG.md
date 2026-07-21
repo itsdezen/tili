@@ -10,6 +10,26 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ### Changed
 
+- **Replaced the 250ms poll of `frontmost_app_pid()` for
+  `WmEvent::FrontmostAppChanged` with a push notification.**
+  `NSWorkspaceDidActivateApplicationNotification` had been confirmed dead
+  for a `tili-daemon` with no `NSApplication`, same as
+  `DidLaunchApplication`/`DidWakeNotification` — now that `main.rs` gives
+  the process a real one, `workspace::register_on_main` also registers
+  this notification, and `watch.rs`'s tick reacts to it directly
+  (`AppEvent::Activated`) instead of polling. Removes the last thing in
+  that tick needing a fast, separate cadence — it now shares
+  `WATCHER_RESYNC_INTERVAL` (2s) with `resync_watchers` (see below) instead
+  of running two different intervals. `frontmost_app_pid()` itself is
+  unchanged and still used for its other, on-demand callers
+  (`WmState::sync_focus_from_pid`, `reveal_current_frontmost`) — only the
+  periodic tick's poll of it is gone. `reveal_frontmost`'s existing guards
+  (`pending_launch_pids`/`wake_grace_until` distrust windows, system-UI
+  suppression, self-inflicted-focus-change handling) are untouched — they
+  guard against the same races regardless of whether the pid arrived via
+  poll or push. Confirmed on real hardware that the notification is now
+  reliably delivered, the same way `DidLaunchApplication`/
+  `DidWakeNotification` were separately confirmed.
 - **`watch.rs`'s `resync_watchers` (attach/detach watchers for the current
   app/pid set) now runs on its own 2s `WATCHER_RESYNC_INTERVAL`, not every
   250ms tick.** It used to share the same 250ms cadence as

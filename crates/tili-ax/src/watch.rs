@@ -39,49 +39,47 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
     AX_MAIN_WINDOW_CHANGED_NOTIFICATION,
 ];
 
-/// How often the background watcher thread's tick actually fires (via
-/// `recv_timeout`'s timeout). Drives `workspace::frontmost_app_pid()`'s
-/// poll for `WmEvent::FrontmostAppChanged` (see that event's doc comment) —
-/// kept short so Cmd-Tab/Mission-Control detection feels close to instant,
-/// not "eventually correct." `resync_watchers` no longer runs on every one
-/// of these ticks — see `WATCHER_RESYNC_INTERVAL` for why it has its own,
-/// longer cadence now.
-///
-/// This is one of the sanctioned exceptions to "no polling" — the full
-/// list and rationale are documented in `docs/architecture/invariants.md`.
-const RESYNC_INTERVAL: Duration = Duration::from_millis(250);
-
-/// How often `resync_watchers` actually re-derives "every pid that should
-/// currently have a window-notification subscription," attaching watchers
-/// for newly-discovered ones and detaching (with a synthetic
-/// `AppTerminated`) for ones no longer running — checked on the tick above
-/// but on its own, longer cadence, not every `RESYNC_INTERVAL`.
+/// How often the background watcher thread's tick fires (via
+/// `recv_timeout`'s timeout), and how often it calls `resync_watchers` to
+/// re-derive "every pid that should currently have a window-notification
+/// subscription," attaching watchers for newly-discovered ones and
+/// detaching (with a synthetic `AppTerminated`) for ones no longer running.
 ///
 /// This is a correctness backstop, not the primary mechanism: push-based
 /// detection (`NSWorkspaceDidLaunchApplicationNotification`/
 /// `DidTerminateApplication` for process launch/quit) is what makes this
-/// feel instant in the common case, and — unlike when this cadence was
-/// first chosen — is now confirmed reliably delivered on real hardware
-/// (`tili-daemon` has a real `NSApplication`; see
+/// feel instant in the common case, and is confirmed reliably delivered on
+/// real hardware (`tili-daemon` has a real `NSApplication`; see
 /// `workspace::register_on_main`'s doc comment). A missed launch/quit
-/// notification is now a rare-enough case that this backstop doesn't need
-/// 250ms responsiveness to still feel "close to instant" in practice —
-/// matches `FULL_RESYNC_DEBOUNCE`'s existing cadence rather than inventing
-/// a third interval. `pid_is_dead`'s own check inside `resync_watchers`
-/// (guarding against `NSWorkspace.runningApplications()` itself
-/// transiently omitting a still-running pid, a separate concern from the
-/// notification) is covered by this same slower cadence for the same
-/// reason — that's also a rare case, not the common path.
+/// notification is a rare-enough case that this backstop doesn't need to be
+/// fast to still feel "close to instant" in practice. `pid_is_dead`'s own
+/// check inside `resync_watchers` (guarding against
+/// `NSWorkspace.runningApplications()` itself transiently omitting a
+/// still-running pid, a separate concern from the notification) is covered
+/// by this same cadence for the same reason — that's also a rare case, not
+/// the common path.
+///
+/// This tick used to also drive a poll of `workspace::frontmost_app_pid()`
+/// for `WmEvent::FrontmostAppChanged`, kept at a much shorter 250ms so
+/// Cmd-Tab/Mission-Control detection would feel instant despite having to
+/// poll for it — that's gone now that `register_on_main` registers
+/// `NSWorkspaceDidActivateApplicationNotification` and this tick reacts to
+/// the push notification directly (see `AppEvent::Activated`'s handling
+/// below) instead of polling, so nothing left in this tick needs a fast
+/// cadence — matches `FULL_RESYNC_DEBOUNCE`'s existing cadence rather than
+/// inventing a new interval.
 ///
 /// Deliberately *doesn't* also re-signal `WindowsChanged` for every
 /// on-screen pid every time this runs (an earlier version did on every
-/// `RESYNC_INTERVAL` tick): each one triggers `apply_windows_changed`,
-/// which unconditionally relays out the active workspace at the end
-/// regardless of whether anything for that pid actually changed — with
-/// several on-screen apps, firing all of them back-to-back caused a
-/// visible relayout stutter for no reason. See
-/// `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` for that much rarer
-/// sweep.
+/// tick): each one triggers `apply_windows_changed`, which unconditionally
+/// relays out the active workspace at the end regardless of whether
+/// anything for that pid actually changed — with several on-screen apps,
+/// firing all of them back-to-back caused a visible relayout stutter for no
+/// reason. See `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` for that
+/// much rarer sweep.
+///
+/// This is one of the sanctioned exceptions to "no polling" — the full
+/// list and rationale are documented in `docs/architecture/invariants.md`.
 const WATCHER_RESYNC_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How much a genuine `AppEvent` (app launch/terminate) pushes back the next
@@ -130,17 +128,14 @@ pub enum WmEvent {
         pid: i32,
     },
     /// The system-wide frontmost application changed to a *different* pid —
-    /// checked on every `RESYNC_INTERVAL` tick (`workspace::frontmost_app_pid`,
-    /// a direct AX query, not a notification) independently of
-    /// `resync_watchers`, which now only runs every `WATCHER_RESYNC_INTERVAL`.
-    /// This is the only signal that catches Cmd-Tab or a
-    /// Mission Control/Control Center click switching to an app whose
-    /// window lives in a currently-parked workspace — neither
-    /// `NSWorkspaceDidActivateApplicationNotification` (dead for this
-    /// process, see `workspace::frontmost_app_pid`'s doc comment) nor the
-    /// per-window `WindowFocused` event above reacts to a pure OS-level
-    /// frontmost change that doesn't also move focus within an already
-    /// on-screen app.
+    /// forwarded directly from `AppEvent::Activated`
+    /// (`NSWorkspaceDidActivateApplicationNotification`, registered via
+    /// `workspace::register_on_main`), not polled. This is the only signal
+    /// that catches Cmd-Tab or a Mission Control/Control Center click
+    /// switching to an app whose window lives in a currently-parked
+    /// workspace — the per-window `WindowFocused` event above doesn't react
+    /// to a pure OS-level frontmost change that doesn't also move focus
+    /// within an already on-screen app.
     FrontmostAppChanged {
         pid: i32,
     },
@@ -202,31 +197,19 @@ pub fn spawn_event_watcher(
         // every `FULL_RESYNC_MAX_INTERVAL`.
         let mut last_full_resync = Instant::now();
         let mut debounce_deadline: Option<Instant> = None;
-        // Edge-triggered: only `Some(pid)` values that actually differ from
-        // the last tick emit `FrontmostAppChanged`, so revealing a parked
-        // workspace (which ends by raising/focusing the same pid already
-        // recorded here) doesn't cause the very next tick to re-detect a
-        // "change" and loop. Deliberately never overwritten with a bare
-        // `None` read (see below) — confirmed on real hardware that
-        // `frontmost_app_pid()` (`AXFocusedApplication` off the system-wide
-        // element) transiently reads `None` for one tick right after
-        // `park()` moves a still-real-macOS-frontmost app's window into its
-        // barely-on-screen corner sliver, even though no other app actually
-        // took focus. If that transient `None` were allowed to overwrite
-        // this, the very next tick reading the *same* still-frontmost pid
-        // would look like a fresh change and wrongly fire
-        // `FrontmostAppChanged` — which `reveal_frontmost` treats as "the
-        // user Cmd-Tabbed to this app," yanking the display straight back
-        // to whatever (possibly now-empty) workspace that pid's window
-        // belongs to and undoing a manual switch to an empty workspace.
+        // Edge-triggered: only a pid that actually differs from the last one
+        // seen emits `FrontmostAppChanged`, so revealing a parked workspace
+        // (which ends by raising/focusing the same pid already recorded
+        // here) doesn't cause the next `AppEvent::Activated` for it to
+        // re-detect a "change" and loop. A cheap defense-in-depth safety net
+        // more than a load-bearing one now — `NSWorkspaceDidActivateApplicationNotification`
+        // is push-based and edge-triggered by nature (the system doesn't
+        // notify unless the frontmost app genuinely changed), unlike the
+        // polled `AXFocusedApplication` query this replaced, which needed
+        // this same dedup to survive its own read-timing quirks.
         let mut last_frontmost_pid: Option<i32> = None;
-        // Separate from `last_full_resync` above: this one gates
-        // `resync_watchers` itself (attach/detach watchers), which now runs
-        // on its own `WATCHER_RESYNC_INTERVAL` cadence rather than every
-        // tick — see that constant's doc comment.
-        let mut last_watcher_resync = Instant::now();
         loop {
-            let recv_result = app_rx.recv_timeout(RESYNC_INTERVAL);
+            let recv_result = app_rx.recv_timeout(WATCHER_RESYNC_INTERVAL);
             match recv_result {
                 Ok(AppEvent::Launched { pid, bundle_id }) => {
                     let _ = event_tx.send(WmEvent::AppLaunched { pid, bundle_id });
@@ -252,6 +235,12 @@ pub fn spawn_event_watcher(
                     }
                     debounce_deadline = Some(Instant::now() + FULL_RESYNC_DEBOUNCE);
                 }
+                Ok(AppEvent::Activated { pid }) => {
+                    if last_frontmost_pid != Some(pid) {
+                        let _ = event_tx.send(WmEvent::FrontmostAppChanged { pid });
+                    }
+                    last_frontmost_pid = Some(pid);
+                }
                 Ok(AppEvent::SystemDidWake) => {
                     let _ = event_tx.send(WmEvent::SystemDidWake);
                 }
@@ -265,32 +254,13 @@ pub fn spawn_event_watcher(
                         last_full_resync = now;
                         debounce_deadline = None;
                     }
-
-                    let watcher_resync_due =
-                        now.duration_since(last_watcher_resync) >= WATCHER_RESYNC_INTERVAL;
-                    // `|| full_window_resync`: that path needs a fresh
-                    // `resync_watchers` pass regardless of this cadence —
-                    // in practice it's never actually earlier than
-                    // `WATCHER_RESYNC_INTERVAL` (both `FULL_RESYNC_DEBOUNCE`
-                    // and `FULL_RESYNC_MAX_INTERVAL` are >= it), but this
-                    // doesn't rely on that coincidence to stay correct.
-                    if watcher_resync_due || full_window_resync {
-                        last_watcher_resync = now;
-                        resync_watchers(
-                            &rt,
-                            &event_tx,
-                            &mut watched,
-                            &mut unwatchable,
-                            full_window_resync,
-                        );
-                    }
-
-                    if let Some(pid) = workspace::frontmost_app_pid() {
-                        if last_frontmost_pid != Some(pid) {
-                            let _ = event_tx.send(WmEvent::FrontmostAppChanged { pid });
-                        }
-                        last_frontmost_pid = Some(pid);
-                    }
+                    resync_watchers(
+                        &rt,
+                        &event_tx,
+                        &mut watched,
+                        &mut unwatchable,
+                        full_window_resync,
+                    );
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             }

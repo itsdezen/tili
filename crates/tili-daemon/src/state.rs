@@ -1936,8 +1936,9 @@ impl WmState {
     /// for it — the common case when the current workspace is empty),
     /// `frontmost_app_pid()` reads identically before and after the click.
     /// There's no pid edge for `FrontmostAppChanged` to ever fire on, so
-    /// this function never runs at all — confirmed on real hardware (no
-    /// polling interval could fix this, however tight). See
+    /// this function never runs at all — confirmed on real hardware (there's
+    /// no real OS-level transition here at all, so neither a poll nor a
+    /// push notification has anything to fire on). See
     /// `reveal_current_frontmost` for how that's handled instead.
     ///
     /// One more guard lives inside the `None`/not-visible branch below: if
@@ -1972,8 +1973,9 @@ impl WmState {
     /// click needs `true`: per this doc comment's "Dock icon click" section
     /// above, re-clicking an already-frontmost app produces no pid edge at
     /// all, so `pid_unchanged` is expected to be true for the one legitimate
-    /// case this function exists to handle for a click. A poll-detected
-    /// `WmEvent::FrontmostAppChanged` needs `false`: by the time this
+    /// case this function exists to handle for a click. A
+    /// notification-detected `WmEvent::FrontmostAppChanged` needs `false`: by
+    /// the time this
     /// deferred call actually runs, a same-pid read means nothing has
     /// *really* changed since `last_frontmost_pid` was last set to a real,
     /// window-owning pid — chasing it anyway reverts a workspace switch the
@@ -2145,7 +2147,7 @@ impl WmState {
     /// `allow_unchanged_pid` is forwarded to `reveal_frontmost` as-is — see
     /// its doc comment. `main.rs` passes `true` when a `MouseSignal::ButtonUp`
     /// contributed to the pending deferred check, `false` otherwise (a pure
-    /// `WmEvent::FrontmostAppChanged` poll edge).
+    /// `WmEvent::FrontmostAppChanged` notification edge).
     pub fn reveal_current_frontmost(&mut self, allow_unchanged_pid: bool) {
         if !self.pending_launch_pids.is_empty() {
             return;
@@ -2163,16 +2165,17 @@ impl WmState {
     /// tili itself changes real macOS frontmost state — not left for
     /// `reveal_frontmost` to eventually catch up to reactively. Without
     /// this, a self-inflicted focus change (e.g. `switch_workspace` raising
-    /// a different app when entering a non-empty workspace) shows up to
-    /// `watch.rs`'s 250ms poll as indistinguishable from a real, external
-    /// Cmd-Tab; if the user has already navigated elsewhere by the time
-    /// that poll edge is detected and its deferred `reveal_frontmost` call
-    /// finally runs, `pid_unchanged` would wrongly read `false` (since
-    /// `last_frontmost_pid` was still whatever it was *before* this raise)
-    /// and chase back to the workspace this very call just left — confirmed
-    /// on real hardware via diagnostic logging: rapidly hopping through
-    /// empty workspaces after switching out of one with a real app
-    /// produces exactly this late, self-inflicted "edge."
+    /// a different app when entering a non-empty workspace) is a genuine
+    /// AX-level activation, so it shows up to `watch.rs`'s
+    /// `NSWorkspaceDidActivateApplicationNotification` handling as
+    /// indistinguishable from a real, external Cmd-Tab; if the user has
+    /// already navigated elsewhere by the time that notification's deferred
+    /// `reveal_frontmost` call finally runs, `pid_unchanged` would wrongly
+    /// read `false` (since `last_frontmost_pid` was still whatever it was
+    /// *before* this raise) and chase back to the workspace this very call
+    /// just left — confirmed on real hardware via diagnostic logging:
+    /// rapidly hopping through empty workspaces after switching out of one
+    /// with a real app produces exactly this late, self-inflicted "edge."
     fn raise_focused_window(&mut self, id: WindowId) {
         if let Some(window) = self.windows.get(&id) {
             window.focus();

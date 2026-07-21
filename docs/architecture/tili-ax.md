@@ -147,19 +147,26 @@ sleep/wake cycles, after the `NSApplication` restructuring landed,
 confirmed the notification is delivered reliably again on its own — see
 [invariants.md](invariants.md)'s polling-exceptions section.
 
-The 250ms tick tracks `workspace::frontmost_app_pid()` on every firing,
-emitting `WmEvent::FrontmostAppChanged { pid }` on an edge-triggered change
-— the only signal that catches Cmd-Tab or a Mission Control/Control Center
-click switching to an app whose window lives in a parked workspace, since
-neither `NSWorkspaceDidActivateApplicationNotification` (dead for this
-process, see the focus-sync section in [tili-daemon.md](tili-daemon.md))
-nor per-window `WindowFocused` reacts to a pure OS-level frontmost change.
-Kept at 250ms since this needs to feel close to instant.
+`WmEvent::FrontmostAppChanged { pid }` — the only signal that catches
+Cmd-Tab or a Mission Control/Control Center click switching to an app whose
+window lives in a parked workspace, since per-window `WindowFocused` above
+doesn't react to a pure OS-level frontmost change — is forwarded directly
+from `AppEvent::Activated` (`NSWorkspaceDidActivateApplicationNotification`,
+registered via `workspace::register_on_main`). This replaced a 250ms poll
+of `workspace::frontmost_app_pid()` (`AXFocusedApplication`, a direct AX
+query) kept that fast specifically because `DidActivateApplication` was
+confirmed dead for a `tili-daemon` with no `NSApplication`; **pending
+real-hardware confirmation that the notification is now reliably delivered**
+the same way `DidLaunchApplication`/`DidWakeNotification` were separately
+confirmed (see `workspace.rs`'s section above). `frontmost_app_pid` itself
+still exists and is still called elsewhere, on demand rather than
+periodically — see its own doc comment.
 
 `resync_watchers` — attach/detach watchers for the current pid set — used
 to run on that same 250ms cadence too, back when `NSWorkspace` launch/
-terminate notifications were also unreliable; it now runs on its own,
-separate `WATCHER_RESYNC_INTERVAL` (2s), since those notifications are
+terminate notifications were also unreliable; it now runs on its own
+`WATCHER_RESYNC_INTERVAL` (2s), the tick's only remaining cadence now that
+the frontmost poll is gone, since those launch/terminate notifications are
 confirmed reliably delivered (`tili-daemon` has a real `NSApplication`) and
 this is now a rare-miss backstop rather than the primary detection path —
 see that constant's doc comment. It drives one fix added in 0.1.1: it

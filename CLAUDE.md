@@ -122,12 +122,12 @@ rationale (and real-hardware evidence) behind each is in
 - **No polling** — the daemon reacts to AXObserver/NSWorkspace/display
   notifications. Exactly three sanctioned, narrowly-scoped exceptions:
   `hotkey.rs`'s event-tap install retry (Input Monitoring can be granted
-  at any time, with no notification); `watch.rs`'s 250ms watcher-resync
-  backstop + capped full resync (both notification sources have been
-  observed to occasionally never fire); and `main.rs`'s 30ms
-  `maintenance_tick` (pure debounce/coalescing of already-pushed events,
-  near-zero idle cost). Don't add a fourth without a similarly hard
-  constraint. (`display.rs`'s `spawn_display_watcher` still bounds its
+  at any time, with no notification); `watch.rs`'s `WATCHER_RESYNC_INTERVAL`
+  (2s) watcher-resync backstop + capped full resync (both notification
+  sources have been observed to occasionally never fire); and `main.rs`'s
+  30ms `maintenance_tick` (pure debounce/coalescing of already-pushed
+  events, near-zero idle cost). Don't add a fourth without a similarly
+  hard constraint. (`display.rs`'s `spawn_display_watcher` still bounds its
   `CFRunLoopRun` into 1s chunks — that's to avoid a run-loop spin-forever
   bug, not to poll anything; real hardware confirmed
   `CGDisplayRegisterReconfigurationCallback` now reliably fires for every

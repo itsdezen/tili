@@ -11,24 +11,27 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSNotification, NSOperationQueue};
 
-/// A process launching or quitting, or the system waking from sleep, as
-/// reported by `NSWorkspace`.
+/// A process launching, quitting, or becoming the system-wide frontmost
+/// application, or the system waking from sleep, as reported by
+/// `NSWorkspace`.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Launched { pid: i32, bundle_id: Option<String> },
     Terminated { pid: i32 },
+    Activated { pid: i32 },
     SystemDidWake,
 }
 
 /// Registers `NSWorkspaceDidLaunchApplicationNotification`/
-/// `DidTerminateApplication`/`DidWakeNotification` on the real process main
-/// thread, with `queue: .main` delivery, and returns immediately (no thread
-/// spawned, no `CFRunLoop` pumped here) — `NSApplication::run()`, called by
-/// the caller afterward, is what pumps the main run loop that delivers
-/// these blocks. Must be called after a real `NSApplication` instance
-/// exists and before `run()` starts, on the real main thread (the
-/// `MainThreadMarker` parameter documents that requirement; the
-/// `objc2-app-kit` calls themselves aren't gated behind it).
+/// `DidTerminateApplication`/`DidActivateApplication`/`DidWakeNotification`
+/// on the real process main thread, with `queue: .main` delivery, and
+/// returns immediately (no thread spawned, no `CFRunLoop` pumped here) —
+/// `NSApplication::run()`, called by the caller afterward, is what pumps
+/// the main run loop that delivers these blocks. Must be called after a
+/// real `NSApplication` instance exists and before `run()` starts, on the
+/// real main thread (the `MainThreadMarker` parameter documents that
+/// requirement; the `objc2-app-kit` calls themselves aren't gated behind
+/// it).
 ///
 /// Main-thread registration with `queue: .main` is load-bearing, not
 /// incidental: confirmed on real hardware that `DidLaunchApplication`/
@@ -36,8 +39,11 @@ pub enum AppEvent {
 /// `NSApplication` pumping its main run loop (only `DidTerminateApplication`
 /// was, evidently via some other delivery path) — a bare `CFRunLoopRun()`
 /// on an arbitrary background thread, with `queue: nil`, isn't sufficient
-/// for these two specifically, unlike AX notifications elsewhere in this
-/// crate.
+/// for these specifically, unlike AX notifications elsewhere in this crate.
+/// `DidActivateApplication` is registered here on the same premise, also
+/// separately confirmed reliably delivered on real hardware, replacing
+/// `tili-ax/src/watch.rs`'s periodic poll of `frontmost_app_pid()`
+/// for `WmEvent::FrontmostAppChanged` — see that event's doc comment.
 pub fn register_on_main(_mtm: MainThreadMarker) -> Receiver<AppEvent> {
     let (tx, rx) = std::sync::mpsc::channel();
     // SAFETY: `sharedWorkspace`/`notificationCenter` are safe to call from
@@ -73,6 +79,19 @@ pub fn register_on_main(_mtm: MainThreadMarker) -> Receiver<AppEvent> {
             None,
             Some(&main_queue),
             &terminated_block,
+        );
+
+        let activated_tx = tx.clone();
+        let activated_block = RcBlock::new(move |note: NonNull<NSNotification>| {
+            if let Some((pid, _)) = running_app_from_notification(note) {
+                let _ = activated_tx.send(AppEvent::Activated { pid });
+            }
+        });
+        center.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSWorkspaceDidActivateApplicationNotification),
+            None,
+            Some(&main_queue),
+            &activated_block,
         );
 
         let wake_tx = tx.clone();
@@ -137,16 +156,15 @@ pub fn activate_app(pid: i32) {
 /// The pid of the currently frontmost application, via the system-wide
 /// Accessibility element (`AXUIElementCreateSystemWide`'s
 /// `AXFocusedApplication` attribute) — a direct, synchronous query, not a
-/// notification. Used instead of `NSWorkspaceDidActivateApplicationNotification`
-/// — confirmed on real hardware to never fire for `tili-daemon` prior to
-/// `main.rs` giving it a real `NSApplication` instance and main-thread
-/// `register_on_main` registration (see that function's doc comment); even
-/// `DidLaunchApplication`/`DidWakeNotification` were confirmed silently
-/// undelivered without that context, and only `DidTerminateApplication`
-/// worked reliably beforehand. `frontmost_app_pid` stays a polled query
-/// rather than switching to `DidActivateApplication` now that a real
-/// `NSApplication` exists, since it's cheap and already proven — `watch.rs`
-/// polls this on its existing cheap resync tick.
+/// notification. `tili-ax/src/watch.rs`'s periodic tick used to poll this
+/// for `WmEvent::FrontmostAppChanged` before `register_on_main` registered
+/// `NSWorkspaceDidActivateApplicationNotification` (confirmed on real
+/// hardware to never fire for `tili-daemon` prior to `main.rs` giving it a
+/// real `NSApplication` instance and main-thread registration) — that tick
+/// now reacts to the push notification instead. `frontmost_app_pid` itself
+/// stays: `WmState::sync_focus_from_pid` and `reveal_current_frontmost`
+/// both still call it directly, as a synchronous "what's frontmost right
+/// now" read at a specific decision point, not a periodic poll.
 pub fn frontmost_app_pid() -> Option<i32> {
     axuielement::system_wide()?
         .focused_application()
