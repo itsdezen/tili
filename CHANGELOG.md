@@ -23,6 +23,17 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   limit; dragging when there's no sibling to trade space with at all
   (alone, or tiled-fullscreen) is simply ignored.
 
+### Fixed
+
+- **Centered floating windows no longer stack exactly on top of each
+  other.** Opening several same-sized floating windows in a row used to
+  center every one of them at the identical pixel, fully hiding all but
+  the topmost. Each newly auto-centered window now gets a small `(dx,
+  dy)` nudge, symmetric around dead center (alternating `±step,±step` at
+  growing magnitude, wrapping back to dead center every few placements)
+  rather than drifting toward one corner — the cluster still reads as
+  centered, but each window is individually visible and grabbable.
+
 ## [0.2.0] - 2026-07-21
 
 ### Changed

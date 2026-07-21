@@ -34,6 +34,28 @@ workspace switch undoes a user's manual drag, or silently re-centers a
 window the user never touched. A window *with* captured `manual` geometry
 (the user dragged/resized it) is still restored proportionally on every
 reactivation, so a monitor swap or resolution change scales it sensibly.
+
+A centered placement also gets a small `cascade_offset` nudge from
+`place_floating_window` — otherwise several same-sized floating windows
+centered one after another would land on the exact same pixel and fully
+overlap, with no way to see or grab anything but the topmost one.
+`WmState::floating_cascade: HashMap<String, u32>` tracks the next cascade
+index per workspace (`next_floating_cascade_index`, advanced once per
+window actually auto-centered); `cascade_offset` turns that index into a
+`(dx, dy)` pixel nudge that's symmetric around dead center — `0,0`, then
+alternating `±step,±step` at growing magnitude — rather than drifting
+monotonically toward one corner, wrapping back to `0,0` every
+`FLOATING_CASCADE_CYCLE` placements so it never grows unbounded. The
+result is clamped back into `area` the same way `restore_floating_frame`
+clamps a restored frame, in case the nudge would otherwise push the
+window off-screen. The counter is deliberately never reset when a
+workspace runs out of floating windows — the wraparound already bounds
+it, and every caller of `place_floating_window` (a brand-new window, a
+window promoted back from a special state, `set-floating true`, or a
+window shown for the first time via `reposition_floating_for_monitor`) is
+a genuine first-time placement, so the counter only ever advances on
+events the user would actually perceive as "another window just got
+centered here."
 `state.rs` functions whose
 tree-topology operation is meaningless for a floating focus (`move_focused`,
 `join`, `resize`, `set_orientation`/`toggle_orientation`,

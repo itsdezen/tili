@@ -83,6 +83,34 @@ const LAUNCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
 /// new poll.
 const MAX_BUNDLE_ID_RETRIES: u8 = 3;
 
+/// Small per-window nudge `place_floating_window` applies to a freshly
+/// auto-centered floating window, so opening several same-sized floating
+/// windows in a row doesn't stack them in an identical, fully-overlapping
+/// spot. See `cascade_offset`.
+const FLOATING_CASCADE_STEP: f64 = 28.0;
+
+/// How many placements the cascade sequence spans before it wraps back to
+/// dead center (`0, 0`) and repeats — keeps the offset bounded regardless
+/// of how many floating windows get opened, rather than drifting further
+/// and further from center forever.
+const FLOATING_CASCADE_CYCLE: u32 = 8;
+
+/// The `(dx, dy)` nudge for the `index`-th window in a cascade sequence —
+/// symmetric around dead center rather than drifting monotonically toward
+/// one corner: `0` is untouched, then alternating +/- at growing
+/// magnitude (`+step,+step`, `-step,-step`, `+2*step,+2*step`, ...),
+/// wrapping back to `(0, 0)` every `FLOATING_CASCADE_CYCLE` placements so
+/// the offset never grows unbounded.
+fn cascade_offset(index: u32) -> (f64, f64) {
+    let cycle = index % FLOATING_CASCADE_CYCLE;
+    if cycle == 0 {
+        return (0.0, 0.0);
+    }
+    let magnitude = f64::from(cycle.div_ceil(2)) * FLOATING_CASCADE_STEP;
+    let sign = if cycle % 2 == 1 { 1.0 } else { -1.0 };
+    (magnitude * sign, magnitude * sign)
+}
+
 fn frames_match(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < FLOAT_DRIFT_EPSILON
         && (a.y - b.y).abs() < FLOAT_DRIFT_EPSILON
@@ -686,6 +714,15 @@ pub struct WmState {
     /// from scratch on every later workspace switch. Cleared in
     /// `remove_placement` alongside the placement itself.
     floating_placed: HashSet<WindowId>,
+    /// The next `cascade_offset` index for each workspace's floating
+    /// windows — advanced only by `next_floating_cascade_index`, which
+    /// `place_floating_window` calls once per window it actually
+    /// auto-centers. Deliberately never reset when a workspace runs out of
+    /// floating windows — `cascade_offset` already wraps back to dead
+    /// center on its own every `FLOATING_CASCADE_CYCLE` placements, so
+    /// resetting here would just be extra bookkeeping for no behavioral
+    /// difference.
+    floating_cascade: HashMap<String, u32>,
     /// Set by `note_system_wake` to `now + WAKE_REMOVAL_GRACE` — while
     /// `Instant::now()` is still before this, `finalize_expired_removals`
     /// uses `WAKE_REMOVAL_GRACE` instead of `removal_grace`. `None` the rest
@@ -739,6 +776,7 @@ impl Default for WmState {
             pending_launch_pids: HashMap::new(),
             switch_epoch: 0,
             floating_placed: HashSet::new(),
+            floating_cascade: HashMap::new(),
             wake_grace_until: None,
         }
     }
@@ -3202,6 +3240,19 @@ impl WmState {
         )
     }
 
+    /// Returns and advances the next `cascade_offset` index for
+    /// `workspace` — each workspace cascades independently, since floating
+    /// windows in different workspaces are never shown at the same time.
+    fn next_floating_cascade_index(&mut self, workspace: &str) -> u32 {
+        let counter = self
+            .floating_cascade
+            .entry(workspace.to_string())
+            .or_insert(0);
+        let index = *counter;
+        *counter = counter.wrapping_add(1);
+        index
+    }
+
     /// Computes and writes `id`'s floating frame within `area` (see
     /// `initial_floating_frame_in`). If centering wasn't requested, this is
     /// a single `frame_setter.set_frame` write, like any other placement.
@@ -3224,6 +3275,13 @@ impl WmState {
     /// non-animateable write, not the tiled-layout seam `WindowFrameSetter`
     /// exists for).
     ///
+    /// The centered position also gets a small `cascade_offset` nudge (via
+    /// `next_floating_cascade_index`) so several same-sized floating
+    /// windows centered one after another don't all land on the exact same
+    /// pixel and fully overlap — clamped back into `area` afterward in
+    /// case the nudge would otherwise push the window off-screen (a small
+    /// monitor, or little slack between the window and `area`'s edges).
+    ///
     /// Note: this window also lives in its workspace's `tili_tree::Tree` as
     /// a `Node::Floating` leaf (see `place_new_window`'s `Floating` arm) so
     /// `workspace_focus`/`focused_node()` can address it, but that leaf is
@@ -3242,6 +3300,12 @@ impl WmState {
             return;
         };
         let (frame, center) = self.initial_floating_frame_in(window, area);
+
+        let cascade = center
+            .then(|| self.placements.get(&id).map(|p| p.workspace.clone()))
+            .flatten()
+            .map(|workspace| cascade_offset(self.next_floating_cascade_index(&workspace)));
+
         let Some(window) = self.windows.get_mut(&id) else {
             return;
         };
@@ -3250,9 +3314,12 @@ impl WmState {
         } else {
             window.set_size(frame.width, frame.height);
             let actual = window.live_frame();
-            let corrected_x = area.x + (area.width - actual.width) / 2.0;
-            let corrected_y = area.y + (area.height - actual.height) / 2.0;
-            window.set_position(corrected_x, corrected_y);
+            let (dx, dy) = cascade.unwrap_or((0.0, 0.0));
+            let cascaded_x = (area.x + (area.width - actual.width) / 2.0 + dx)
+                .clamp(area.x, area.x + area.width - actual.width);
+            let cascaded_y = (area.y + (area.height - actual.height) / 2.0 + dy)
+                .clamp(area.y, area.y + area.height - actual.height);
+            window.set_position(cascaded_x, cascaded_y);
         }
         self.floating_placed.insert(id);
     }
@@ -3799,6 +3866,35 @@ mod tests {
         };
         assert!(frames_match(a, close));
         assert!(!frames_match(a, far));
+    }
+
+    #[test]
+    fn cascade_offset_is_symmetric_around_dead_center_and_wraps() {
+        let step = FLOATING_CASCADE_STEP;
+        assert_eq!(cascade_offset(0), (0.0, 0.0));
+        assert_eq!(cascade_offset(1), (step, step));
+        assert_eq!(cascade_offset(2), (-step, -step));
+        assert_eq!(cascade_offset(3), (2.0 * step, 2.0 * step));
+        assert_eq!(cascade_offset(4), (-2.0 * step, -2.0 * step));
+        assert_eq!(cascade_offset(7), (4.0 * step, 4.0 * step));
+        // Wraps back to dead center every FLOATING_CASCADE_CYCLE placements,
+        // so the offset never grows without bound.
+        assert_eq!(cascade_offset(FLOATING_CASCADE_CYCLE), (0.0, 0.0));
+        assert_eq!(
+            cascade_offset(FLOATING_CASCADE_CYCLE + 1),
+            cascade_offset(1)
+        );
+    }
+
+    #[test]
+    fn next_floating_cascade_index_counts_up_independently_per_workspace() {
+        let mut state = floating_test_state();
+        assert_eq!(state.next_floating_cascade_index(DEFAULT_WORKSPACE), 0);
+        assert_eq!(state.next_floating_cascade_index(DEFAULT_WORKSPACE), 1);
+        assert_eq!(state.next_floating_cascade_index(DEFAULT_WORKSPACE), 2);
+        // A different workspace starts its own sequence from 0.
+        assert_eq!(state.next_floating_cascade_index("side"), 0);
+        assert_eq!(state.next_floating_cascade_index(DEFAULT_WORKSPACE), 3);
     }
 
     #[test]
