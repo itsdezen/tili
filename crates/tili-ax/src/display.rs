@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::sync::mpsc::Sender;
 
 use core_graphics::display::{
     CGDirectDisplayID, CGDisplay, CGDisplayRegisterReconfigurationCallback,
 };
 use tili_tree::Rect;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// A conservative, hardcoded menu-bar height, applied only to the display
 /// that's currently `CGDisplay::main()` — secondary displays don't carry a
@@ -209,7 +209,7 @@ unsafe extern "C" fn reconfiguration_callback(
     // just tells the daemon "something changed, re-enumerate" via
     // `list_monitors`, which is simpler and less error-prone than trying to
     // interpret `CGDisplayChangeSummaryFlags` bit-by-bit.
-    let tx = unsafe { &*(user_info as *const Sender<()>) };
+    let tx = unsafe { &*(user_info as *const UnboundedSender<()>) };
     let _ = tx.send(());
 }
 
@@ -243,8 +243,8 @@ const RESOLUTION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// forever unattended, and after every wake (whether from a real callback or
 /// a timeout) it diffs a fresh `list_monitors()` against the last snapshot,
 /// only signaling the channel when something actually changed.
-pub fn spawn_display_watcher() -> std::sync::mpsc::Receiver<()> {
-    let (tx, rx) = std::sync::mpsc::channel();
+pub fn spawn_display_watcher() -> UnboundedReceiver<()> {
+    let (tx, rx) = unbounded_channel();
     std::thread::spawn(move || {
         let user_info = Box::into_raw(Box::new(tx.clone())) as *const c_void;
         unsafe {

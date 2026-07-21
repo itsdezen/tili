@@ -531,12 +531,23 @@ background thread gone, `app.run()` still parked, answering nothing.
 One `tokio::select!` loop inside `async_daemon_main` merges socket accepts,
 `tili_ax::spawn_event_watcher()`'s channel (fed by the main-thread-registered
 `NSWorkspace` receiver, passed in as a parameter), the config-reload bridge,
-the hotkey-tap bridge, the display-watcher bridge (M9), and the
-mouse-watcher bridge (M10) — no locks around `WmState` itself, because only
-one branch of the loop ever touches it at a time; `sync_active_combos` is
-called after every branch that could change the active mode/bindings, to
-keep the hotkey tap's `Mutex<HashSet<KeyCombo>>` from drifting out of sync
-with what `WmState` actually has bound.
+and `tili-ax`'s hotkey-tap/display-watcher (M9)/mouse-watcher (M10) channels
+— no locks around `WmState` itself, because only one branch of the loop ever
+touches it at a time; `sync_active_combos` is called after every branch that
+could change the active mode/bindings, to keep the hotkey tap's
+`Mutex<HashSet<KeyCombo>>` from drifting out of sync with what `WmState`
+actually has bound.
+
+`tili_ax::spawn_hotkey_tap`/`spawn_display_watcher`/`spawn_mouse_watcher`
+each build and send on a `tokio::sync::mpsc` channel directly from their own
+dedicated thread, so `main.rs` calls them straight — no separate relay-
+thread bridge for these three (an earlier version had one per watcher,
+purely forwarding `std::sync::mpsc` into `tokio::sync::mpsc`; removed since
+`tili-ax` already depends on Tokio and `UnboundedSender::send` is a plain
+synchronous call, legal from any thread). `spawn_config_reload_bridge` is
+the one bridge that's still a separate relay thread, because
+`tili_config::spawn_config_watcher` deliberately stays runtime-agnostic
+(`std::sync::mpsc`, not `tokio`) — see [tili-config.md](tili-config.md).
 
 `ensure_starter_config_exists` (M10) writes `example/tili.kdl` (via
 `include_str!`) to `~/.config/tili/tili.kdl` before the first

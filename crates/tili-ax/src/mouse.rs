@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use core_foundation::runloop::CFRunLoop;
@@ -9,6 +8,7 @@ use core_graphics::event::{
     CallbackResult,
 };
 use core_graphics::geometry::CGPoint;
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 /// How often the mouse-moved watcher is allowed to report a position —
 /// bounds the channel/wakeup volume during active mouse movement (which is
@@ -38,11 +38,17 @@ pub enum MouseSignal {
 
 /// Spawns a dedicated thread with a `CGEventTap` (`ListenOnly` — this only
 /// observes events, it never consumes or alters them) reporting the
-/// cursor's global position and left-button state. Same
-/// dedicated-`CFRunLoop`-thread pattern as every other watcher in this
-/// crate.
-pub fn spawn_mouse_watcher() -> Receiver<MouseSignal> {
-    let (tx, rx) = channel();
+/// cursor's global position and left-button state. The thread is mandatory
+/// regardless of whether the process has an `NSApplication`:
+/// `CGEventTap::with_enabled(..., CFRunLoop::run_current)` blocks its
+/// calling thread forever once the tap installs successfully, so it can't
+/// share a run loop with anything else — same constraint as
+/// `hotkey.rs::spawn_hotkey_tap`. The returned channel is a
+/// `tokio::sync::mpsc::UnboundedSender`, sent to directly from this thread
+/// (`send` is a plain synchronous call), so no separate bridge thread is
+/// needed to get these events into the daemon's Tokio runtime.
+pub fn spawn_mouse_watcher() -> UnboundedReceiver<MouseSignal> {
+    let (tx, rx) = unbounded_channel();
 
     std::thread::spawn(move || {
         let last_sent: Cell<Option<Instant>> = Cell::new(None);

@@ -81,7 +81,9 @@ real `NSApplication` context to fix those; whether that also fixes
 resolution-only reconfiguration delivery hasn't been separately
 re-verified, so this remains one of the four sanctioned polling exceptions
 (see [invariants.md](invariants.md)) pending that check, not removed
-opportunistically alongside an unrelated change.
+opportunistically alongside an unrelated change. Sends directly on a
+`tokio::sync::mpsc` channel from this thread, same as `hotkey.rs`/`mouse.rs`
+above — no separate bridge thread.
 
 ## workspace.rs — NSWorkspace bridge
 
@@ -191,13 +193,20 @@ sends `AppTerminated` on a confirmed-dead pid; one that's merely off
 
 ## hotkey.rs — global hotkey capture (M6)
 
-A `CGEventTap` on its own dedicated `CFRunLoop` thread (same reasoning as
-the NSWorkspace/AX watchers), which consumes (drops) a keypress if it's in
-the caller-supplied `active_bindings` set and passes everything else
-through untouched. `parse_key_combo` turns a KDL key string like
+A `CGEventTap` on its own dedicated `CFRunLoop` thread — mandatory
+regardless of `NSApplication`: `CGEventTap::with_enabled(...,
+CFRunLoop::run_current)` blocks its calling thread forever once the tap
+installs, so it can't share a run loop with anything else (installing it on
+the real main thread would block `NSApplication::run()` forever, before the
+Cocoa event loop ever starts pumping) — which consumes (drops) a keypress
+if it's in the caller-supplied `active_bindings` set and passes everything
+else through untouched. `parse_key_combo` turns a KDL key string like
 `"alt-shift-h"` into a `KeyCombo` (`key_code_for_name` is the exhaustive
 keycode table — extend it there if a config references a key name it
-doesn't recognize).
+doesn't recognize). `spawn_hotkey_tap` sends directly on a
+`tokio::sync::mpsc` channel from this thread — no separate bridge thread
+needed (`tili-daemon.md`'s main.rs section explains why this differs from
+the config-reload bridge).
 
 `active_bindings` is an `Arc<Mutex<HashSet<KeyCombo>>>` because the
 event-tap callback must decide Keep-vs-Drop *synchronously* — it can't
@@ -209,10 +218,13 @@ of message-passing into one owner; see `tili-daemon`'s
 ## mouse.rs — cursor warp and mouse watcher (M10)
 
 `warp_cursor_to` (`CGDisplay::warp_mouse_cursor_position`, for
-`mouse-follows-focus`) and `spawn_mouse_watcher` — another `CGEventTap`,
-this one `ListenOnly` on `kCGEventMouseMoved` for `focus-follows-monitor`,
-throttled to one position report per 80ms via a *thread-local*
-`Cell<Instant>` (not a shared `Mutex` — this callback only ever runs on its
-own dedicated OS thread, so there's nothing to synchronize) so mouse
-activity in general can't flood the daemon's `select!` loop with one
-message per pixel of travel.
+`mouse-follows-focus`) and `spawn_mouse_watcher` — another `CGEventTap`
+(same mandatory-dedicated-thread constraint as `hotkey.rs`'s tap, see
+above), this one `ListenOnly` on `kCGEventMouseMoved` for
+`focus-follows-monitor`, throttled to one position report per 80ms via a
+*thread-local* `Cell<Instant>` (not a shared `Mutex` — this callback only
+ever runs on its own dedicated OS thread, so there's nothing to
+synchronize) so mouse activity in general can't flood the daemon's
+`select!` loop with one message per pixel of travel. Sends directly on a
+`tokio::sync::mpsc` channel from this thread, same as `spawn_hotkey_tap` —
+no separate bridge thread.

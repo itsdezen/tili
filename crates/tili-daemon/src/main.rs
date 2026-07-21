@@ -140,9 +140,9 @@ async fn async_daemon_main(
     let mut events = tili_ax::spawn_event_watcher(app_event_rx);
     let mut config_updates = spawn_config_reload_bridge();
     let active_combos = Arc::new(Mutex::new(HashSet::new()));
-    let mut hotkeys = spawn_hotkey_bridge(active_combos.clone());
-    let mut displays_changed = spawn_display_watcher_bridge();
-    let mut mouse_events = spawn_mouse_watcher_bridge();
+    let mut hotkeys = tili_ax::spawn_hotkey_tap(active_combos.clone());
+    let mut displays_changed = tili_ax::spawn_display_watcher();
+    let mut mouse_events = tili_ax::spawn_mouse_watcher();
     let mut state = WmState::default();
     // Fired once per loop iteration below (deliberately coarse — see
     // `Command::WaitForChange`'s doc comment) so a `WaitForChange`
@@ -603,64 +603,19 @@ fn sync_active_combos(shared: &Arc<Mutex<HashSet<tili_ax::KeyCombo>>>, state: &W
 
 /// Bridges `tili_config`'s plain-`std::sync::mpsc` file-watcher (see its
 /// module docs for why it isn't async itself) into a tokio channel this
-/// daemon's `select!` loop can read from directly.
+/// daemon's `select!` loop can read from directly. The only remaining
+/// bridge of this shape — `tili-ax`'s own watchers
+/// (`spawn_hotkey_tap`/`spawn_display_watcher`/`spawn_mouse_watcher`) build
+/// and send on a `tokio::sync::mpsc` channel directly from their own
+/// dedicated thread instead, since `tili-ax` already depends on Tokio (see
+/// each function's doc comment); `tili_config` deliberately does not, so it
+/// still needs this separate relay thread.
 fn spawn_config_reload_bridge() -> tokio::sync::mpsc::UnboundedReceiver<tili_config::Config> {
     let sync_rx = tili_config::spawn_config_watcher(tili_config::default_config_path());
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
         while let Ok(config) = sync_rx.recv() {
             if tx.send(config).is_err() {
-                break;
-            }
-        }
-    });
-    rx
-}
-
-/// Bridges `tili_ax::spawn_hotkey_tap`'s plain-`std::sync::mpsc` channel
-/// into a tokio channel, same pattern as `spawn_config_reload_bridge`.
-fn spawn_hotkey_bridge(
-    active_combos: Arc<Mutex<HashSet<tili_ax::KeyCombo>>>,
-) -> tokio::sync::mpsc::UnboundedReceiver<tili_ax::KeyCombo> {
-    let sync_rx = tili_ax::spawn_hotkey_tap(active_combos);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        while let Ok(combo) = sync_rx.recv() {
-            if tx.send(combo).is_err() {
-                break;
-            }
-        }
-    });
-    rx
-}
-
-/// Bridges `tili_ax::spawn_display_watcher`'s plain-`std::sync::mpsc`
-/// channel into a tokio channel, same pattern as the other bridges (M9).
-fn spawn_display_watcher_bridge() -> tokio::sync::mpsc::UnboundedReceiver<()> {
-    let sync_rx = tili_ax::spawn_display_watcher();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        while let Ok(()) = sync_rx.recv() {
-            if tx.send(()).is_err() {
-                break;
-            }
-        }
-    });
-    rx
-}
-
-/// Bridges `tili_ax::spawn_mouse_watcher`'s plain-`std::sync::mpsc` channel
-/// into a tokio channel, same pattern as the other bridges (M10). Runs
-/// unconditionally regardless of `focus-follows-monitor`, same as the
-/// hotkey tap running regardless of whether any keybindings are
-/// configured — `WmState::on_mouse_moved`/`on_mouse_button_down`/
-/// `on_mouse_button_up` are what actually gate on settings/state.
-fn spawn_mouse_watcher_bridge() -> tokio::sync::mpsc::UnboundedReceiver<tili_ax::MouseSignal> {
-    let sync_rx = tili_ax::spawn_mouse_watcher();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        while let Ok(signal) = sync_rx.recv() {
-            if tx.send(signal).is_err() {
                 break;
             }
         }

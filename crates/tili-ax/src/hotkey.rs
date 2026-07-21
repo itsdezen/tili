@@ -1,7 +1,8 @@
 use std::collections::HashSet;
-use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use core_foundation::runloop::CFRunLoop;
 use core_graphics::event::{
@@ -68,14 +69,21 @@ pub struct KeyCombo {
 }
 
 /// Spawns the global hotkey capture tap on its own dedicated `CFRunLoop`
-/// thread — the same pattern `workspace.rs`/`watch.rs` use for NSWorkspace
-/// and AX notifications, since receiving *any* of these system callbacks in
-/// a non-`NSApplication` process requires some thread pumping a run loop.
+/// thread. This thread is mandatory regardless of whether the process has
+/// an `NSApplication`: `CGEventTap::with_enabled(..., CFRunLoop::run_current)`
+/// blocks its calling thread forever once the tap installs successfully, so
+/// it can't share a run loop with anything else — installing it on the real
+/// main thread would block `NSApplication::run()` forever right at this
+/// call, before the Cocoa event loop ever started pumping.
 ///
 /// Returns a channel of every `KeyCombo` press found in `active_bindings`
 /// at the moment it's pressed. Matched presses are consumed (dropped) so
 /// they don't leak into the focused app as literal keystrokes; anything not
-/// in `active_bindings` passes through untouched.
+/// in `active_bindings` passes through untouched. The channel is a
+/// `tokio::sync::mpsc::UnboundedSender`, sent to directly from this
+/// dedicated thread — `send` is a plain synchronous call, so no separate
+/// bridge thread is needed to get these events into the daemon's Tokio
+/// runtime.
 ///
 /// `active_bindings` is checked synchronously inside the event-tap
 /// callback — a `CGEventTap` callback cannot `.await` a round-trip to the
@@ -86,8 +94,10 @@ pub struct KeyCombo {
 /// contents after every state change that could affect the active
 /// mode/bindings (see `sync_active_combos` in its `main.rs`), keeping the
 /// window where it could be briefly stale as small as possible.
-pub fn spawn_hotkey_tap(active_bindings: Arc<Mutex<HashSet<KeyCombo>>>) -> Receiver<KeyCombo> {
-    let (tx, rx) = channel();
+pub fn spawn_hotkey_tap(
+    active_bindings: Arc<Mutex<HashSet<KeyCombo>>>,
+) -> UnboundedReceiver<KeyCombo> {
+    let (tx, rx) = unbounded_channel();
 
     std::thread::spawn(move || {
         let mut warned = false;

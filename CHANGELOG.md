@@ -10,6 +10,20 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ### Changed
 
+- **Removed 3 permanently-alive relay threads that existed purely to
+  forward events into a `tokio::sync::mpsc` channel.** `tili-daemon`'s
+  `spawn_hotkey_bridge`/`spawn_display_watcher_bridge`/
+  `spawn_mouse_watcher_bridge` each did nothing but `recv()` a
+  `std::sync::mpsc` message and `send()` it into a `tokio::sync::mpsc`
+  channel — pure boilerplate. `tili-ax`'s `spawn_hotkey_tap`/
+  `spawn_display_watcher`/`spawn_mouse_watcher` now build and send on the
+  `tokio::sync::mpsc` channel directly from their own already-existing
+  dedicated thread (`tili-ax` already depends on Tokio, and
+  `UnboundedSender::send` is a plain synchronous call, legal from any
+  thread — the same pattern `tili-ax::watch::spawn_event_watcher` already
+  used internally). `tili_config`'s config-reload bridge is unchanged: its
+  watcher deliberately stays runtime-agnostic (`std::sync::mpsc`, not
+  `tokio`), so it still needs a separate relay thread.
 - **`tili-daemon` now creates a real `NSApplication` instance and gives it
   the actual process main thread** (`main.rs`'s `fn main()`, no longer
   `#[tokio::main]` — the whole prior daemon body moved to `async_daemon_main`
