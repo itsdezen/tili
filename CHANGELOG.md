@@ -8,6 +8,21 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Added
+
+- **Mouse-based tile resize.** Dragging a tiled window's real native
+  edge/corner (the normal macOS way) now resizes it and its sibling(s) —
+  previously only the `resize`/`mode resize` keyboard commands could
+  resize a tile at all, and a native drag would just snap back on
+  release. Siblings only relayout once, on mouse-up, never live during the
+  drag. The released size always snaps to the same grid the keyboard
+  `resize <amount>` command uses, via the new `mouse-resize-step` setting
+  (default `0.1`) — never an arbitrary off-grid pixel value. Dragging past
+  what's actually valid overflows straight to the tree's true max/min
+  instead of refusing, same as spamming the keyboard shortcut past its own
+  limit; dragging when there's no sibling to trade space with at all
+  (alone, or tiled-fullscreen) is simply ignored.
+
 ## [0.2.0] - 2026-07-21
 
 ### Changed

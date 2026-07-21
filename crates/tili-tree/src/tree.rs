@@ -28,6 +28,25 @@ pub enum Direction {
     Down,
 }
 
+/// A resize-able border found by `resize_handle_at`, between two children of one specific
+/// `Tiles` container. `before`/`after` are that container's own direct children — either could
+/// themselves be a sub-container, not necessarily the window whose edge was actually dragged —
+/// which is what makes it safe to pass either one straight to `resize_weight`: its own upward
+/// walk to the nearest `Tiles` ancestor matches on the very first step, since `before`/`after`
+/// are already direct children of the container that walk would find anyway.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResizeHandle {
+    pub before: NodeId,
+    pub after: NodeId,
+    pub orientation: Orientation,
+    /// Weight-units one pixel along this container's split axis is worth right now — i.e.
+    /// `total sibling weight / divisible pixels` for this specific container. Constant for as
+    /// long as this container's own on-screen area and total weight don't change, which holds
+    /// for the whole duration of a single mouse drag (a resize only redistributes weight among
+    /// siblings — their sum never changes — and the monitor doesn't move mid-drag).
+    pub weight_per_pixel: f64,
+}
+
 /// Which of a container's two rendering modes is active — orthogonal to
 /// `Orientation` (a container has both, independently: layout and
 /// orientation vary separately).
@@ -626,34 +645,77 @@ impl Tree {
     }
 
     fn apply_resize(&mut self, container: NodeId, branch: NodeId, delta: f32) -> bool {
-        const MIN_WEIGHT: f32 = 0.05;
+        let Some((max_shrink, max_grow)) = self.branch_resize_bounds(container, branch) else {
+            return false;
+        };
+        let actual_delta = delta.clamp(-max_shrink, max_grow);
+
         let Some(Node::Container {
             children, weights, ..
         }) = self.nodes.get_mut(container)
         else {
             return false;
         };
-        if children.len() < 2 {
-            return false;
-        }
         let Some(idx) = children.iter().position(|&c| c == branch) else {
             return false;
         };
-
         let others: Vec<usize> = (0..children.len()).filter(|&i| i != idx).collect();
         let others_total: f32 = others.iter().map(|&i| weights[i]).sum();
-        if others_total <= 0.0 {
-            return false;
-        }
-
-        let max_take = (others_total - MIN_WEIGHT * others.len() as f32).max(0.0);
-        let actual_delta = delta.clamp(-(weights[idx] - MIN_WEIGHT).max(0.0), max_take);
 
         weights[idx] += actual_delta;
         for &i in &others {
             weights[i] -= actual_delta * (weights[i] / others_total);
         }
         true
+    }
+
+    /// The `(max_shrink, max_grow)` a call to `apply_resize(container, branch, delta)` would
+    /// actually honor right now, both `>= 0.0` — the exact clamp bound it applies internally,
+    /// factored out so callers can pick a `delta` that's already valid instead of getting a
+    /// silently-truncated one back. `None` if `branch` isn't a child of `container`, `container`
+    /// has fewer than 2 children, or the other children's weights don't sum to a positive number.
+    fn branch_resize_bounds(&self, container: NodeId, branch: NodeId) -> Option<(f32, f32)> {
+        const MIN_WEIGHT: f32 = 0.05;
+        let Some(Node::Container {
+            children, weights, ..
+        }) = self.nodes.get(container)
+        else {
+            return None;
+        };
+        if children.len() < 2 {
+            return None;
+        }
+        let idx = children.iter().position(|&c| c == branch)?;
+        let others: Vec<usize> = (0..children.len()).filter(|&i| i != idx).collect();
+        let others_total: f32 = others.iter().map(|&i| weights[i]).sum();
+        if others_total <= 0.0 {
+            return None;
+        }
+        let max_grow = (others_total - MIN_WEIGHT * others.len() as f32).max(0.0);
+        let max_shrink = (weights[idx] - MIN_WEIGHT).max(0.0);
+        Some((max_shrink, max_grow))
+    }
+
+    /// The `(max_shrink, max_grow)` bound `resize_weight(from, ±delta)` would actually honor
+    /// right now — the same nearest-`Tiles`-ancestor walk as `resize_weight` itself, but
+    /// read-only. Lets a caller (mouse-drag step-snapping, in particular) pick a `delta` that's
+    /// already guaranteed valid instead of clamping into an arbitrary, possibly off-grid value
+    /// after the fact. `None` if `from` has no `Tiles` ancestor with a sibling to trade weight
+    /// with, mirroring `resize_weight`'s own `false`.
+    pub fn resize_delta_bounds(&self, from: NodeId) -> Option<(f32, f32)> {
+        let mut child = from;
+        while let Some(&parent) = self.parents.get(&child) {
+            if let Some(Node::Container {
+                layout: Layout::Tiles,
+                ..
+            }) = self.nodes.get(parent)
+                && let Some(bounds) = self.branch_resize_bounds(parent, child)
+            {
+                return Some(bounds);
+            }
+            child = parent;
+        }
+        None
     }
 
     /// Resets every child weight of the target container back to `1.0`,
@@ -1065,6 +1127,186 @@ impl Tree {
                 }
             }
             None => {}
+        }
+    }
+
+    /// Finds the resize border (if any) at `point`, given the same `area`/`gaps` `layout` would
+    /// be called with — a hit here always agrees with what was actually drawn, since it mirrors
+    /// `layout_node`'s own `Tiles`/`Accordion` geometry. Returns `None` anywhere the tree has no
+    /// internal border to hit at all, including a lone root window or an all-`Accordion` tree —
+    /// the same "nothing to resize" guarantee `resize_weight` already enforces, but derived
+    /// structurally here rather than checked separately.
+    pub fn resize_handle_at(
+        &self,
+        area: Rect,
+        gaps: Gaps,
+        point: (f64, f64),
+    ) -> Option<ResizeHandle> {
+        let root = self.root?;
+        let (top, right, bottom, left) = gaps.outer;
+        let padded = Rect {
+            x: area.x + left,
+            y: area.y + top,
+            width: (area.width - left - right).max(0.0),
+            height: (area.height - top - bottom).max(0.0),
+        };
+        self.resize_handle_node(root, padded, gaps.inner, gaps.accordion, point)
+    }
+
+    fn resize_handle_node(
+        &self,
+        node: NodeId,
+        area: Rect,
+        inner_gap: f64,
+        accordion_padding: f64,
+        point: (f64, f64),
+    ) -> Option<ResizeHandle> {
+        match self.nodes.get(node)? {
+            Node::Window { .. } | Node::Floating { .. } => None,
+            Node::Container {
+                layout: Layout::Tiles,
+                orientation,
+                children,
+                weights,
+                ..
+            } => {
+                let sizeable: Vec<(NodeId, f32)> = children
+                    .iter()
+                    .zip(weights.iter())
+                    .filter(|&(&c, _)| !matches!(self.nodes.get(c), Some(Node::Floating { .. })))
+                    .map(|(&c, &w)| (c, w))
+                    .collect();
+                let n = sizeable.len();
+                if n == 0 {
+                    return None;
+                }
+                let total: f32 = sizeable
+                    .iter()
+                    .map(|&(_, w)| w)
+                    .sum::<f32>()
+                    .max(f32::EPSILON);
+                let total_gap = inner_gap * (n.saturating_sub(1)) as f64;
+                let divisible = match orientation {
+                    Orientation::Horizontal => (area.width - total_gap).max(0.0),
+                    Orientation::Vertical => (area.height - total_gap).max(0.0),
+                };
+                let weight_per_pixel = if divisible > 0.0 {
+                    f64::from(total) / divisible
+                } else {
+                    0.0
+                };
+
+                let mut offset = 0.0_f64;
+                for (i, &(child, weight)) in sizeable.iter().enumerate() {
+                    let fraction = f64::from(weight / total);
+                    let child_size = divisible * fraction;
+                    let child_area = match orientation {
+                        Orientation::Horizontal => Rect {
+                            x: area.x + offset,
+                            y: area.y,
+                            width: child_size,
+                            height: area.height,
+                        },
+                        Orientation::Vertical => Rect {
+                            x: area.x,
+                            y: area.y + offset,
+                            width: area.width,
+                            height: child_size,
+                        },
+                    };
+
+                    let past_child = match orientation {
+                        Orientation::Horizontal => point.0 >= child_area.x + child_area.width,
+                        Orientation::Vertical => point.1 >= child_area.y + child_area.height,
+                    };
+                    if !past_child {
+                        return self.resize_handle_node(
+                            child,
+                            child_area,
+                            inner_gap,
+                            accordion_padding,
+                            point,
+                        );
+                    }
+
+                    // Both ends inclusive — with a zero inner gap the border is a single point
+                    // (child edges touch exactly), and the caller queries exactly a window's own
+                    // last-known edge coordinate, so the band must include both of its endpoints
+                    // to reliably hit even a zero-width gap.
+                    let in_gap = i + 1 < n
+                        && match orientation {
+                            Orientation::Horizontal => {
+                                point.0 <= child_area.x + child_area.width + inner_gap
+                                    && point.1 >= area.y
+                                    && point.1 < area.y + area.height
+                            }
+                            Orientation::Vertical => {
+                                point.1 <= child_area.y + child_area.height + inner_gap
+                                    && point.0 >= area.x
+                                    && point.0 < area.x + area.width
+                            }
+                        };
+                    if in_gap {
+                        let (next_child, _) = sizeable[i + 1];
+                        return Some(ResizeHandle {
+                            before: child,
+                            after: next_child,
+                            orientation: *orientation,
+                            weight_per_pixel,
+                        });
+                    }
+
+                    offset += child_size + inner_gap;
+                }
+                None
+            }
+            Node::Container {
+                layout: Layout::Accordion,
+                orientation,
+                children,
+                mru,
+                ..
+            } => {
+                let sizeable: Vec<NodeId> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| !matches!(self.nodes.get(c), Some(Node::Floating { .. })))
+                    .collect();
+                let n = sizeable.len();
+                let idx = (*mru).min(n.checked_sub(1)?);
+                let mut child_area = area;
+                let pad_before = idx > 0;
+                let pad_after = idx + 1 < n;
+                match orientation {
+                    Orientation::Horizontal => {
+                        if pad_before {
+                            child_area.x += accordion_padding;
+                            child_area.width -= accordion_padding;
+                        }
+                        if pad_after {
+                            child_area.width -= accordion_padding;
+                        }
+                    }
+                    Orientation::Vertical => {
+                        if pad_before {
+                            child_area.y += accordion_padding;
+                            child_area.height -= accordion_padding;
+                        }
+                        if pad_after {
+                            child_area.height -= accordion_padding;
+                        }
+                    }
+                }
+                child_area.width = child_area.width.max(0.0);
+                child_area.height = child_area.height.max(0.0);
+                self.resize_handle_node(
+                    sizeable[idx],
+                    child_area,
+                    inner_gap,
+                    accordion_padding,
+                    point,
+                )
+            }
         }
     }
 
@@ -1651,6 +1893,116 @@ mod tests {
         let mut tree = Tree::new();
         let only = insert(&mut tree, 1, None);
         assert!(!tree.resize_weight(only, 0.1));
+    }
+
+    #[test]
+    fn resize_handle_at_finds_the_boundary_between_two_siblings() {
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        let b = insert(&mut tree, 2, Some(a));
+
+        // Equal-weight horizontal split of a 1000-wide area: boundary sits at x=500.
+        let handle = tree
+            .resize_handle_at(area(), Gaps::default(), (500.0, 400.0))
+            .expect("point sits on the boundary");
+        assert_eq!(handle.before, a);
+        assert_eq!(handle.after, b);
+        assert_eq!(handle.orientation, Orientation::Horizontal);
+        assert!(handle.weight_per_pixel > 0.0);
+    }
+
+    #[test]
+    fn resize_handle_at_away_from_any_boundary_is_none() {
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(a));
+
+        assert!(
+            tree.resize_handle_at(area(), Gaps::default(), (100.0, 400.0))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resize_handle_at_on_a_lone_root_window_is_always_none() {
+        let mut tree = Tree::new();
+        insert(&mut tree, 1, None);
+
+        assert!(
+            tree.resize_handle_at(area(), Gaps::default(), (500.0, 400.0))
+                .is_none()
+        );
+        assert!(
+            tree.resize_handle_at(area(), Gaps::default(), (0.0, 0.0))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resize_handle_at_resolves_the_correct_nested_level() {
+        // root(h) = [1, joined-container(v) = [2, 3]] — window 1's right
+        // edge is the *root's* boundary, while 2/3's shared edge is the
+        // nested container's own (vertical) boundary.
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let w2 = insert(&mut tree, 2, Some(w1));
+        let w3 = insert(&mut tree, 3, Some(w2));
+        assert!(tree.join_with(w2, Direction::Right));
+
+        let layout = tree.layout(area(), Gaps::default());
+        let w1_rect = layout.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let w2_rect = layout.iter().find(|(w, _)| *w == 2).unwrap().1;
+
+        let root_boundary = tree
+            .resize_handle_at(area(), Gaps::default(), (w1_rect.x + w1_rect.width, 200.0))
+            .expect("root-level horizontal boundary");
+        assert_eq!(root_boundary.orientation, Orientation::Horizontal);
+        assert_eq!(root_boundary.before, w1);
+
+        let nested_boundary = tree
+            .resize_handle_at(
+                area(),
+                Gaps::default(),
+                (w2_rect.x + w2_rect.width / 2.0, w2_rect.y + w2_rect.height),
+            )
+            .expect("nested vertical boundary between 2 and 3");
+        assert_eq!(nested_boundary.orientation, Orientation::Vertical);
+        assert_eq!(nested_boundary.before, w2);
+        assert_eq!(nested_boundary.after, w3);
+    }
+
+    #[test]
+    fn resize_delta_bounds_matches_what_apply_resize_actually_clamps_to() {
+        let mut probe = Tree::new();
+        let probe_a = insert(&mut probe, 1, None);
+        insert(&mut probe, 2, Some(probe_a));
+        let (max_shrink, max_grow) = probe.resize_delta_bounds(probe_a).expect("has a sibling");
+        assert!(max_shrink > 0.0);
+        assert!(max_grow > 0.0);
+
+        // Applying exactly the reported max_grow should reach (not exceed) the clamp — a bigger
+        // delta must produce the same result as this exact one.
+        let mut exact = Tree::new();
+        let exact_a = insert(&mut exact, 1, None);
+        insert(&mut exact, 2, Some(exact_a));
+        assert!(exact.resize_weight(exact_a, max_grow));
+
+        let mut over = Tree::new();
+        let over_a = insert(&mut over, 1, None);
+        insert(&mut over, 2, Some(over_a));
+        assert!(over.resize_weight(over_a, max_grow + 10.0));
+
+        assert_eq!(
+            width_of(&exact.layout(area(), Gaps::default()), 1),
+            width_of(&over.layout(area(), Gaps::default()), 1)
+        );
+    }
+
+    #[test]
+    fn resize_delta_bounds_is_none_with_no_tiles_ancestor() {
+        let mut tree = Tree::new();
+        let only = insert(&mut tree, 1, None);
+        assert!(tree.resize_delta_bounds(only).is_none());
     }
 
     #[test]

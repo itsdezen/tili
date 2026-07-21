@@ -34,6 +34,27 @@ direction `navigate`, `move`'s window-identity `swap_windows`, proportional
   its app's real minimum will overflow its assigned rect; this is a known
   OS/app-level limitation, not something the layout engine tracks or
   corrects.
+- `resize_delta_bounds(from)` exposes the same `MIN_WEIGHT` clamp
+  `apply_resize` enforces internally, but read-only — `apply_resize` is
+  now a thin wrapper around it, so the two can't drift apart. Lets a caller
+  pick a `delta` that's already guaranteed valid instead of getting a
+  silently-truncated one back; `tili-daemon`'s mouse-drag resize uses this
+  to pick a step-quantized delta that's still within bounds, rather than
+  quantizing first and clamping into an off-grid value after the fact.
+- `resize_handle_at(area, gaps, point)` is the mouse-resize counterpart to
+  `layout`: given the same `area`/`gaps` a real `layout` call would use, it
+  finds which `Tiles` container's inter-child border (if any) a screen
+  point sits on, returning the two adjacent children plus
+  `weight_per_pixel` for that border. Implemented as a parallel recursive
+  traversal mirroring `layout_node`'s own `Tiles`/`Accordion` geometry
+  (not a refactor of `layout_node` itself, to keep that well-tested path
+  untouched) — a lone window, or any point that isn't on an internal
+  border, structurally has no handle, giving mouse-based resize the same
+  "can't resize when alone" guarantee `resize_weight` already has, without
+  a separate check. `Accordion` containers are recursed into (via their
+  `mru` child, with the same peek-padding math `layout_node` uses) but
+  never yield a handle themselves — no borders in/around them, same as
+  `resize_weight` skipping `Accordion` ancestors.
 - `Node::Floating { window }` (a third leaf kind alongside `Container`/
   `Window`) is a floating window's focus/topology placeholder: a normal
   child for `insert_floating`/`remove_window`/`window_at`/`find_node`/

@@ -60,6 +60,14 @@ settings {
     // its second window: "auto" (derive from the monitor's aspect ratio),
     // "horizontal", or "vertical".
     default-root-orientation "auto"
+
+    // Weight-space grid a mouse-drag tile resize (dragging a tiled
+    // window's real edge/corner) snaps its result to, so the released
+    // size always matches what some whole number of `resize
+    // <mouse-resize-step>` keypresses would produce — same unit as the
+    // `resize` command below. Matches this file's own keyboard step by
+    // default.
+    mouse-resize-step 0.1
 }
 
 // Global hotkeys — no external tool (skhd etc.) needed, tili captures these

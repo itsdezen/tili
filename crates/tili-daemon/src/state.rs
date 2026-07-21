@@ -90,6 +90,139 @@ fn frames_match(a: Rect, b: Rect) -> bool {
         && (a.height - b.height).abs() < FLOAT_DRIFT_EPSILON
 }
 
+/// One edge of a tiled window, for `magnet_resize_edge` to check independently — a corner drag
+/// moves two of these (one horizontal, one vertical) at once.
+#[derive(Debug, Clone, Copy)]
+enum ResizeEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// If `edge` moved between `old_rect` and `new_rect`, magnet-snaps a tree weight change onto
+/// `tree` for whichever border that edge sits on: converts the pixel delta to weight-space via
+/// `Tree::resize_handle_at`'s `weight_per_pixel`, then either rounds it to the nearest whole
+/// multiple of `step` (the normal case — the released size always matches some whole number of
+/// `resize <step>` keypresses), or, if the drag asked for more than `Tree::resize_delta_bounds`
+/// allows at all, overflows straight to that boundary instead — same as spamming the keyboard
+/// shortcut past its limit, which `apply_resize`'s own clamp always keeps honoring rather than
+/// refusing once no whole step fits. A no-op if the edge didn't move, sits on the workspace's
+/// outer boundary (no `ResizeHandle` there — including the "alone"/tiled-fullscreen case, which
+/// never reaches here at all since `capture_resize_snapshot` already refuses to snapshot those),
+/// or the moved distance is both under one whole step *and* within bounds (dropped rather than
+/// landing off-grid).
+fn magnet_resize_edge(
+    tree: &mut Tree,
+    area: Rect,
+    gaps: Gaps,
+    step: f32,
+    old_rect: Rect,
+    new_rect: Rect,
+    edge: ResizeEdge,
+) {
+    // `branch_is_before`: is *this* window the near (`before`) side of the border its moved
+    // edge sits on, or the far (`after`) side? A window's left/top edge is the far side of the
+    // border it touches (the sibling before it owns the near side); its right/bottom edge is
+    // the near side.
+    let (old_edge, new_edge, point, branch_is_before) = match edge {
+        ResizeEdge::Left => (
+            old_rect.x,
+            new_rect.x,
+            (old_rect.x, old_rect.y + old_rect.height / 2.0),
+            false,
+        ),
+        ResizeEdge::Right => (
+            old_rect.x + old_rect.width,
+            new_rect.x + new_rect.width,
+            (
+                old_rect.x + old_rect.width,
+                old_rect.y + old_rect.height / 2.0,
+            ),
+            true,
+        ),
+        ResizeEdge::Top => (
+            old_rect.y,
+            new_rect.y,
+            (old_rect.x + old_rect.width / 2.0, old_rect.y),
+            false,
+        ),
+        ResizeEdge::Bottom => (
+            old_rect.y + old_rect.height,
+            new_rect.y + new_rect.height,
+            (
+                old_rect.x + old_rect.width / 2.0,
+                old_rect.y + old_rect.height,
+            ),
+            true,
+        ),
+    };
+
+    // Left/top: the edge moving *outward* (toward smaller x/y) means this window grew, so the
+    // sign flips relative to right/bottom, where growth is the edge moving toward larger x/y.
+    let raw_delta_px = match edge {
+        ResizeEdge::Left | ResizeEdge::Top => old_edge - new_edge,
+        ResizeEdge::Right | ResizeEdge::Bottom => new_edge - old_edge,
+    };
+    if raw_delta_px.abs() < FLOAT_DRIFT_EPSILON {
+        return;
+    }
+
+    let Some(handle) = tree.resize_handle_at(area, gaps, point) else {
+        return;
+    };
+    let branch = if branch_is_before {
+        handle.before
+    } else {
+        handle.after
+    };
+
+    let Some((max_shrink, max_grow)) = tree.resize_delta_bounds(branch) else {
+        return;
+    };
+    let raw_weight_delta = raw_delta_px * handle.weight_per_pixel;
+    let bound = f64::from(if raw_weight_delta >= 0.0 {
+        max_grow
+    } else {
+        max_shrink
+    });
+
+    let step = f64::from(step.max(f32::EPSILON));
+
+    if raw_weight_delta.abs() >= bound {
+        // The drag wants more than what's actually valid — overflow straight to the
+        // boundary, exactly like `apply_resize`'s own clamp does for the keyboard shortcut:
+        // it never refuses just because no *whole* step fits, it keeps applying whatever's
+        // left until there's truly nothing left (`bound <= 0.0`).
+        if bound <= 0.0 {
+            return;
+        }
+        tree.resize_weight(branch, (bound * raw_weight_delta.signum()) as f32);
+        return;
+    }
+
+    // Otherwise, magnet-snap to the nearest whole step — dropped entirely if it rounds to
+    // fewer than one whole step, so a sub-step drag never lands off-grid. `.min(bound)` is a
+    // safety net for the rare case where rounding up to the next step would itself overflow
+    // (a `bound` that isn't a whole multiple of `step`) — falls back to the same overflow
+    // clamp above rather than exceeding what's valid.
+    let steps = (raw_weight_delta.abs() / step).round();
+    if steps < 1.0 {
+        return;
+    }
+    let snapped_magnitude = (steps * step).min(bound);
+    tree.resize_weight(branch, (snapped_magnitude * raw_weight_delta.signum()) as f32);
+}
+
+/// The before-drag tiled layout of `monitor_id`'s active workspace, captured by
+/// `on_mouse_button_down` so `on_mouse_button_up` can diff it against each window's live frame
+/// and recover which one the user actually dragged (and by how much) — see
+/// `WmState::capture_resize_snapshot`/`apply_mouse_resize`.
+struct ResizeDragSnapshot {
+    monitor_id: u32,
+    frames: HashMap<WindowId, Rect>,
+}
+
 /// Which workspace a window belongs to, and its current placement state.
 /// Indexed by `WindowId` in `WmState::placements` so "which workspace owns
 /// this window" is an O(1) lookup instead of scanning every workspace's
@@ -482,6 +615,10 @@ pub struct WmState {
     /// M10: moving the cursor onto a different monitor changes
     /// `focused_monitor`, same as an explicit `FocusMonitor` command.
     focus_follows_monitor: bool,
+    /// Weight-space grid `apply_mouse_resize` snaps a mouse-drag tile
+    /// resize to, so the released size always matches some whole number of
+    /// `resize <mouse_resize_step>` keypresses — see `Settings::mouse_resize_step`.
+    mouse_resize_step: f32,
     /// Whether `apply_config` has run before. Only the *first* call
     /// resolves and applies a real default workspace (see
     /// `apply_config`'s doc comment) — every call after that is a hot
@@ -494,6 +631,12 @@ pub struct WmState {
     /// drag and flashes the screen. `on_mouse_button_up` relays out once
     /// to snap back to the tiled layout when the drag ends.
     mouse_button_down: bool,
+    /// Captured by `on_mouse_button_down` (before-drag tiled layout for the
+    /// focused monitor, `None` if there's nothing valid to resize against
+    /// — see `capture_resize_snapshot`), consumed by `on_mouse_button_up`
+    /// via `apply_mouse_resize` to derive a tree weight change from
+    /// whichever tiled window's native edge/corner the user just dragged.
+    resize_drag: Option<ResizeDragSnapshot>,
     /// Orientation a workspace root gets when created for its second
     /// window — `None` means "auto" (derive from the target monitor's
     /// aspect ratio in `root_orientation_hint`).
@@ -585,8 +728,10 @@ impl Default for WmState {
             floating_defaults: tili_config::FloatingDefaults::default(),
             mouse_follows_focus: false,
             focus_follows_monitor: false,
+            mouse_resize_step: 0.1,
             config_loaded_once: false,
             mouse_button_down: false,
+            resize_drag: None,
             default_root_orientation: None,
             fullscreen_focus: HashMap::new(),
             previous_workspace: None,
@@ -1364,6 +1509,7 @@ impl WmState {
 
         self.mouse_follows_focus = config.settings.mouse_follows_focus;
         self.focus_follows_monitor = config.settings.focus_follows_monitor;
+        self.mouse_resize_step = config.settings.mouse_resize_step;
         self.default_root_orientation = match config.settings.default_root_orientation.as_str() {
             "horizontal" => Some(tili_tree::Orientation::Horizontal),
             "vertical" => Some(tili_tree::Orientation::Vertical),
@@ -2737,17 +2883,83 @@ impl WmState {
     }
 
     /// Marks the left mouse button as held — see `mouse_button_down`'s doc
-    /// comment for why this suppresses relayout.
+    /// comment for why this suppresses relayout. Also captures
+    /// `resize_drag`: the focused monitor's before-drag tiled layout, so
+    /// `on_mouse_button_up` can tell whether this turns out to be a
+    /// tiled-window edge/corner drag once it's over.
     pub fn on_mouse_button_down(&mut self) {
         self.mouse_button_down = true;
+        self.resize_drag = self.capture_resize_snapshot();
     }
 
-    /// Marks the left mouse button as released and relays out once, so a
-    /// window that was just drag-resized snaps back to the tree's actual
-    /// tiled frame instead of staying wherever the drag left it.
+    /// Marks the left mouse button as released. If `resize_drag` shows a
+    /// tiled window's real frame actually changed while the button was
+    /// down, `apply_mouse_resize` derives a step-snapped tree weight change
+    /// from it *before* the relayout below — so that relayout snaps every
+    /// window (the dragged one and its siblings) straight to the new,
+    /// magnetized layout in one go, instead of first snapping back to the
+    /// pre-drag layout the way it would with no `resize_drag` captured.
     pub fn on_mouse_button_up(&mut self) {
         self.mouse_button_down = false;
+        if let Some(drag) = self.resize_drag.take() {
+            self.apply_mouse_resize(drag);
+        }
         self.relayout_active();
+    }
+
+    /// The focused monitor's active-workspace tiled layout right now, to
+    /// diff against once the drag that's about to start is over — or
+    /// `None` if there's nothing valid to resize against: no active
+    /// workspace, a `fullscreen_focus` tiled-fullscreen window showing
+    /// (only one window is actually on screen, mirroring
+    /// `relayout_monitor`'s own special case), or fewer than 2 tiled
+    /// windows (nothing to trade weight with, the same "alone" guarantee
+    /// `resize_weight`/`resize_handle_at` already enforce structurally).
+    fn capture_resize_snapshot(&self) -> Option<ResizeDragSnapshot> {
+        let monitor_id = self.focused_monitor;
+        let (name, area, gaps) = self.tiled_layout_inputs(monitor_id)?;
+        if self.fullscreen_focus.contains_key(&name) {
+            return None;
+        }
+        let tree = self.workspaces.get(&name)?;
+        if tree.tiled_window_ids().len() < 2 {
+            return None;
+        }
+        let frames = tree.layout(area, gaps).into_iter().collect();
+        Some(ResizeDragSnapshot { monitor_id, frames })
+    }
+
+    /// Finds whichever window in `drag.frames` no longer matches its
+    /// snapshotted rect — the one the user actually dragged — and, for
+    /// each edge that moved, magnet-snaps a tree weight change to the
+    /// nearest valid `mouse_resize_step` grid point via
+    /// `magnet_resize_edge`. Only one window should ever differ; the loop
+    /// stops as soon as it finds and processes that one.
+    fn apply_mouse_resize(&mut self, drag: ResizeDragSnapshot) {
+        let Some((name, area, gaps)) = self.tiled_layout_inputs(drag.monitor_id) else {
+            return;
+        };
+        let step = self.mouse_resize_step;
+        for (&id, &old_rect) in &drag.frames {
+            let Some(new_rect) = self.windows.get(&id).map(AxWindow::frame) else {
+                continue;
+            };
+            if frames_match(old_rect, new_rect) {
+                continue;
+            }
+            let Some(tree) = self.workspaces.get_mut(&name) else {
+                return;
+            };
+            for edge in [
+                ResizeEdge::Left,
+                ResizeEdge::Right,
+                ResizeEdge::Top,
+                ResizeEdge::Bottom,
+            ] {
+                magnet_resize_edge(tree, area, gaps, step, old_rect, new_rect, edge);
+            }
+            break;
+        }
     }
 
     /// Moves a window to hug a real monitor's own corner (see
@@ -2785,6 +2997,18 @@ impl WmState {
             .map(|m| m.frame)
     }
 
+    /// Resolves the three inputs `Tree::layout` needs for `monitor_id`'s
+    /// active workspace — its name, monitor area, and effective gaps —
+    /// shared by `relayout_monitor` and `capture_resize_snapshot`/
+    /// `apply_mouse_resize`, which all need the exact same resolution.
+    /// `None` if the monitor isn't connected or has no active workspace.
+    fn tiled_layout_inputs(&self, monitor_id: u32) -> Option<(String, Rect, Gaps)> {
+        let name = self.active_workspace.get(&monitor_id)?.clone();
+        let area = self.monitor_frame(monitor_id)?;
+        let gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
+        Some((name, area, gaps))
+    }
+
     /// Recomputes every tiled window's frame on `focused_monitor` and
     /// applies it via the `WindowFrameSetter` seam — never a direct AX call
     /// from here. See `relayout_monitor` for the actual per-monitor logic;
@@ -2820,10 +3044,7 @@ impl WmState {
     /// tree) so toggling fullscreen back off restores the normal layout on
     /// the very next relayout.
     fn relayout_monitor(&mut self, monitor_id: u32) {
-        let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
-            return;
-        };
-        let Some(area) = self.monitor_frame(monitor_id) else {
+        let Some((name, area, gaps)) = self.tiled_layout_inputs(monitor_id) else {
             return;
         };
         let Some(tree) = self.workspaces.get(&name) else {
@@ -2841,7 +3062,6 @@ impl WmState {
             return;
         }
 
-        let gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
         let placements = tree.layout(area, gaps);
         for (id, rect) in placements {
             if let Some(window) = self.windows.get_mut(&id) {
@@ -3579,6 +3799,247 @@ mod tests {
         };
         assert!(frames_match(a, close));
         assert!(!frames_match(a, far));
+    }
+
+    #[test]
+    fn capture_resize_snapshot_is_none_with_fewer_than_two_tiled_windows() {
+        let mut state = floating_test_state();
+        assert!(state.capture_resize_snapshot().is_none());
+
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        tree.insert_window(1, None, root_orientation);
+        assert!(
+            state.capture_resize_snapshot().is_none(),
+            "a lone tiled window has no sibling to resize against"
+        );
+    }
+
+    #[test]
+    fn capture_resize_snapshot_returns_the_current_tiled_layout() {
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let a = tree.insert_window(1, None, root_orientation);
+        tree.insert_window(2, Some(a), root_orientation);
+
+        let drag = state
+            .capture_resize_snapshot()
+            .expect("two tiled windows share a resizable border");
+        assert_eq!(drag.monitor_id, 1);
+        assert_eq!(drag.frames.len(), 2);
+
+        let expected = state
+            .workspaces
+            .get(DEFAULT_WORKSPACE)
+            .unwrap()
+            .layout(state.monitor_frame(1).unwrap(), state.gaps);
+        for (id, rect) in expected {
+            assert!(frames_match(drag.frames[&id], rect));
+        }
+    }
+
+    #[test]
+    fn capture_resize_snapshot_is_none_during_tiled_fullscreen() {
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let a = tree.insert_window(1, None, root_orientation);
+        tree.insert_window(2, Some(a), root_orientation);
+        state
+            .fullscreen_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), a);
+
+        assert!(
+            state.capture_resize_snapshot().is_none(),
+            "only one window is actually on screen during tiled fullscreen"
+        );
+    }
+
+    fn two_window_tree() -> (Tree, NodeId, Rect, Gaps) {
+        let mut tree = Tree::new();
+        let a = tree.insert_window(1, None, tili_tree::Orientation::Horizontal);
+        tree.insert_window(2, Some(a), tili_tree::Orientation::Horizontal);
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        };
+        (tree, a, area, Gaps::default())
+    }
+
+    #[test]
+    fn magnet_resize_edge_snaps_growth_to_the_nearest_step_multiple() {
+        let (mut tree, _a, area, gaps) = two_window_tree();
+
+        let before = tree.layout(area, gaps);
+        let old_rect = before.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let mut new_rect = old_rect;
+        new_rect.width += 80.0; // dragged the right edge 80px further right
+
+        magnet_resize_edge(
+            &mut tree,
+            area,
+            gaps,
+            0.1,
+            old_rect,
+            new_rect,
+            ResizeEdge::Right,
+        );
+
+        // 80px maps to a 0.16 weight delta at this container's weight-per-pixel
+        // (2 total weight / 1000 divisible px) — rounds to 2 whole 0.1 steps
+        // (0.2), landing window 1 at 600px, not the raw 580px the pixel delta
+        // alone would have produced.
+        let after = tree.layout(area, gaps);
+        let width1 = after.iter().find(|(w, _)| *w == 1).unwrap().1.width;
+        assert!((width1 - 600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn magnet_resize_edge_below_half_a_step_is_a_no_op() {
+        let (mut tree, _a, area, gaps) = two_window_tree();
+
+        let before = tree.layout(area, gaps);
+        let old_rect = before.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let mut new_rect = old_rect;
+        new_rect.width += 20.0; // 0.04 weight delta — rounds to 0 steps at a 0.1 grid
+
+        magnet_resize_edge(
+            &mut tree,
+            area,
+            gaps,
+            0.1,
+            old_rect,
+            new_rect,
+            ResizeEdge::Right,
+        );
+
+        let after = tree.layout(area, gaps);
+        let width1 = after.iter().find(|(w, _)| *w == 1).unwrap().1.width;
+        assert!(
+            (width1 - old_rect.width).abs() < 0.01,
+            "a sub-step drag snaps fully back, never lands off-grid"
+        );
+    }
+
+    #[test]
+    fn magnet_resize_edge_on_a_lone_window_is_a_no_op() {
+        let mut tree = Tree::new();
+        tree.insert_window(1, None, tili_tree::Orientation::Horizontal);
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        };
+        let gaps = Gaps::default();
+
+        let before = tree.layout(area, gaps);
+        let old_rect = before.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let mut new_rect = old_rect;
+        new_rect.width -= 200.0; // dragged the (only) window's edge natively
+
+        magnet_resize_edge(
+            &mut tree,
+            area,
+            gaps,
+            0.1,
+            old_rect,
+            new_rect,
+            ResizeEdge::Right,
+        );
+
+        let after = tree.layout(area, gaps);
+        assert_eq!(
+            after, before,
+            "no sibling to resize against — tree stays untouched"
+        );
+    }
+
+    #[test]
+    fn magnet_resize_edge_overflows_straight_to_the_bound_for_a_huge_drag() {
+        let (mut tree, a, area, gaps) = two_window_tree();
+
+        // Skew heavily up front so there's only a small amount of valid room
+        // left to grow window 1 any further — the same clamp
+        // `resize_weight` itself already enforces.
+        assert!(tree.resize_weight(a, 0.7));
+        let (_, max_grow) = tree.resize_delta_bounds(a).unwrap();
+        assert!(max_grow > 0.0 && max_grow < 0.3);
+
+        let before = tree.layout(area, gaps);
+        let old_rect = *before
+            .iter()
+            .find(|(w, _)| *w == 1)
+            .map(|(_, r)| r)
+            .unwrap();
+        let mut new_rect = old_rect;
+        new_rect.width += 5000.0; // a drag far beyond anything valid
+
+        magnet_resize_edge(
+            &mut tree,
+            area,
+            gaps,
+            0.1,
+            old_rect,
+            new_rect,
+            ResizeEdge::Right,
+        );
+
+        let after = tree.layout(area, gaps);
+        let new_width = after.iter().find(|(w, _)| *w == 1).unwrap().1.width;
+        let weight_per_pixel = 2.0 / 1000.0; // total weight / divisible px — unchanged by this resize
+        let applied_weight_delta = (new_width - old_rect.width) * weight_per_pixel;
+
+        // Same as spamming the keyboard shortcut past its limit: it lands exactly on the
+        // boundary `resize_delta_bounds` reported, not rounded down to some smaller whole
+        // step (and not refused just because that boundary isn't a step multiple itself).
+        assert!(
+            (applied_weight_delta - f64::from(max_grow)).abs() < 0.01,
+            "a drag past the limit overflows straight to the exact valid bound"
+        );
+    }
+
+    #[test]
+    fn magnet_resize_edge_overflow_still_applies_when_less_than_one_step_of_room_remains() {
+        let (mut tree, a, area, gaps) = two_window_tree();
+
+        // Skew almost all the way to the limit, so under one whole 0.1 step of room is left.
+        assert!(tree.resize_weight(a, 0.93));
+        let (_, max_grow) = tree.resize_delta_bounds(a).unwrap();
+        assert!(
+            max_grow > 0.0 && max_grow < 0.1,
+            "less than one 0.1 step of room left"
+        );
+
+        let before = tree.layout(area, gaps);
+        let old_rect = *before
+            .iter()
+            .find(|(w, _)| *w == 1)
+            .map(|(_, r)| r)
+            .unwrap();
+        let mut new_rect = old_rect;
+        new_rect.width += 5000.0; // a drag far beyond anything valid
+
+        magnet_resize_edge(
+            &mut tree,
+            area,
+            gaps,
+            0.1,
+            old_rect,
+            new_rect,
+            ResizeEdge::Right,
+        );
+
+        let after = tree.layout(area, gaps);
+        let new_width = after.iter().find(|(w, _)| *w == 1).unwrap().1.width;
+        assert!(
+            new_width > old_rect.width,
+            "still applies the small remaining amount rather than refusing outright \
+             because no whole step fits — matches spamming the keyboard shortcut"
+        );
     }
 
     #[test]

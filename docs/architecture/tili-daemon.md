@@ -177,6 +177,40 @@ notification the write itself caused risks a self-sustaining relayout
 loop (see `apply_windows_changed`'s unconditional `relayout_active()`
 call below, which is what would drive it).
 
+Mouse-based tile resize (dragging a tiled window's real native edge/corner,
+not the keyboard shortcut) piggybacks on the same `mouse_button_down`-suppression
+machinery `apply_windows_changed` already uses for floating-window native
+drags — no new `CGEventTap` needed. `on_mouse_button_down` additionally
+captures `resize_drag: Option<ResizeDragSnapshot>` (via
+`capture_resize_snapshot`): the focused monitor's before-drag
+`Tree::layout` output, or `None` if there's nothing valid to resize
+against (no active workspace, a `fullscreen_focus` tiled-fullscreen window
+showing, or fewer than 2 tiled windows — the same "alone" guarantee
+`Tree::resize_handle_at` already enforces structurally). Because
+`apply_windows_changed` keeps refreshing each window's cached `AxWindow`
+frame throughout the drag even while relayout itself is suppressed, by the
+time `on_mouse_button_up` fires, whichever window the user actually
+dragged already has its real post-drag frame sitting in `self.windows` —
+no separate observation plumbing needed, just a diff against the snapshot.
+`on_mouse_button_up` runs that diff through `apply_mouse_resize`, which
+finds the one window that moved and, for each edge that changed,
+magnet-snaps a tree weight change via `magnet_resize_edge`: convert the
+pixel delta to weight-space via `Tree::resize_handle_at`'s
+`weight_per_pixel`, then either round it to the nearest whole multiple of
+`Settings::mouse_resize_step` (the normal case, checked against
+`Tree::resize_delta_bounds` so rounding can never itself overflow), or, if
+the drag asked for more than `resize_delta_bounds` allows at all, overflow
+straight to that boundary instead of refusing or rounding down to a
+smaller whole step — exactly like spamming the keyboard shortcut past its
+limit, which `apply_resize`'s own clamp always keeps honoring. A released
+size therefore always matches either some whole number of
+`resize <mouse_resize_step>` keypresses, or the tree's true max/min for
+that border; a sub-half-step drag that's still within bounds is dropped
+entirely rather than landing off-grid. This all runs *before* the existing
+unconditional `relayout_active()` call, so siblings only ever move once —
+straight to their final frames — on mouse-up, never live during the drag
+itself.
+
 `park()` targets `tili_ax::parking_position` — a window's origin lands just
 a point inside the main monitor's own bottom-right corner (not pushed
 *outside* every monitor's bounds, `combined_bounds`'s original purpose):

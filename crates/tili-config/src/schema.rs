@@ -130,6 +130,13 @@ pub struct Settings {
     /// `"auto"`; converting the string to `tili_tree::Orientation` is
     /// `tili-daemon`'s job, since this crate can't depend on `tili-tree`.
     pub default_root_orientation: String,
+    /// Weight-space grid a mouse-drag tile resize snaps its result to, so a
+    /// released size always matches what some whole number of `resize
+    /// <mouse_resize_step>` keypresses would produce rather than an
+    /// arbitrary pixel-derived value — same unit as `Command::ResizeRatio`'s
+    /// `amount`. Defaults to `0.1`, the step size `example/tili.kdl`'s own
+    /// keyboard bindings already use.
+    pub mouse_resize_step: f32,
 }
 
 impl Default for Settings {
@@ -140,6 +147,7 @@ impl Default for Settings {
             auto_reload: true,
             default_workspace: None,
             default_root_orientation: "auto".to_string(),
+            mouse_resize_step: 0.1,
         }
     }
 }
@@ -312,6 +320,9 @@ fn parse_settings(doc: &KdlDocument) -> Settings {
         .and_then(|v| v.as_string())
     {
         settings.default_root_orientation = v.to_string();
+    }
+    if let Some(v) = as_f32(children.get_arg("mouse-resize-step")) {
+        settings.mouse_resize_step = v;
     }
     settings
 }
@@ -575,6 +586,23 @@ mod tests {
     fn root_orientation_defaults_when_unset() {
         let config = parse("").unwrap();
         assert_eq!(config.settings.default_root_orientation, "auto");
+    }
+
+    #[test]
+    fn parses_mouse_resize_step() {
+        let source = r#"
+            settings {
+                mouse-resize-step 0.25
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert!((config.settings.mouse_resize_step - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn mouse_resize_step_defaults_to_a_tenth() {
+        let config = parse("").unwrap();
+        assert!((config.settings.mouse_resize_step - 0.1).abs() < f32::EPSILON);
     }
 
     #[test]
