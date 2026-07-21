@@ -66,24 +66,29 @@ worth the risk for what M9 needs).
 `spawn_display_watcher()` registers a
 `CGDisplayRegisterReconfigurationCallback` on its own dedicated `CFRunLoop`
 thread and just signals "something changed, re-enumerate" per callback — it
-doesn't interpret `CGDisplayChangeSummaryFlags`. It also bounds its
-`CFRunLoopRun` into `RESOLUTION_POLL_INTERVAL` (1s) chunks and re-diffs
-`list_monitors()` after every wake — confirmed on real hardware (temporary
-debug logging, since removed) that `CGDisplayRegisterReconfigurationCallback`
-reliably fires for hot-plug/unplug and sleep/wake but never fires at all for
-a resolution-only change (same monitor id, no add/remove) in this process —
-at the time, attributed to `tili-daemon` having no `NSApplication`/
-UI-session-activation context, the same explanation given for
+doesn't interpret `CGDisplayChangeSummaryFlags`. It bounds its
+`CFRunLoopRun` into `RUN_LOOP_PUMP_INTERVAL` (1s) chunks purely to avoid a
+run-loop spin-forever bug (a mode with no input source/timer registered
+returns immediately instead of blocking — confirmed on real hardware via
+CPU sampling, see [invariants.md](invariants.md)), not to poll anything.
+
+This function used to *also* run a genuine resolution-change poll on that
+same cadence: `CGDisplayRegisterReconfigurationCallback` had been confirmed
+on real hardware to reliably fire for hot-plug/unplug and sleep/wake but
+never for a resolution-only change (same monitor id, no add/remove), at the
+time attributed to `tili-daemon` having no `NSApplication`/UI-session-
+activation context — the same explanation given for
 `NSWorkspaceDidActivateApplicationNotification` (and, later,
 `DidLaunchApplication`/`DidWakeNotification`) never firing (see
-`workspace.rs`'s section below). `main.rs` has since given `tili-daemon` a
-real `NSApplication` context to fix those; whether that also fixes
-resolution-only reconfiguration delivery hasn't been separately
-re-verified, so this remains one of the four sanctioned polling exceptions
-(see [invariants.md](invariants.md)) pending that check, not removed
-opportunistically alongside an unrelated change. Sends directly on a
-`tokio::sync::mpsc` channel from this thread, same as `hotkey.rs`/`mouse.rs`
-above — no separate bridge thread.
+`workspace.rs`'s section below). Once `main.rs` gave `tili-daemon` a real
+`NSApplication` context, re-testing confirmed the callback now fires
+reliably for resolution-only changes too (two calls per change:
+`kCGDisplayBeginConfigurationFlag`, then `kCGDisplaySetModeFlag`/
+`kCGDisplayDesktopShapeChangedFlag` once it completes) — so the polling
+fallback was removed; `spawn_display_watcher` is no longer one of the
+sanctioned polling exceptions (see [invariants.md](invariants.md)). Sends
+directly on a `tokio::sync::mpsc` channel from this thread, same as
+`hotkey.rs`/`mouse.rs` above — no separate bridge thread.
 
 ## workspace.rs — NSWorkspace bridge
 

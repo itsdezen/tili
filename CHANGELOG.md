@@ -10,6 +10,19 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ### Changed
 
+- **Removed `display.rs`'s resolution-only-change polling fallback.**
+  `CGDisplayRegisterReconfigurationCallback` had been confirmed on real
+  hardware to never fire for a display-resolution-only change (no monitor
+  added/removed), attributed to `tili-daemon` having no `NSApplication` —
+  the same underlying cause as the `NSWorkspace` notification gaps fixed
+  below. Re-tested on real hardware after that fix: the callback now fires
+  reliably for resolution-only changes too, so the polling fallback
+  (`RESOLUTION_POLL_INTERVAL`, re-diffing `list_monitors()` every second)
+  is gone. `spawn_display_watcher`'s dedicated thread still bounds its
+  `CFRunLoopRun` into 1s chunks — that was always to avoid a separate
+  run-loop spin-forever bug, not to poll anything, so it stays. This drops
+  `display.rs` from the project's sanctioned "no polling" exceptions
+  entirely (three remain, down from four — see `invariants.md`).
 - **Removed 3 permanently-alive relay threads that existed purely to
   forward events into a `tokio::sync::mpsc` channel.** `tili-daemon`'s
   `spawn_hotkey_bridge`/`spawn_display_watcher_bridge`/

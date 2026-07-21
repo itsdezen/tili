@@ -10,11 +10,11 @@ No private Accessibility/window APIs beyond the one documented
 `_AXUIElementGetWindow` call in `tili-ax/src/window.rs`. Staying
 public-API-only is what lets tili run without disabling SIP.
 
-## No polling — and the four sanctioned exceptions
+## No polling — and the three sanctioned exceptions
 
 The daemon reacts to AXObserver/NSWorkspace/display notifications
 (`tili-ax`'s `watch.rs`/`workspace.rs`), it doesn't loop and check state.
-Four sanctioned, narrowly-scoped exceptions:
+Three sanctioned, narrowly-scoped exceptions:
 
 1. **`tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap`** retries installing the
    `CGEventTap` every few seconds for the process's whole lifetime, since
@@ -34,20 +34,9 @@ Four sanctioned, narrowly-scoped exceptions:
    `workspace.rs` section) was confirmed on real hardware, across several
    repeated sleep/wake cycles, to make that notification reliably delivered
    again without it.
-3. **`tili-ax/src/display.rs`'s `spawn_display_watcher`**, which bounds its
-   `CFRunLoopRun` into `RESOLUTION_POLL_INTERVAL` (1s) chunks and re-diffs
-   `list_monitors()` after every wake — confirmed on real hardware
-   (temporary debug logging, since removed) that
-   `CGDisplayRegisterReconfigurationCallback` reliably fires for
-   hot-plug/unplug and sleep/wake but never fires at all for a
-   resolution-only change (same monitor id, no add/remove) in this process —
-   at the time, attributed to no `NSApplication`/UI-session-activation
-   context. Now that `tili-daemon` has a real `NSApplication` (see
-   exception 2 above), whether this also becomes unnecessary hasn't been
-   separately tested — left in place, not removed opportunistically.
-4. **`tili-daemon/src/main.rs`'s `maintenance_tick`**, an unconditional
+3. **`tili-daemon/src/main.rs`'s `maintenance_tick`**, an unconditional
    30ms `tokio::time::interval` branch of the main `select!` loop. Unlike
-   the other three, this isn't a fallback for a notification that sometimes
+   the other two, this isn't a fallback for a notification that sometimes
    doesn't fire — every pid it processes already arrived via a real
    AXObserver/NSWorkspace push into `pending_pids`; the tick is purely a
    debounce/coalescing point (a pid re-signaled before its tick folds into
@@ -65,12 +54,24 @@ Four sanctioned, narrowly-scoped exceptions:
    idle (`pending_pids` empty, nothing due for removal, no launch pending,
    no reveal pending) is a couple of cheap emptiness checks, normally
    zero — CPU sampling on real hardware during the v0.1.7 investigation
-   (see CHANGELOG.md) confirmed this tick wasn't a meaningful CPU cost;
-   `display.rs`'s `spawn_display_watcher` was (that release fixed a bug
-   where its `CFRunLoop::run_in_mode` call returned immediately instead of
-   blocking for `RESOLUTION_POLL_INTERVAL`, sustaining ~40% CPU).
+   (see CHANGELOG.md) confirmed this tick wasn't a meaningful CPU cost.
 
-Don't add a fifth polling loop without a similarly hard constraint forcing
+**Not an exception to this invariant, but worth noting alongside it:**
+`tili-ax/src/display.rs`'s `spawn_display_watcher` bounds its `CFRunLoopRun`
+into `RUN_LOOP_PUMP_INTERVAL` (1s) chunks — not to poll anything, but
+because a run loop pumped in a mode with no input source/timer registered
+returns immediately instead of blocking (the same bug the v0.1.7
+investigation, see CHANGELOG.md, found sustaining ~40% CPU here before it
+was bounded+sleep-corrected). This function used to *also* run a genuine
+resolution-change poll on the same cadence, added when
+`CGDisplayRegisterReconfigurationCallback` was confirmed to never fire for
+a resolution-only change in a `tili-daemon` with no `NSApplication`; removed
+once `main.rs`'s `NSApplication` restructuring (see exception 2's
+`SLEEP_GAP_THRESHOLD` note, and `tili-ax.md`'s `display.rs` section) was
+confirmed on real hardware to make that callback fire reliably for
+resolution-only changes too.
+
+Don't add a fourth polling loop without a similarly hard constraint forcing
 it. The invariant is scoped to `tili-daemon`'s own event loop specifically
 — `tili-cli`'s `wait_for_daemon_ready` (a short-lived foreground wait with
 clear exit conditions, watching a *separate* process finish starting) and

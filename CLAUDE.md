@@ -120,15 +120,19 @@ rationale (and real-hardware evidence) behind each is in
   `_AXUIElementGetWindow` call in `tili-ax/src/window.rs` — this is what
   lets tili run without disabling SIP.
 - **No polling** — the daemon reacts to AXObserver/NSWorkspace/display
-  notifications. Exactly four sanctioned, narrowly-scoped exceptions:
+  notifications. Exactly three sanctioned, narrowly-scoped exceptions:
   `hotkey.rs`'s event-tap install retry (Input Monitoring can be granted
   at any time, with no notification); `watch.rs`'s 250ms watcher-resync
   backstop + capped full resync (both notification sources have been
-  observed to occasionally never fire); `display.rs`'s 1s bounded run-loop
-  re-diff (resolution-only changes never fire the reconfiguration
-  callback in this process); and `main.rs`'s 30ms `maintenance_tick`
-  (pure debounce/coalescing of already-pushed events, near-zero idle
-  cost). Don't add a fifth without a similarly hard constraint.
+  observed to occasionally never fire); and `main.rs`'s 30ms
+  `maintenance_tick` (pure debounce/coalescing of already-pushed events,
+  near-zero idle cost). Don't add a fourth without a similarly hard
+  constraint. (`display.rs`'s `spawn_display_watcher` still bounds its
+  `CFRunLoopRun` into 1s chunks — that's to avoid a run-loop spin-forever
+  bug, not to poll anything; real hardware confirmed
+  `CGDisplayRegisterReconfigurationCallback` now reliably fires for every
+  display change, including resolution-only ones, once `tili-daemon` had a
+  real `NSApplication`.)
 - **Accessibility permission gets no in-process wait/poll/restart of any
   kind** — an already-running process never reliably observes the grant
   (confirmed across three mechanisms). The daemon checks once at startup

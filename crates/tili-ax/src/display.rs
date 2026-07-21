@@ -213,72 +213,57 @@ unsafe extern "C" fn reconfiguration_callback(
     let _ = tx.send(());
 }
 
-/// How often the fallback poll below re-enumerates displays. Cheap (just
-/// `CGDisplay::active_displays()` + bounds reads, no AX calls), so a
-/// 1-second period costs nothing while still feeling instant for a resize
-/// done through System Settings.
-const RESOLUTION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long each `CFRunLoop::run_in_mode` chunk below runs before this
+/// thread re-enters it. Not a poll interval — nothing happens between
+/// chunks — purely to avoid `run_in_mode`'s spin-forever behavior:
+/// confirmed on real hardware via CPU sampling that a run loop pumped in a
+/// mode with no input source/timer registered returns immediately instead
+/// of blocking (documented CoreFoundation behavior), which left an
+/// unbounded `CFRunLoopRun()` here busy-spinning at ~40% of a CPU core.
+/// Bounding each chunk and sleeping out the remainder caps that at a
+/// harmless 1Hz wake-up instead, without affecting how fast
+/// `reconfiguration_callback` itself fires (that's a real callback, not
+/// gated by this loop's cadence at all).
+const RUN_LOOP_PUMP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Spawns a dedicated OS thread that registers a `CGDisplayRegisterReconfigurationCallback`
 /// and pumps a `CFRunLoop` on that thread for the process's lifetime, since
 /// reconfiguration callbacks are delivered on whichever thread's run loop is
 /// running when they're registered. Each signal on the returned channel just
-/// means "call `list_monitors` again," not any specific change.
+/// means "call `list_monitors` again," not any specific change — the
+/// flags/summary aren't inspected.
 ///
-/// The callback alone isn't sufficient: confirmed on real hardware that
-/// `CGDisplayRegisterReconfigurationCallback` reliably fires for hot-plug/
-/// unplug and sleep/wake in this process, but never fires at all for a
-/// resolution-only change (no monitor added or removed) — attributed at the
-/// time to `tili-daemon` having no `NSApplication`/UI-session-activation
-/// context, the same explanation for `NSWorkspaceDidActivateApplicationNotification`
-/// (and, later, `DidLaunchApplication`/`DidWakeNotification`) never firing —
-/// see `main.rs`'s process setup and `workspace::register_on_main`'s doc
-/// comment, which gave `tili-daemon` a real `NSApplication` context to fix
-/// those. Whether that also fixes resolution-only reconfiguration delivery
-/// hasn't been separately re-verified — this polling fallback is left in
-/// place pending that, not removed opportunistically alongside an unrelated
-/// change. So this remains the third sanctioned exception to the "no
-/// polling" invariant (see docs/architecture/invariants.md) — the run loop
-/// below is bounded to `RESOLUTION_POLL_INTERVAL` chunks instead of running
-/// forever unattended, and after every wake (whether from a real callback or
-/// a timeout) it diffs a fresh `list_monitors()` against the last snapshot,
-/// only signaling the channel when something actually changed.
+/// Real hardware confirmed `CGDisplayRegisterReconfigurationCallback` fires
+/// reliably for hot-plug/unplug, sleep/wake, *and* a resolution-only change
+/// (no monitor added or removed) — the last of these had previously been
+/// confirmed to never fire, attributed at the time to `tili-daemon` having
+/// no `NSApplication`/UI-session-activation context (the same explanation
+/// given for `NSWorkspaceDidActivateApplicationNotification`, and later
+/// `DidLaunchApplication`/`DidWakeNotification`, never firing). Once
+/// `main.rs` gave `tili-daemon` a real `NSApplication` context, re-testing
+/// confirmed the resolution-only case now fires too (two callbacks per
+/// change: `kCGDisplayBeginConfigurationFlag`, then the real
+/// `kCGDisplaySetModeFlag`/`kCGDisplayDesktopShapeChangedFlag` once it
+/// completes) — so the polling fallback this function used to also run is
+/// gone; the loop below exists purely to keep this thread's run loop pumped
+/// for the callback (see `RUN_LOOP_PUMP_INTERVAL`), not to poll anything.
 pub fn spawn_display_watcher() -> UnboundedReceiver<()> {
     let (tx, rx) = unbounded_channel();
     std::thread::spawn(move || {
-        let user_info = Box::into_raw(Box::new(tx.clone())) as *const c_void;
+        let user_info = Box::into_raw(Box::new(tx)) as *const c_void;
         unsafe {
             CGDisplayRegisterReconfigurationCallback(reconfiguration_callback, user_info);
         }
 
-        let mut last = list_monitors();
         loop {
             let cycle_start = std::time::Instant::now();
             core_foundation::runloop::CFRunLoop::run_in_mode(
                 unsafe { core_foundation::runloop::kCFRunLoopDefaultMode },
-                RESOLUTION_POLL_INTERVAL,
+                RUN_LOOP_PUMP_INTERVAL,
                 false,
             );
-            // `run_in_mode` returns immediately rather than blocking for
-            // `RESOLUTION_POLL_INTERVAL` whenever this thread's run loop has
-            // no input source/timer registered in `kCFRunLoopDefaultMode`
-            // (documented CoreFoundation behavior) — confirmed on real
-            // hardware via CPU sampling that this leaves the loop re-calling
-            // `list_monitors()` (several synchronous WindowServer `mach_msg`
-            // round-trips each) hundreds of times a second instead of once,
-            // sustaining ~40% of a CPU core at idle. Sleeping out whatever's
-            // left of the interval caps the fallback poll at the intended
-            // 1Hz regardless of how fast `run_in_mode` returns, without
-            // touching the real-time path — `reconfiguration_callback`
-            // still sends on `tx` the instant a real hot-plug/sleep-wake
-            // event fires, independent of this loop's cadence.
-            if let Some(remaining) = RESOLUTION_POLL_INTERVAL.checked_sub(cycle_start.elapsed()) {
+            if let Some(remaining) = RUN_LOOP_PUMP_INTERVAL.checked_sub(cycle_start.elapsed()) {
                 std::thread::sleep(remaining);
-            }
-            let current = list_monitors();
-            if current != last {
-                let _ = tx.send(());
-                last = current;
             }
         }
     });
