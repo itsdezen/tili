@@ -33,11 +33,6 @@ See [CHANGELOG.md](CHANGELOG.md) for the full itemized list.
 Nothing here is scheduled — this is the backlog of ideas judged worth
 doing eventually, roughly in the order they'd likely land:
 
-- **Animated window movement.** `WindowFrameSetter` (`tili-ax`) is
-  already designed as the single seam every real frame mutation goes
-  through, specifically so an animated implementation
-  (`TweenedFrameSetter`) can be dropped in later without touching layout
-  code.
 - **Third-party status bar integration (e.g. SketchyBar).** Right now
   only `tili-menubar` can show live workspace state, via an in-process
   long-poll. Two directions are already scoped from building that:
@@ -60,9 +55,10 @@ doing eventually, roughly in the order they'd likely land:
 - **Event-driven, not polling.** Every change to the daemon's event loop
   should be checked against idle CPU usage, not just correctness.
 - **The animation seam stays a seam.** `WindowFrameSetter` is the only
-  thing allowed to know how a window's frame actually gets set. If a
-  feature needs to reach around it, that's a design smell worth stopping
-  for.
+  thing allowed to know how a window's frame actually gets set — now
+  including `TweenedFrameSetter` itself (behind `Settings::animate`), not
+  just its `InstantFrameSetter` predecessor. If a feature needs to reach
+  around it, that's a design smell worth stopping for.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full technical
 design, and [docs/BLUEPRINT.md](docs/BLUEPRINT.md) for the design

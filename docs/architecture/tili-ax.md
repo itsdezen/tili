@@ -46,9 +46,69 @@ this is why `WindowFrameSetter::set_frame` takes `&mut AxWindow`.
 
 Defines the `WindowFrameSetter` trait — every place that moves/resizes a
 real window must go through `dyn WindowFrameSetter`, not call
-`AxWindow::set_frame` directly. v1 only implements `InstantFrameSetter`;
-this trait is the seam a future animated setter plugs into without touching
-layout code.
+`AxWindow::set_frame` directly. Two implementations: `InstantFrameSetter`
+(the original v1, still the default when `Settings::animate` is off) and
+`TweenedFrameSetter`, which eases a window from its old frame to its new
+one over a caller-supplied duration (an ease-out curve) instead of jumping
+straight there — `tili-daemon` constructs it with its own
+`ANIMATION_DURATION` (90ms). `tili-daemon::WmState::apply_config` swaps
+which one is boxed behind `frame_setter` only when `Settings::animate`
+actually changes, so an unrelated reload never resets an animation
+already in flight.
+
+The trait has five more methods beyond `set_frame`, all no-op-defaulted
+so `InstantFrameSetter` needs no changes:
+
+- `tick` — advances every in-flight tween by one step, called from
+  `tili-daemon`'s dedicated `animation_tick` (16ms/8ms depending on
+  `AnimationSpeed::Medium`/`::High` — see
+  `docs/architecture/invariants.md`'s "No polling" section for why a
+  dedicated timer is sanctioned here). A no-op the instant nothing is
+  animating.
+- `has_active_animations` — whether *any* window is mid-tween, gating
+  `animation_tick`'s `select!` branch (`if
+  state.is_animating_anything()`) so that timer is never even polled
+  while nothing is animating.
+- `is_animating` — lets `WmState::maybe_capture_manual_geometry` skip its
+  drift check for a window mid-tween: every animation step is a real,
+  tili-initiated `AXWindowMoved`/`AXWindowResized`-firing write, and
+  without this guard that function's own invariant ("drift only ever
+  means a user drag") would misfire on the animation's own writes.
+- `finish` — instantly writes a window's true target and drops its tween,
+  for the writes that still bypass this seam (`park`; the *size-discovery*
+  step of `place_floating_window`'s centered branch — its actual placement
+  still goes through `set_frame`, so it animates) and for `unpark_all`'s
+  shutdown-time restore (which also bypasses the seam entirely — an
+  animated write there would never get the later ticks it needs, since
+  nothing calls `tick` again before the process exits). Without `finish`,
+  a stale tween could resume on a later tick and drag the window away
+  from wherever one of these direct writes just put it.
+- `set_suppressed` — while true, `set_frame` writes instantly (same as
+  `InstantFrameSetter`) and drops any tween already running for that
+  window, regardless of `Settings::animate`. `WmState::switch_workspace`
+  wraps its reveal-the-incoming-workspace calls
+  (`relayout_active`/`reposition_floating_in_active_workspace`) in
+  `set_suppressed(true)`/`set_suppressed(false)`: those calls are showing
+  windows at wherever `park` last left them, and a parked position was
+  never meant to be seen, so there's no meaningful start point to ease
+  from — animating it would just flash a slide in from a hidden corner.
+
+`TweenedFrameSetter::set_frame`'s coalescing has one subtlety worth
+knowing before touching it: a target that matches the tween already in
+flight is treated as a no-op *on the tween*, not a restart. Every tween
+step is a real write, so it fires a real `AXWindowMoved`/`AXWindowResized`
+notification — `main.rs`'s `WindowsChanged` handling already coalesces a
+burst of these into `pending_pids` (a `HashSet<i32>`, drained once per
+`maintenance_tick`, 30ms — see its own doc comment), so in practice
+`apply_windows_changed` → `relayout_active` → `set_frame` re-fires with
+the *same* target roughly once per `maintenance_tick` during an
+animation's lifetime (≈3 times over `ANIMATION_DURATION`'s 90ms), not
+once per animation tick. Still enough to matter: restarting the tween's
+clock on any one of those self-triggered calls would push convergence out
+by another `maintenance_tick` each time, and since the notification these
+calls exist to (mostly) ignore is a *guaranteed* by-product of the
+animation itself, not a rare edge case, the guard has to be unconditional
+rather than something a short debounce alone would paper over.
 
 ## display.rs — monitors and the display watcher (M9)
 

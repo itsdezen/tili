@@ -212,10 +212,7 @@ disconnect lagging clients.
 6. Improve multi-monitor correctness: pinned workspace policy, swap
    semantics, hot-plug race tests, and a real usable display rectangle
    once coordinate conversion is thoroughly tested.
-7. Add animation only after transaction/layout stability: implement
-   `TweenedFrameSetter` with cancellation/coalescing and never let
-   animation race AX events.
-8. Add advanced features after the core: tabbed/stacked variants, sticky
+7. Add advanced features after the core: tabbed/stacked variants, sticky
    windows, per-app default workspace, and native-tab support only when
    its semantics are reliable.
 

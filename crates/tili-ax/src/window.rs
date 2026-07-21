@@ -80,7 +80,7 @@ unsafe extern "C" {
 /// the purposes of skipping a redundant AX write — see `AxWindow::set_frame`.
 const FRAME_EPSILON: f64 = 0.5;
 
-fn frame_matches(a: Rect, b: Rect) -> bool {
+pub(crate) fn frame_matches(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < FRAME_EPSILON
         && (a.y - b.y).abs() < FRAME_EPSILON
         && (a.width - b.width).abs() < FRAME_EPSILON
@@ -282,6 +282,16 @@ impl AxWindow {
     /// cached frame if the read fails.
     pub fn live_frame(&self) -> Rect {
         read_frame(&self.element).unwrap_or(self.frame)
+    }
+
+    /// Corrects the cached `frame()` to match a `live_frame()` read,
+    /// without writing anything to AX — for a caller that already
+    /// discovered the window's real frame differs from what it last
+    /// requested (e.g. `set_size` clamped along one axis) and needs the
+    /// cache to reflect reality before a subsequent `WindowFrameSetter`
+    /// write compares against it.
+    pub fn sync_frame(&mut self, frame: Rect) {
+        self.frame = frame;
     }
 
     pub fn element(&self) -> &AXUIElement {

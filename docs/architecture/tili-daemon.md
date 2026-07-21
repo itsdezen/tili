@@ -190,16 +190,27 @@ uses `relayout_all_visible`.
 `relayout_monitor` writes every tiled placement straight through
 `frame_setter.set_frame`, unconditionally, with no readback or retry —
 deliberately fire-and-forget, so a tiled window's size always matches
-exactly what `Tree::layout`'s weight model computed. A window whose app
-rounds/snaps a resize to its own grid (some terminal emulators do this)
-can therefore end up larger than its assigned rect and encroach on a
-neighboring tiled window's gap — a known, accepted OS/app-level
+exactly what `Tree::layout`'s weight model computed (under
+`InstantFrameSetter`, in one write; under `TweenedFrameSetter`, eased
+into over its animation duration — either way the *target* is always
+`Tree::layout`'s own output, never adjusted after the fact). A window
+whose app rounds/snaps a resize to its own grid (some terminal emulators
+do this) can therefore end up larger than its assigned rect and encroach
+on a neighboring tiled window's gap — a known, accepted OS/app-level
 limitation, not something the layout engine tries to correct: any
 after-the-fact size correction would violate the same invariant this
 function exists to uphold, and re-writing a frame in response to a
 notification the write itself caused risks a self-sustaining relayout
 loop (see `apply_windows_changed`'s unconditional `relayout_active()`
-call below, which is what would drive it).
+call below, which is what would drive it) — `TweenedFrameSetter` hits
+this exact loop roughly once per `maintenance_tick` for as long as an
+animation runs (each intermediate write is real, unlike
+`InstantFrameSetter`'s single no-op-guarded write, but `main.rs`'s
+`pending_pids` already coalesces a notification burst down to one
+`apply_windows_changed` per `maintenance_tick`) and handles it by
+treating a `set_frame` call matching the tween already in flight's target
+as a no-op on the tween, not a restart (see
+`tili-ax/src/frame_setter.rs`'s module docs).
 
 Mouse-based tile resize (dragging a tiled window's real native edge/corner,
 not the keyboard shortcut) piggybacks on the same `mouse_button_down`-suppression
@@ -261,6 +272,28 @@ call now targets the same coordinate regardless of caller,
 `AxWindow::set_position`'s no-op-if-unchanged guard genuinely no-ops on
 that re-assertion instead of needing to track which offset a specific
 call used.
+
+`park()` writes straight to `AxWindow` (`set_position`), bypassing
+`frame_setter` entirely — parking's destination isn't meant to be seen
+mid-transition. `place_floating_window`'s centered branch only bypasses
+`frame_setter` for its *size-discovery* step (`set_size` then
+`live_frame()`, needed to learn a fixed-one-axis app's real, possibly
+app-clamped size before a position can even be computed) — the actual
+placement, once that real size is known, goes through
+`frame_setter.set_frame` like any other floating placement, so it
+animates too. Both call `frame_setter.finish()` before their direct write
+so a tween left running from an *earlier* placement of the same window
+can't resume on a later `animation_tick` and fight it; the centered
+branch additionally calls `AxWindow::sync_frame` right after discovering
+the real size, correcting the cache `set_size` left pointing at the
+*requested* (possibly never-actually-on-screen) size, so the animated
+move that follows interpolates from the window's true current frame
+instead of a wrong one. `unpark_all` (shutdown-only) goes further and
+always bypasses `frame_setter` outright, even when `Settings::animate` is
+on: it's a one-shot restore that runs once, immediately before the
+process exits, with no later tick left to actually finish an animated
+write — routing it through `frame_setter` would leave windows stuck
+off-screen instead of restored.
 
 Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
 parsed since M5) is intentionally still unwired — M9's bar is

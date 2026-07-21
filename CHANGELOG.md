@@ -8,6 +8,32 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Added
+
+- **Animated window movement (opt-in).** New `animate` setting (`#false`,
+  `#true`, `"medium"`, or `"high"` — default `#false`; `#true` is
+  shorthand for `"medium"`) eases tiled relayout and floating-window
+  placement — including a newly-centered floating window's placement —
+  into their new frame over a short duration (90ms) instead of jumping
+  straight there, fixing the visible "flick" on relayout, post-drag
+  mouse-resize snap, and floating centering. `"medium"`/`"high"` pick the
+  animation's tick rate (~60fps/~120fps) — `tili-daemon` reconstructs its
+  dedicated animation timer to match on every config change, and that
+  timer only runs at all while something is actually animating.
+  Performance tradeoff: each animation step is a real AX write, not a free
+  interpolation, so `"medium"` costs roughly 6x the AX round-trips of a
+  plain instant move per relayout, and `"high"` roughly 11x (double
+  `"medium"`) — negligible on responsive native apps, more noticeable as
+  extra per-relayout latency on a slow-to-respond one. Implemented as
+  `TweenedFrameSetter`, a second `WindowFrameSetter` alongside the
+  existing `InstantFrameSetter`. Doesn't affect a user's own native
+  drag/resize of a floating window (tili never writes during that);
+  parking a window off-screen and the size-discovery step of centering a
+  floating window stay instant on purpose, and so does revealing a
+  workspace's windows on switch (they're showing at wherever they were
+  parked, which was never meant to be seen, so there's no start point to
+  meaningfully ease from).
+
 ## [0.3.1] - 2026-07-21
 
 ### Fixed

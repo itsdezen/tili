@@ -137,6 +137,13 @@ pub struct Settings {
     /// `amount`. Defaults to `0.1`, the step size `example/tili.kdl`'s own
     /// keyboard bindings already use.
     pub mouse_resize_step: f32,
+    /// Whether — and how fast — tiled relayout and floating placement ease
+    /// into their new frame instead of jumping straight there
+    /// (`TweenedFrameSetter` vs `InstantFrameSetter` — see
+    /// `tili-ax/src/frame_setter.rs`). Defaults to `Off`: an opt-in for a
+    /// feature whose smoothness depends on real-hardware AX write latency,
+    /// not a default-on behavior change for every existing user.
+    pub animate: AnimationSpeed,
 }
 
 impl Default for Settings {
@@ -148,8 +155,23 @@ impl Default for Settings {
             default_workspace: None,
             default_root_orientation: "auto".to_string(),
             mouse_resize_step: 0.1,
+            animate: AnimationSpeed::Off,
         }
     }
+}
+
+/// How fast `Settings::animate` eases a frame into place — `tili-daemon`
+/// maps `Medium`/`High` to an actual tick rate (currently 60fps/120fps);
+/// this crate only owns the config-facing name, not the fps number, since
+/// picking one is a runtime/AX-latency concern outside what a config
+/// schema should hardcode.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AnimationSpeed {
+    #[default]
+    Off,
+    /// Also what a plain `#true` resolves to.
+    Medium,
+    High,
 }
 
 /// The parsed `tili.kdl` document.
@@ -323,6 +345,28 @@ fn parse_settings(doc: &KdlDocument) -> Settings {
     }
     if let Some(v) = as_f32(children.get_arg("mouse-resize-step")) {
         settings.mouse_resize_step = v;
+    }
+    if let Some(v) = children.get_arg("animate") {
+        settings.animate = if let Some(b) = v.as_bool() {
+            // A plain `#true`/`#false` predates the medium/high split —
+            // `#true` resolves to `Medium` rather than picking a speed for
+            // the user, so an existing `animate #true` config keeps
+            // working unchanged.
+            if b {
+                AnimationSpeed::Medium
+            } else {
+                AnimationSpeed::Off
+            }
+        } else {
+            match v.as_string() {
+                Some("medium") => AnimationSpeed::Medium,
+                Some("high") => AnimationSpeed::High,
+                // Unrecognized value: same "fall back to a safe default"
+                // precedent as `default-root-orientation` below rather
+                // than rejecting the whole config over one bad setting.
+                _ => AnimationSpeed::Off,
+            }
+        };
     }
     settings
 }
@@ -603,6 +647,67 @@ mod tests {
     fn mouse_resize_step_defaults_to_a_tenth() {
         let config = parse("").unwrap();
         assert!((config.settings.mouse_resize_step - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn animate_true_defaults_to_medium() {
+        let source = r#"
+            settings {
+                animate #true
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.settings.animate, AnimationSpeed::Medium);
+    }
+
+    #[test]
+    fn parses_animate_medium() {
+        let source = r#"
+            settings {
+                animate "medium"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.settings.animate, AnimationSpeed::Medium);
+    }
+
+    #[test]
+    fn parses_animate_high() {
+        let source = r#"
+            settings {
+                animate "high"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.settings.animate, AnimationSpeed::High);
+    }
+
+    #[test]
+    fn parses_animate_false() {
+        let source = r#"
+            settings {
+                animate #false
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.settings.animate, AnimationSpeed::Off);
+    }
+
+    #[test]
+    fn unrecognized_animate_value_falls_back_to_off() {
+        let source = r#"
+            settings {
+                animate "ludicrous"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.settings.animate, AnimationSpeed::Off);
+    }
+
+    #[test]
+    fn animate_defaults_to_off() {
+        let config = parse("").unwrap();
+        assert_eq!(config.settings.animate, AnimationSpeed::Off);
     }
 
     #[test]

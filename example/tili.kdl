@@ -68,6 +68,24 @@ settings {
     // `resize` command below. Matches this file's own keyboard step by
     // default.
     mouse-resize-step 0.1
+
+    // Eases tiled relayout and floating placement into their new frame
+    // instead of jumping straight there. Accepts #true, #false, "medium",
+    // or "high":
+    //   #false     off (default) — an opt-in, since smoothness depends on
+    //              real-hardware AX write latency
+    //   #true      same as "medium"
+    //   "medium"   ~60fps (16ms tick)
+    //   "high"     ~120fps (8ms tick)
+    //
+    // Performance tradeoff: each step of an animation is a real write, not
+    // a free interpolation — going from off to "medium" is roughly 6x the
+    // AX round-trips per relayout (~6 steps instead of 1), and "high" is
+    // roughly 11x (~double "medium", for visibly smoother motion). Mostly
+    // unnoticeable on native apps; a slow-to-respond app (some Electron/
+    // Chromium apps) pays that multiplier in extra latency per relayout,
+    // more so at "high". Try "medium" first.
+    animate #false
 }
 
 // Global hotkeys — no external tool (skhd etc.) needed, tili captures these

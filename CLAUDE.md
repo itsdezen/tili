@@ -61,7 +61,9 @@ focus sync, polling/timing, multi-monitor handling, or release signing.**
   depends on `tili-tree` only for geometry types. `src/window.rs` owns the
   single private API call in the codebase (`_AXUIElementGetWindow`) plus
   window classification (`WindowKind`); `src/frame_setter.rs` defines
-  `WindowFrameSetter` — the seam every real frame write goes through.
+  `WindowFrameSetter` — the seam every real frame write goes through, with
+  `InstantFrameSetter` and `TweenedFrameSetter` (`Settings::animate`) as
+  its two implementations.
   `workspace.rs::register_on_main` registers `NSWorkspace` notifications on
   the real process main thread (no thread of its own — `tili-daemon`'s
   `NSApplication.run()` is what pumps delivery); `display.rs`/`hotkey.rs`/
@@ -129,14 +131,21 @@ rationale (and real-hardware evidence) behind each is in
   `_AXUIElementGetWindow` call in `tili-ax/src/window.rs` — this is what
   lets tili run without disabling SIP.
 - **No polling** — the daemon reacts to AXObserver/NSWorkspace/display
-  notifications. Exactly three sanctioned, narrowly-scoped exceptions:
+  notifications. Exactly four sanctioned, narrowly-scoped exceptions:
   `hotkey.rs`'s event-tap install retry (Input Monitoring can be granted
   at any time, with no notification); `watch.rs`'s `WATCHER_RESYNC_INTERVAL`
   (2s) watcher-resync backstop + capped full resync (both notification
-  sources have been observed to occasionally never fire); and `main.rs`'s
+  sources have been observed to occasionally never fire); `main.rs`'s
   30ms `maintenance_tick` (pure debounce/coalescing of already-pushed
-  events, near-zero idle cost). Don't add a fourth without a similarly
-  hard constraint. (`display.rs`'s `spawn_display_watcher` still bounds its
+  events, near-zero idle cost); and `main.rs`'s `animation_tick` (16ms or
+  8ms, per `Settings::animate`'s `medium`/`high`) driving
+  `TweenedFrameSetter` steps, gated by `if
+  state.is_animating_anything()` on its `select!` branch so it's never
+  even polled while nothing is animating — sanctioned because
+  interpolating over wall-clock time has no event-driven alternative at
+  all, not because a notification is unreliable. Don't add a fifth
+  without a similarly hard constraint. (`display.rs`'s
+  `spawn_display_watcher` still bounds its
   `CFRunLoopRun` into 1s chunks — that's to avoid a run-loop spin-forever
   bug, not to poll anything; real hardware confirmed
   `CGDisplayRegisterReconfigurationCallback` now reliably fires for every
@@ -148,8 +157,13 @@ rationale (and real-hardware evidence) behind each is in
   and stops itself if not granted. Don't reintroduce a wait without new
   evidence.
 - **All real window-frame mutations go through `WindowFrameSetter`**,
-  never a direct AX call from daemon/tree code — the future-animation
-  seam.
+  never a direct AX call from daemon/tree code — the animation seam
+  (`TweenedFrameSetter`, behind `Settings::animate`). The documented
+  exceptions that bypass it (`park`, `place_floating_window`'s centered
+  branch's size-discovery step only — its actual placement still goes
+  through the seam, `unpark_all`) must call `frame_setter.finish()` first
+  so a stale in-flight tween can't resume on a later tick and undo the
+  direct write.
 - **Hotkey- and socket-triggered commands both go through `dispatch()`**
   — no parallel command path. The hotkey tap's `active_bindings:
   Arc<Mutex<HashSet<KeyCombo>>>` is the *one* sanctioned lock (the tap

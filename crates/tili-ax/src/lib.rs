@@ -12,7 +12,7 @@ pub use display::{
     spawn_display_watcher,
 };
 pub use enumerate::{list_windows, list_windows_for_pid};
-pub use frame_setter::{InstantFrameSetter, WindowFrameSetter};
+pub use frame_setter::{InstantFrameSetter, TweenedFrameSetter, WindowFrameSetter};
 pub use hotkey::{
     KeyCombo, has_input_monitoring_permission, parse_key_combo,
     request_input_monitoring_permission, spawn_hotkey_tap,

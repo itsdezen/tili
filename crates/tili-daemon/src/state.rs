@@ -3,7 +3,9 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
-use tili_ax::{AxWindow, InstantFrameSetter, KeyCombo, Monitor, WindowFrameSetter};
+use tili_ax::{
+    AxWindow, InstantFrameSetter, KeyCombo, Monitor, TweenedFrameSetter, WindowFrameSetter,
+};
 use tili_ipc::{Command, MonitorInfo, RectInfo, WindowInfo, WorkspaceInfo};
 use tili_tree::{Direction, Gaps, NodeId, Rect, Tree, WindowId};
 
@@ -31,6 +33,20 @@ const DEFAULT_MODE: &str = "main";
 /// `tili-ax`'s own `AxWindow::set_frame` epsilon, since drift detection is
 /// only meaningful at that same granularity.
 const FLOAT_DRIFT_EPSILON: f64 = 0.5;
+
+/// How long a `TweenedFrameSetter` (`Settings::animate`) takes to ease a
+/// window from its old frame to its new one — short enough to read as a
+/// snap rather than a hero animation, matching a window manager rather
+/// than a UI toolkit.
+const ANIMATION_DURATION: Duration = Duration::from_millis(90);
+
+/// `main.rs`'s `animation_tick` period for `AnimationSpeed::Medium`
+/// (~60fps) and `::High` (~120fps) — see `WmState::animation_tick_period`.
+/// `Off` has no period at all: `animation_tick`'s `select!` branch is
+/// gated on `is_animating_anything`, which is always false under
+/// `InstantFrameSetter`.
+const ANIMATION_TICK_PERIOD_MEDIUM: Duration = Duration::from_millis(16);
+const ANIMATION_TICK_PERIOD_HIGH: Duration = Duration::from_millis(8);
 
 /// How long a window that's vanished from a fresh AX scan is kept in
 /// `WmState::pending_removal` before being treated as genuinely closed —
@@ -658,6 +674,13 @@ pub struct WmState {
     /// resize to, so the released size always matches some whole number of
     /// `resize <mouse_resize_step>` keypresses — see `Settings::mouse_resize_step`.
     mouse_resize_step: f32,
+    /// Mirrors `Settings::animate` — `apply_config` only swaps
+    /// `frame_setter` between `InstantFrameSetter`/`TweenedFrameSetter`
+    /// when this actually changes, so an unrelated config reload doesn't
+    /// reset (and visually restart) any animation already in flight.
+    /// `main.rs` also reads this (via `animation_tick_period`) to know
+    /// what period to drive `animation_tick` at.
+    animate: tili_config::AnimationSpeed,
     /// Whether `apply_config` has run before. Only the *first* call
     /// resolves and applies a real default workspace (see
     /// `apply_config`'s doc comment) — every call after that is a hot
@@ -777,6 +800,7 @@ impl Default for WmState {
             mouse_follows_focus: false,
             focus_follows_monitor: false,
             mouse_resize_step: 0.1,
+            animate: tili_config::AnimationSpeed::Off,
             config_loaded_once: false,
             mouse_button_down: false,
             resize_drag: None,
@@ -1262,7 +1286,16 @@ impl WmState {
     /// on, so future recentering (`reposition_floating_for_monitor`)
     /// restores the user's placement instead of overwriting it with the
     /// floating rule's.
+    ///
+    /// Skipped entirely while `id` is animating (`Settings::animate`):
+    /// every tween step is a real, tili-initiated frame change too, so the
+    /// "only a user drag causes drift" invariant this function relies on
+    /// doesn't hold mid-animation — treating it as one would misfile the
+    /// animation's own intermediate frames as a manual placement.
     fn maybe_capture_manual_geometry(&mut self, id: WindowId, old_frame: Rect, live_frame: Rect) {
+        if self.frame_setter.is_animating(id) {
+            return;
+        }
         if frames_match(old_frame, live_frame) {
             return;
         }
@@ -1362,6 +1395,12 @@ impl WmState {
     /// were never "parked" (moved off-screen by `park`) in the first
     /// place, so leaving them exactly as they are is correct, not an
     /// oversight.
+    ///
+    /// Writes directly via `AxWindow::set_frame`, bypassing `frame_setter`
+    /// — this only ever runs once, immediately before the process exits,
+    /// so an animated write would never get the later ticks it needs to
+    /// actually reach its target, leaving windows stuck off-screen instead
+    /// of restored.
     pub fn unpark_all(&mut self) {
         let Some(area) = self.monitor_frame(self.focused_monitor) else {
             return;
@@ -1373,7 +1412,7 @@ impl WmState {
             });
             let frame = manual.map_or(area, |geometry| restore_floating_frame(geometry, area));
             if let Some(window) = self.windows.get_mut(&id) {
-                self.frame_setter.set_frame(window, frame);
+                window.set_frame(frame);
             }
         }
     }
@@ -1559,6 +1598,15 @@ impl WmState {
         self.mouse_follows_focus = config.settings.mouse_follows_focus;
         self.focus_follows_monitor = config.settings.focus_follows_monitor;
         self.mouse_resize_step = config.settings.mouse_resize_step;
+        if config.settings.animate != self.animate {
+            self.animate = config.settings.animate;
+            self.frame_setter = match self.animate {
+                tili_config::AnimationSpeed::Off => Box::new(InstantFrameSetter),
+                tili_config::AnimationSpeed::Medium | tili_config::AnimationSpeed::High => {
+                    Box::new(TweenedFrameSetter::new(ANIMATION_DURATION))
+                }
+            };
+        }
         self.default_root_orientation = match config.settings.default_root_orientation.as_str() {
             "horizontal" => Some(tili_tree::Orientation::Horizontal),
             "vertical" => Some(tili_tree::Orientation::Vertical),
@@ -2612,8 +2660,16 @@ impl WmState {
 
         self.active_workspace.insert(monitor_id, name.to_string());
 
+        // Suppressed even under `Settings::animate`: these calls reveal
+        // whatever this workspace's windows were left at — for most of
+        // them that's `park`'s hidden corner, which was never meant to be
+        // seen, so there's no meaningful start point to ease from (and
+        // "ease in from a hidden corner" would itself flash a slide across
+        // the screen, the opposite of the point).
+        self.frame_setter.set_suppressed(true);
         self.relayout_active();
         self.reposition_floating_in_active_workspace();
+        self.frame_setter.set_suppressed(false);
 
         // Raised *before* either outgoing park loop below, not after —
         // `raise_focused` changes z-order/keyboard focus only, it doesn't
@@ -3030,6 +3086,15 @@ impl WmState {
     /// no-op-if-unchanged guard genuinely no-ops instead of needing to
     /// remember which offset a specific call used.
     fn park(&mut self, id: WindowId) {
+        // Settles any in-flight animation to its true target first — both
+        // so the manual-geometry capture below reads the window's real
+        // intended frame instead of an arbitrary mid-tween interruption
+        // point, and so a stale tween can't resume on a later tick and
+        // drag the window away from the parked position this function is
+        // about to write.
+        if let Some(window) = self.windows.get_mut(&id) {
+            self.frame_setter.finish(window);
+        }
         self.capture_manual_geometry_before_park(id);
         let Some(window) = self.windows.get_mut(&id) else {
             return;
@@ -3057,6 +3122,34 @@ impl WmState {
         let area = self.monitor_frame(monitor_id)?;
         let gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
         Some((name, area, gaps))
+    }
+
+    /// Advances any in-flight `TweenedFrameSetter` animations by one step —
+    /// called from `main.rs`'s dedicated animation timer, gated by
+    /// `is_animating_anything` so that timer never fires (or is even
+    /// polled) while nothing is animating. A no-op entirely under
+    /// `InstantFrameSetter` (`Settings::animate` off).
+    pub fn step_animations(&mut self) {
+        self.frame_setter.tick(&mut self.windows);
+    }
+
+    /// Whether any window currently has a `TweenedFrameSetter` animation in
+    /// flight — see `step_animations`.
+    pub fn is_animating_anything(&self) -> bool {
+        self.frame_setter.has_active_animations()
+    }
+
+    /// The period `main.rs` should drive `animation_tick` at for the
+    /// current `Settings::animate` — `None` under `Off` (the tick's own
+    /// `select!` guard already keeps it from firing then regardless, but
+    /// `main.rs` also uses this to know whether it's worth reconstructing
+    /// the interval on a config reload at all).
+    pub fn animation_tick_period(&self) -> Option<Duration> {
+        match self.animate {
+            tili_config::AnimationSpeed::Off => None,
+            tili_config::AnimationSpeed::Medium => Some(ANIMATION_TICK_PERIOD_MEDIUM),
+            tili_config::AnimationSpeed::High => Some(ANIMATION_TICK_PERIOD_HIGH),
+        }
     }
 
     /// Recomputes every tiled window's frame on `focused_monitor` and
@@ -3344,14 +3437,41 @@ impl WmState {
         if !center {
             self.frame_setter.set_frame(window, frame);
         } else {
+            // Settles any in-flight animation first — the size-discovery
+            // write below goes straight to `AxWindow`, bypassing
+            // `frame_setter`, so a stale tween could otherwise resume on a
+            // later tick and fight it.
+            self.frame_setter.finish(window);
+            // Direct, instant write on purpose: this is measurement, not a
+            // user-facing placement — resizing first and reading back
+            // `live_frame()` is how a fixed-one-axis app's real (possibly
+            // clamped) size gets discovered, and animating a measurement
+            // step would only delay finding it out.
             window.set_size(frame.width, frame.height);
             let actual = window.live_frame();
+            // `set_size` only updates the cache to the *requested*
+            // width/height, not the real (possibly clamped) one `actual`
+            // just discovered — sync it before the animated move below
+            // compares against it, so a `TweenedFrameSetter` interpolates
+            // from the window's true current size instead of the
+            // never-actually-on-screen requested one.
+            window.sync_frame(actual);
             let (dx, dy) = cascade.unwrap_or((0.0, 0.0));
             let cascaded_x = (area.x + (area.width - actual.width) / 2.0 + dx)
                 .clamp(area.x, area.x + area.width - actual.width);
             let cascaded_y = (area.y + (area.height - actual.height) / 2.0 + dy)
                 .clamp(area.y, area.y + area.height - actual.height);
-            window.set_position(cascaded_x, cascaded_y);
+            // The actual placement — routed through the seam so it
+            // animates like any other floating placement.
+            self.frame_setter.set_frame(
+                window,
+                Rect {
+                    x: cascaded_x,
+                    y: cascaded_y,
+                    width: actual.width,
+                    height: actual.height,
+                },
+            );
         }
         self.floating_placed.insert(id);
         if center {

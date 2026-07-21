@@ -193,6 +193,33 @@ async fn async_daemon_main(
     // maintenance branch rather than several, since all of these are just
     // "a little time has passed, go recheck something."
     let mut maintenance_tick = tokio::time::interval(std::time::Duration::from_millis(30));
+    // `Delay` instead of tokio's default `Burst`: if this loop is ever
+    // transiently busy long enough to miss a tick, `Burst` fires every
+    // missed interval back-to-back the moment the loop frees up, which
+    // just adds a redundant catch-up spike of otherwise-identical
+    // maintenance work; `Delay` schedules the next tick relative to when
+    // the late one actually fired instead.
+    maintenance_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Drives `TweenedFrameSetter` animation steps, at whatever period
+    // `Settings::animate` (`Medium`/`High`) currently calls for — a much
+    // shorter period than `maintenance_tick` since smoothness directly
+    // depends on it, and gated by `if state.is_animating_anything()` on
+    // its `select!` branch below so it's never even polled, let alone
+    // fires, while nothing is animating (the common case, and always the
+    // case with `Settings::animate` off) — this is what keeps it from
+    // being a "fourth" always-on polling exception alongside the three in
+    // `docs/architecture/invariants.md`: it isn't polling for a state
+    // change that could be event-driven instead, it's the only way to
+    // drive a process (interpolating over wall-clock time) that has no
+    // event-driven alternative in the first place, and it costs nothing
+    // at all outside the short window an animation is actually running.
+    // Placeholder period here — `sync_animation_tick` (called right after
+    // every `apply_config`, including the initial load below) corrects it
+    // to whatever the just-loaded config actually calls for before this
+    // is ever polled.
+    let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(16));
+    animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut animation_tick_period = std::time::Duration::from_millis(16);
 
     let config_path = tili_config::default_config_path();
     ensure_starter_config_exists(&config_path);
@@ -207,6 +234,7 @@ async fn async_daemon_main(
         ),
     }
     sync_active_combos(&active_combos, &state);
+    sync_animation_tick(&mut animation_tick, &mut animation_tick_period, &state);
 
     // Single loop, no locks around WmState: every source of change (client
     // connections, background AX/NSWorkspace events, config reloads,
@@ -334,6 +362,9 @@ async fn async_daemon_main(
                     None => eprintln!("tili-daemon: event watcher channel closed unexpectedly"),
                 }
             }
+            _ = animation_tick.tick(), if state.is_animating_anything() => {
+                state.step_animations();
+            }
             _ = maintenance_tick.tick() => {
                 let pids_changed = !pending_pids.is_empty();
                 for pid in pending_pids.drain() {
@@ -365,6 +396,7 @@ async fn async_daemon_main(
                 println!("tili-daemon: config reloaded from {}", config_path.display());
                 state.apply_config(&config);
                 sync_active_combos(&active_combos, &state);
+                sync_animation_tick(&mut animation_tick, &mut animation_tick_period, &state);
                 changed = true;
             }
             Some(combo) = hotkeys.recv() => {
@@ -600,6 +632,29 @@ fn sync_active_combos(shared: &Arc<Mutex<HashSet<tili_ax::KeyCombo>>>, state: &W
     if let Ok(mut set) = shared.lock() {
         *set = state.active_key_combos();
     }
+}
+
+/// Reconstructs `animation_tick` with `state`'s current
+/// `animation_tick_period` if it's changed since the last sync — `Off`'s
+/// `None` is skipped entirely since that period is meaningless (the
+/// tick's own `select!` guard already keeps it from firing under `Off`
+/// regardless of period). `tokio::time::Interval` has no API to change an
+/// existing interval's period in place, so a period change means building
+/// a new one and reapplying `MissedTickBehavior::Delay`.
+fn sync_animation_tick(
+    animation_tick: &mut tokio::time::Interval,
+    current_period: &mut std::time::Duration,
+    state: &WmState,
+) {
+    let Some(period) = state.animation_tick_period() else {
+        return;
+    };
+    if period == *current_period {
+        return;
+    }
+    *animation_tick = tokio::time::interval(period);
+    animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    *current_period = period;
 }
 
 /// Bridges `tili_config`'s plain-`std::sync::mpsc` file-watcher (see its
