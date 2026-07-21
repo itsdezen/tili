@@ -8,6 +8,8 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-21
+
 ### Changed
 
 - **Replaced the 250ms poll of `frontmost_app_pid()` for
@@ -38,8 +40,9 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   now that those are confirmed reliably delivered (`tili-daemon` has a real
   `NSApplication`), `resync_watchers` is a rare-miss backstop rather than
   the primary detection path, so it doesn't need 250ms responsiveness —
-  matches `FULL_RESYNC_DEBOUNCE`'s existing cadence. The frontmost-pid poll
-  itself is unchanged (still 250ms).
+  matches `FULL_RESYNC_DEBOUNCE`'s existing cadence. (The frontmost-pid poll
+  itself was still 250ms at the time this landed; see below for its own
+  follow-up removal, after which this became the tick's only cadence.)
 - **Removed `display.rs`'s resolution-only-change polling fallback.**
   `CGDisplayRegisterReconfigurationCallback` had been confirmed on real
   hardware to never fire for a display-resolution-only change (no monitor
