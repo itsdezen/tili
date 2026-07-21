@@ -62,9 +62,15 @@ focus sync, polling/timing, multi-monitor handling, or release signing.**
   single private API call in the codebase (`_AXUIElementGetWindow`) plus
   window classification (`WindowKind`); `src/frame_setter.rs` defines
   `WindowFrameSetter` — the seam every real frame write goes through.
-  Each OS event source (`workspace.rs`, `watch.rs`, `display.rs`,
-  `hotkey.rs`, `mouse.rs`) runs its own dedicated `CFRunLoop` thread and
-  only sends messages.
+  `workspace.rs::register_on_main` registers `NSWorkspace` notifications on
+  the real process main thread (no thread of its own — `tili-daemon`'s
+  `NSApplication.run()` is what pumps delivery); `display.rs`/`hotkey.rs`/
+  `mouse.rs` each still run their own dedicated `CFRunLoop` thread (a
+  `CGEventTap`/`CGDisplayRegisterReconfigurationCallback` API constraint,
+  not a main-thread-availability one) and send directly on a
+  `tokio::sync::mpsc` channel — no separate relay-bridge thread. `watch.rs`
+  ties these together on its own thread (no `CFRunLoop`, just a periodic
+  `recv_timeout`).
 - **`tili-config`** — KDL parsing/validation into `Config`, plus
   file-watch hot-reload. Runtime-agnostic (`std::sync::mpsc`, not tokio);
   no cross-section semantic validation (that's `tili-daemon`'s job).
@@ -86,7 +92,10 @@ focus sync, polling/timing, multi-monitor handling, or release signing.**
   process lifecycle, handled in `main.rs`'s loop). `dispatch()` syncs
   focus from real macOS frontmost state synchronously before every
   command — deliberately not a reactive background sync (race-prone;
-  see docs/architecture/tili-daemon.md). `main.rs` is one `tokio::select!` loop; no
+  see docs/architecture/tili-daemon.md). `main.rs`'s real `fn main()` sets
+  up a real `NSApplication` on the actual process main thread and hands the
+  whole daemon body to `async_daemon_main` on a background thread with its
+  own Tokio runtime — that function is the one `tokio::select!` loop; no
   locks around `WmState`, only one branch touches it at a time.
 - **`tili-cli`** — thin socket client; the binary is named `tili`. No
   business logic here — new behavior belongs in `tili-daemon` behind a

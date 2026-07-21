@@ -327,9 +327,12 @@ frontmost application while handling a click. If the clicked app was
 already the OS's nominal frontmost app — the common case when the current
 workspace is empty, since nothing else is competing for that status —
 `workspace::frontmost_app_pid()` reads identically before and after the
-click, so `watch.rs`'s poll (however tight `RESYNC_INTERVAL` is) never sees
-an edge and `FrontmostAppChanged` never fires; `reveal_frontmost` never
-runs. `WmState::reveal_current_frontmost` covers this instead: `main.rs`'s
+click: there's no real OS-level transition for
+`NSWorkspaceDidActivateApplicationNotification` to fire on (see
+[tili-ax.md](tili-ax.md)'s `watch.rs` section — this used to be a poll,
+same conclusion either way), so `FrontmostAppChanged` never fires and
+`reveal_frontmost` never runs. `WmState::reveal_current_frontmost` covers
+this instead: `main.rs`'s
 `MouseSignal::ButtonUp` arm (already wired for M10.1's drag-resize
 debounce) also calls it on every left click — a real `CGEventTap` signal,
 not a poll, so a Dock click's mouse down+up always triggers a check
@@ -412,10 +415,12 @@ workspace-switch hotkey presses landing on an empty target workspace.
 default-focus (its `restore` block only runs `if let Some(node) =
 restore`), so real macOS frontmost-app state is left pointing at
 whatever was focused on the *previous* workspace. If `pending_reveal_deadline`
-was armed (a poll edge or a click) before the user starts hopping through
-empty workspaces, it can still be pending when it fires — up to ~250ms
-(poll) + `REVEAL_DEBOUNCE` + one `maintenance_tick` after the trigger —
-by which point one or more explicit, synchronous `Command::WorkspaceSwitch`
+was armed (a `FrontmostAppChanged` notification or a click) before the user
+starts hopping through empty workspaces, it can still be pending when it
+fires — `REVEAL_DEBOUNCE` plus one `maintenance_tick` after the trigger,
+plus whatever `NSWorkspaceDidActivateApplicationNotification` delivery
+itself took to arrive — by which point one or more explicit, synchronous
+`Command::WorkspaceSwitch`
 calls (via `dispatch()`) have already moved the display on.
 `reveal_current_frontmost` re-derives the still-unchanged frontmost pid,
 finds its workspace no longer visible, and calls `switch_workspace` back
@@ -435,7 +440,7 @@ again itself, which is inert — nothing reads it again that tick.
 confirmed on real hardware, hopping to an empty workspace can transiently
 reassign AX-frontmost to a windowless system process (WindowServer, Dock)
 during `park()`'s off-screen window move, before reverting back to the
-real app one poll tick later — two genuine, non-`None` pid edges,
+real app moments later — two genuine, non-`None` pid edges,
 `FrontmostAppChanged` firing for each. `reveal_frontmost` used to update
 `last_frontmost_pid` unconditionally at the top of the function, before
 checking whether `pid` even owns a focused window
@@ -453,7 +458,7 @@ alongside `pending_reveal_epoch` as `pending_reveal_allow_unchanged`: a
 `MouseSignal::ButtonUp` arm sets it `true` (the legitimate Dock-icon
 reactivation case above genuinely needs `pid_unchanged` to be true and
 still switch); a `WmEvent::FrontmostAppChanged` arm sets it `false` (a
-poll edge alone never justifies chasing a same-pid read once the
+notification edge alone never justifies chasing a same-pid read once the
 deferred check actually runs).
 
 The actual dominant cause of the rapid-workspace-switch flicker, confirmed
@@ -463,24 +468,28 @@ raises/focuses a window (`raise_focused`) when entering a workspace that
 already has one, which changes real macOS frontmost state — but
 `last_frontmost_pid` used to only get updated *reactively*, inside
 `reveal_frontmost`, whenever that function next happened to run. Between
-"tili raises app X" and "the poll notices X is now frontmost" there's up
-to `RESYNC_INTERVAL` (250ms) of lag; if the user has already hotkeyed
-onward to a different (often empty) workspace by the time that late,
-self-inflicted edge is detected, `reveal_frontmost` computed
-`pid_unchanged` against a `last_frontmost_pid` that was still whatever it
-was *before* tili's own raise — reading `false`, i.e. "a genuine
-transition," and chasing back to the workspace the raise happened on.
-`raise_focused`/`raise_focused_window` (both now `&mut self`) set
+"tili raises app X" and "watch.rs is told X is now frontmost" (at the time
+this was found, a poll bounded by `RESYNC_INTERVAL`, 250ms — now a
+push notification, see [tili-ax.md](tili-ax.md)'s `watch.rs` section, but
+the delivery is still asynchronous, so the same shape of gap remains, just
+smaller and unbounded rather than a fixed 250ms) there's a lag; if the user
+has already hotkeyed onward to a different (often empty) workspace by the
+time that late, self-inflicted edge is detected, `reveal_frontmost`
+computed `pid_unchanged` against a `last_frontmost_pid` that was still
+whatever it was *before* tili's own raise — reading `false`, i.e. "a
+genuine transition," and chasing back to the workspace the raise happened
+on. `raise_focused`/`raise_focused_window` (both now `&mut self`) set
 `self.last_frontmost_pid = Some(window.pid())` synchronously at the same
 point they call `window.focus()`, so `reveal_frontmost` sees the
-already-known, unchanged pid whenever the poll's detection of a
+already-known, unchanged pid whenever the (now push-based) detection of a
 tili-caused focus change eventually arrives — `pid_unchanged` correctly
-reads `true`, and (per `allow_unchanged_pid` above) a poll-triggered
-reveal skips it instead of chasing. `switch_epoch` and
-`allow_unchanged_pid` remain valid defense-in-depth for the races
-described above (a real external Cmd-Tab racing a rapid switch, and the
-windowless-system-pid edge respectively) — this fix closes the specific
-mechanism that was actually firing in the reported repro.
+reads `true`, and (per `allow_unchanged_pid` above) that reveal skips it
+instead of chasing. `switch_epoch` and `allow_unchanged_pid` remain valid
+defense-in-depth for the races described above (a real external Cmd-Tab
+racing a rapid switch, and the windowless-system-pid edge respectively) —
+this fix closes the specific mechanism that was actually firing in the
+reported repro, and still applies unchanged now that the signal is
+push-based rather than polled.
 
 ## Layout commands, config, and dispatch
 

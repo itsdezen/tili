@@ -32,8 +32,14 @@ test guarding against forgetting this
 
 `src/watch.rs`'s `spawn_config_watcher` is deliberately synchronous
 (`std::sync::mpsc`, not tokio) so this crate stays runtime-agnostic —
-`tili-daemon` bridges it into its `tokio::select!` loop itself, the same
-pattern used for `tili-ax`'s NSWorkspace/AX event sources. It watches the
+`tili-daemon` bridges it into its `tokio::select!` loop itself via its own
+relay thread (`spawn_config_reload_bridge`). This is now the only bridge of
+that shape left: `tili-ax`'s own watchers build and send on a
+`tokio::sync::mpsc` channel directly from their own thread instead, since
+that crate already depends on Tokio (see [tili-daemon.md](tili-daemon.md)'s
+main.rs section) — not an option here, since staying decoupled from any
+particular async runtime is the whole point of this crate's own watcher.
+It watches the
 config file's *containing directory* (after resolving symlinks via
 `canonicalize`, 0.1.4), not the file itself, since editors that save via
 temp-file-then-rename can otherwise orphan the watch on the old inode. A
