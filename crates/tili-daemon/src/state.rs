@@ -438,11 +438,17 @@ fn restore_for(kind: &PlacementKind) -> Restore {
 ///   these processes as `.regular` activation policy) — confirmed in
 ///   practice for the Dock's right-click context menu and the floating
 ///   thumbnail preview shown after taking a screenshot (both misclassified
-///   `Standard` -> tiled) and `SecurityAgent`'s keychain-unlock prompt
+///   `Standard` -> tiled), `SecurityAgent`'s keychain-unlock prompt
 ///   (misclassified `Dialog` -> re-centered/resized as a floating window
-///   instead of left exactly where macOS placed it). Extend only when a
-///   *specific* reported system surface is observed getting moved/resized,
-///   not preemptively.
+///   instead of left exactly where macOS placed it), and Siri AI's
+///   (`com.apple.campo`) background panel (misclassified as an ordinary
+///   floating window matching `floating_defaults`, so it silently claimed
+///   the dead-center `cascade_offset` slot every time it flashed open —
+///   observed making an unrelated app's own centered floating window
+///   never land at dead center, since `floating_cascade_index` correctly
+///   saw it as "another centered window" and cascaded around it). Extend
+///   only when a *specific* reported system surface is observed getting
+///   moved/resized, not preemptively.
 /// - `reveal_frontmost` uses it to recognize a pid as a transient
 ///   activation source rather than an app the user is actually switching
 ///   to/from (see that function's doc comment). Spotlight and Notification
@@ -458,6 +464,8 @@ const SYSTEM_UI_BUNDLE_IDS: &[&str] = &[
     "com.apple.SecurityAgent",
     "com.apple.Spotlight",
     "com.apple.notificationcenterui",
+    // Siri AI.app's bundle id — not self-descriptive from the string alone.
+    "com.apple.campo",
 ];
 
 fn is_system_ui_bundle(bundle_id: Option<&str>) -> bool {
@@ -717,15 +725,15 @@ pub struct WmState {
     /// from scratch on every later workspace switch. Cleared in
     /// `remove_placement` alongside the placement itself.
     floating_placed: HashSet<WindowId>,
-    /// The next `cascade_offset` index for each workspace's floating
-    /// windows — advanced only by `next_floating_cascade_index`, which
-    /// `place_floating_window` calls once per window it actually
-    /// auto-centers. Deliberately never reset when a workspace runs out of
-    /// floating windows — `cascade_offset` already wraps back to dead
-    /// center on its own every `FLOATING_CASCADE_CYCLE` placements, so
-    /// resetting here would just be extra bookkeeping for no behavioral
-    /// difference.
-    floating_cascade: HashMap<String, u32>,
+    /// Floating windows currently on screen via an auto-centered placement
+    /// (as opposed to a non-centered rule, or a captured manual drag/resize
+    /// — see `place_floating_window`). `floating_cascade_index` counts this
+    /// set to decide how far off dead-center a newly-centered window's
+    /// `cascade_offset` nudge should be, so the nudge reflects windows that
+    /// actually exist right now rather than a persistent counter that
+    /// doesn't know whether anything else is still open. Cleared in
+    /// `remove_placement` alongside `floating_placed`.
+    floating_centered: HashSet<WindowId>,
     /// Set by `note_system_wake` to `now + WAKE_REMOVAL_GRACE` — while
     /// `Instant::now()` is still before this, `finalize_expired_removals`
     /// uses `WAKE_REMOVAL_GRACE` instead of `removal_grace`. `None` the rest
@@ -779,7 +787,7 @@ impl Default for WmState {
             pending_launch_pids: HashMap::new(),
             switch_epoch: 0,
             floating_placed: HashSet::new(),
-            floating_cascade: HashMap::new(),
+            floating_centered: HashSet::new(),
             wake_grace_until: None,
         }
     }
@@ -2776,6 +2784,7 @@ impl WmState {
     /// `Tree`).
     fn remove_placement(&mut self, id: WindowId) {
         self.floating_placed.remove(&id);
+        self.floating_centered.remove(&id);
         let Some(placement) = self.placements.remove(&id) else {
             return;
         };
@@ -3243,17 +3252,34 @@ impl WmState {
         )
     }
 
-    /// Returns and advances the next `cascade_offset` index for
-    /// `workspace` — each workspace cascades independently, since floating
-    /// windows in different workspaces are never shown at the same time.
-    fn next_floating_cascade_index(&mut self, workspace: &str) -> u32 {
-        let counter = self
-            .floating_cascade
-            .entry(workspace.to_string())
-            .or_insert(0);
-        let index = *counter;
-        *counter = counter.wrapping_add(1);
-        index
+    /// The `cascade_offset` index for a window about to be centered in
+    /// `workspace` — the count of *other* floating windows in that
+    /// workspace currently in `floating_centered` (i.e. actually on screen
+    /// via an auto-centered placement right now, not just "centered at
+    /// some point in the past"). Zero whenever no other centered window is
+    /// currently present, which is what keeps `cascade_offset(0) ==
+    /// (0.0, 0.0)` — dead center — every time a window is reopened alone,
+    /// rather than drifting via a counter that outlives the windows it
+    /// counted.
+    ///
+    /// Also excludes anything in `pending_removal`, same reasoning as the
+    /// `previous_pid` liveness check in `reveal_current_frontmost`: a
+    /// window that just vanished from the latest AX scan sits there for
+    /// `removal_grace` before `remove_placement` actually drops it from
+    /// `floating_centered`, so without this exclusion a window closed and
+    /// immediately reopened (a common flow) would see its own predecessor
+    /// as "another centered window" for that whole grace window and land
+    /// off-center — reproducing exactly the bug this function exists to
+    /// fix, just gated on timing instead of gone for good.
+    fn floating_cascade_index(&self, workspace: &str, exclude: WindowId) -> u32 {
+        self.floating_windows_in(workspace)
+            .into_iter()
+            .filter(|&id| {
+                id != exclude
+                    && self.floating_centered.contains(&id)
+                    && !self.pending_removal.contains_key(&id)
+            })
+            .count() as u32
     }
 
     /// Computes and writes `id`'s floating frame within `area` (see
@@ -3279,11 +3305,14 @@ impl WmState {
     /// exists for).
     ///
     /// The centered position also gets a small `cascade_offset` nudge (via
-    /// `next_floating_cascade_index`) so several same-sized floating
-    /// windows centered one after another don't all land on the exact same
-    /// pixel and fully overlap — clamped back into `area` afterward in
-    /// case the nudge would otherwise push the window off-screen (a small
-    /// monitor, or little slack between the window and `area`'s edges).
+    /// `floating_cascade_index`) so several same-sized floating windows
+    /// centered at the same time don't all land on the exact same pixel
+    /// and fully overlap — clamped back into `area` afterward in case the
+    /// nudge would otherwise push the window off-screen (a small monitor,
+    /// or little slack between the window and `area`'s edges). The index
+    /// is derived from `floating_centered`, so reopening a window with no
+    /// other centered floating window currently present always nudges by
+    /// zero instead of drifting further each time.
     ///
     /// Note: this window also lives in its workspace's `tili_tree::Tree` as
     /// a `Node::Floating` leaf (see `place_new_window`'s `Floating` arm) so
@@ -3307,7 +3336,7 @@ impl WmState {
         let cascade = center
             .then(|| self.placements.get(&id).map(|p| p.workspace.clone()))
             .flatten()
-            .map(|workspace| cascade_offset(self.next_floating_cascade_index(&workspace)));
+            .map(|workspace| cascade_offset(self.floating_cascade_index(&workspace, id)));
 
         let Some(window) = self.windows.get_mut(&id) else {
             return;
@@ -3325,6 +3354,11 @@ impl WmState {
             window.set_position(cascaded_x, cascaded_y);
         }
         self.floating_placed.insert(id);
+        if center {
+            self.floating_centered.insert(id);
+        } else {
+            self.floating_centered.remove(&id);
+        }
     }
 }
 
@@ -3890,14 +3924,68 @@ mod tests {
     }
 
     #[test]
-    fn next_floating_cascade_index_counts_up_independently_per_workspace() {
+    fn floating_cascade_index_only_counts_other_currently_centered_windows() {
         let mut state = floating_test_state();
-        assert_eq!(state.next_floating_cascade_index(DEFAULT_WORKSPACE), 0);
-        assert_eq!(state.next_floating_cascade_index(DEFAULT_WORKSPACE), 1);
-        assert_eq!(state.next_floating_cascade_index(DEFAULT_WORKSPACE), 2);
-        // A different workspace starts its own sequence from 0.
-        assert_eq!(state.next_floating_cascade_index("side"), 0);
-        assert_eq!(state.next_floating_cascade_index(DEFAULT_WORKSPACE), 3);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+
+        // Nothing else centered yet: reopening window 1 alone always stays
+        // dead-center, no matter how many times this is called — the fix
+        // for repeatedly opening/closing a single floating window drifting
+        // off-center.
+        assert_eq!(state.floating_cascade_index(DEFAULT_WORKSPACE, 1), 0);
+        assert_eq!(state.floating_cascade_index(DEFAULT_WORKSPACE, 1), 0);
+
+        state.floating_centered.insert(2);
+        assert_eq!(state.floating_cascade_index(DEFAULT_WORKSPACE, 1), 1);
+        // Excludes itself even if already marked centered.
+        state.floating_centered.insert(1);
+        assert_eq!(state.floating_cascade_index(DEFAULT_WORKSPACE, 1), 1);
+    }
+
+    #[test]
+    fn floating_cascade_index_ignores_a_window_still_pending_removal() {
+        let mut state = floating_test_state();
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+        state.floating_centered.insert(1);
+
+        // Window 2 opens while window 1 is still genuinely on screen: it's
+        // the "another centered window" case, so it should cascade.
+        assert_eq!(state.floating_cascade_index(DEFAULT_WORKSPACE, 2), 1);
+
+        // Window 1 closes — it disappears from the AX scan immediately, but
+        // `remove_placement` (and thus clearing `floating_centered`) is
+        // deferred until `removal_grace` elapses, so it sits in
+        // `pending_removal` in the meantime. A window closed and instantly
+        // reopened (window 2, alone) must not see window 1's ghost as
+        // "another centered window" and cascade away from dead center.
+        state.pending_removal.insert(1, Instant::now());
+        assert_eq!(state.floating_cascade_index(DEFAULT_WORKSPACE, 2), 0);
     }
 
     #[test]

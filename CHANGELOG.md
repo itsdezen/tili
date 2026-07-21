@@ -8,6 +8,26 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reopening a single centered floating window no longer drifts
+  off-center.** The cascade nudge added in 0.3.0 (to keep several
+  same-sized centered windows from stacking exactly on top of each other)
+  used to advance a per-workspace counter on every placement and never
+  reset it, so repeatedly opening and closing one floating window — with
+  no other centered window ever present — still cycled through the
+  cascade sequence on every reopen. The nudge now only applies when
+  another centered floating window is actually on screen at the same
+  time, so a lone window always reopens dead-center.
+- **Siri AI's background panel no longer steals a floating window's
+  dead-center placement.** Its bundle id (`com.apple.campo`) wasn't
+  recognized as system UI, so its transient panel got floated and
+  centered like a real app window — landing on the same dead-center spot
+  a genuine floating window would otherwise get, and pushing that real
+  window into the cascade-offset sequence instead. Added to the same
+  ignore-list as the Dock/Spotlight/Notification Center's own transient
+  chrome.
+
 ## [0.3.0] - 2026-07-21
 
 ### Added

@@ -37,25 +37,27 @@ reactivation, so a monitor swap or resolution change scales it sensibly.
 
 A centered placement also gets a small `cascade_offset` nudge from
 `place_floating_window` — otherwise several same-sized floating windows
-centered one after another would land on the exact same pixel and fully
+centered at the same time would land on the exact same pixel and fully
 overlap, with no way to see or grab anything but the topmost one.
-`WmState::floating_cascade: HashMap<String, u32>` tracks the next cascade
-index per workspace (`next_floating_cascade_index`, advanced once per
-window actually auto-centered); `cascade_offset` turns that index into a
-`(dx, dy)` pixel nudge that's symmetric around dead center — `0,0`, then
-alternating `±step,±step` at growing magnitude — rather than drifting
-monotonically toward one corner, wrapping back to `0,0` every
-`FLOATING_CASCADE_CYCLE` placements so it never grows unbounded. The
-result is clamped back into `area` the same way `restore_floating_frame`
-clamps a restored frame, in case the nudge would otherwise push the
-window off-screen. The counter is deliberately never reset when a
-workspace runs out of floating windows — the wraparound already bounds
-it, and every caller of `place_floating_window` (a brand-new window, a
-window promoted back from a special state, `set-floating true`, or a
-window shown for the first time via `reposition_floating_for_monitor`) is
-a genuine first-time placement, so the counter only ever advances on
-events the user would actually perceive as "another window just got
-centered here."
+`WmState::floating_centered: HashSet<WindowId>` records which floating
+windows are currently on screen via such a centered placement (mirroring
+`floating_placed`'s lifecycle — inserted/removed by `place_floating_window`
+as the `center` rule dictates, cleared in `remove_placement`);
+`floating_cascade_index` counts how many *other* windows in the same
+workspace are in that set right now, and `cascade_offset` turns that count
+into a `(dx, dy)` pixel nudge that's symmetric around dead center — `0,0`
+when nothing else is currently centered, then alternating `±step,±step` at
+growing magnitude the more windows are centered concurrently — rather than
+drifting monotonically toward one corner, wrapping back to `0,0` every
+`FLOATING_CASCADE_CYCLE` concurrently-centered windows so it never grows
+unbounded. The result is clamped back into `area` the same way
+`restore_floating_frame` clamps a restored frame, in case the nudge would
+otherwise push the window off-screen. The index is deliberately derived
+from live state instead of a persistent counter: an earlier version
+advanced a per-workspace counter on every placement and never reset it,
+which meant repeatedly opening and closing a *single* floating window (no
+other centered window ever present) still walked through the cascade
+sequence on every reopen instead of staying dead-center.
 `state.rs` functions whose
 tree-topology operation is meaningless for a floating focus (`move_focused`,
 `join`, `resize`, `set_orientation`/`toggle_orientation`,
