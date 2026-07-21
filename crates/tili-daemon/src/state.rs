@@ -239,7 +239,10 @@ fn magnet_resize_edge(
         return;
     }
     let snapped_magnitude = (steps * step).min(bound);
-    tree.resize_weight(branch, (snapped_magnitude * raw_weight_delta.signum()) as f32);
+    tree.resize_weight(
+        branch,
+        (snapped_magnitude * raw_weight_delta.signum()) as f32,
+    );
 }
 
 /// The before-drag tiled layout of `monitor_id`'s active workspace, captured by
