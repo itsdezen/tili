@@ -8,6 +8,8 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-21
+
 ### Added
 
 - **Mouse-based tile resize.** Dragging a tiled window's real native
