@@ -39,36 +39,50 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
     AX_MAIN_WINDOW_CHANGED_NOTIFICATION,
 ];
 
-/// How often the background watcher thread re-derives "every pid that
-/// should currently have a window-notification subscription," attaching
-/// watchers for newly-discovered ones and detaching (with a synthetic
-/// `AppTerminated`) for ones no longer running.
-///
-/// This is a correctness backstop, not the primary mechanism: push-based
-/// detection (`NSWorkspaceDidLaunchApplicationNotification`/
-/// `DidTerminateApplication` for process launch/quit) is still what makes
-/// this feel instant in the common case. But both have been observed to
-/// simply not fire in practice for some processes (no code-level bug
-/// found — a real notification-delivery gap), which would otherwise leave
-/// such an app permanently unwatched, or its windows never cleaned out of
-/// the tree after it quit (a "ghost gap"), for the rest of the daemon's
-/// life. Kept short (250ms) since a missed launch/quit should feel close
-/// to instant, not just "eventually correct" — cheap to do this often
-/// because this tick, unlike the full-window resync below, never triggers a
-/// relayout: it's just pid enumeration plus attaching/detaching watchers.
-///
-/// Deliberately *doesn't* also re-signal `WindowsChanged` for every
-/// on-screen pid on every tick (an earlier version did): each one triggers
-/// `apply_windows_changed`, which unconditionally relays out the active
-/// workspace at the end regardless of whether anything for that pid
-/// actually changed — with several on-screen apps, firing all of them
-/// back-to-back every tick caused a visible relayout stutter for no
-/// reason. See `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` for that
-/// much rarer sweep.
+/// How often the background watcher thread's tick actually fires (via
+/// `recv_timeout`'s timeout). Drives `workspace::frontmost_app_pid()`'s
+/// poll for `WmEvent::FrontmostAppChanged` (see that event's doc comment) —
+/// kept short so Cmd-Tab/Mission-Control detection feels close to instant,
+/// not "eventually correct." `resync_watchers` no longer runs on every one
+/// of these ticks — see `WATCHER_RESYNC_INTERVAL` for why it has its own,
+/// longer cadence now.
 ///
 /// This is one of the sanctioned exceptions to "no polling" — the full
 /// list and rationale are documented in `docs/architecture/invariants.md`.
 const RESYNC_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How often `resync_watchers` actually re-derives "every pid that should
+/// currently have a window-notification subscription," attaching watchers
+/// for newly-discovered ones and detaching (with a synthetic
+/// `AppTerminated`) for ones no longer running — checked on the tick above
+/// but on its own, longer cadence, not every `RESYNC_INTERVAL`.
+///
+/// This is a correctness backstop, not the primary mechanism: push-based
+/// detection (`NSWorkspaceDidLaunchApplicationNotification`/
+/// `DidTerminateApplication` for process launch/quit) is what makes this
+/// feel instant in the common case, and — unlike when this cadence was
+/// first chosen — is now confirmed reliably delivered on real hardware
+/// (`tili-daemon` has a real `NSApplication`; see
+/// `workspace::register_on_main`'s doc comment). A missed launch/quit
+/// notification is now a rare-enough case that this backstop doesn't need
+/// 250ms responsiveness to still feel "close to instant" in practice —
+/// matches `FULL_RESYNC_DEBOUNCE`'s existing cadence rather than inventing
+/// a third interval. `pid_is_dead`'s own check inside `resync_watchers`
+/// (guarding against `NSWorkspace.runningApplications()` itself
+/// transiently omitting a still-running pid, a separate concern from the
+/// notification) is covered by this same slower cadence for the same
+/// reason — that's also a rare case, not the common path.
+///
+/// Deliberately *doesn't* also re-signal `WindowsChanged` for every
+/// on-screen pid every time this runs (an earlier version did on every
+/// `RESYNC_INTERVAL` tick): each one triggers `apply_windows_changed`,
+/// which unconditionally relays out the active workspace at the end
+/// regardless of whether anything for that pid actually changed — with
+/// several on-screen apps, firing all of them back-to-back caused a
+/// visible relayout stutter for no reason. See
+/// `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` for that much rarer
+/// sweep.
+const WATCHER_RESYNC_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How much a genuine `AppEvent` (app launch/terminate) pushes back the next
 /// expensive full-window resync (see `FULL_RESYNC_MAX_INTERVAL`) — real
@@ -81,14 +95,14 @@ const FULL_RESYNC_DEBOUNCE: Duration = Duration::from_secs(2);
 /// `WindowsChanged` for every on-screen pid — a rare safety net for a
 /// missed `AXObserver` window-level notification, which empirically fires
 /// reliably in the common case, unlike the app-level launch/terminate
-/// notifications `RESYNC_INTERVAL` itself guards against) can be deferred.
-/// Every genuine `AppEvent` pushes the deadline forward by
+/// notifications `WATCHER_RESYNC_INTERVAL` itself guards against) can be
+/// deferred. Every genuine `AppEvent` pushes the deadline forward by
 /// `FULL_RESYNC_DEBOUNCE`, but this cap guarantees a sweep still happens on
 /// an otherwise-quiet system rather than deferring forever.
 /// `apply_windows_changed` diffs against its cache and is a no-op if
 /// nothing actually changed, but its unconditional relayout at the end
 /// still costs a real pass over the active workspace, hence keeping this
-/// infrequent rather than running it every `RESYNC_INTERVAL` tick.
+/// infrequent rather than running it every `WATCHER_RESYNC_INTERVAL` cycle.
 const FULL_RESYNC_MAX_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Something the daemon should react to. `WindowsChanged` is deliberately
@@ -116,9 +130,10 @@ pub enum WmEvent {
         pid: i32,
     },
     /// The system-wide frontmost application changed to a *different* pid —
-    /// checked on the same `RESYNC_INTERVAL` tick as `resync_watchers`
-    /// (`workspace::frontmost_app_pid`, a direct AX query, not a
-    /// notification). This is the only signal that catches Cmd-Tab or a
+    /// checked on every `RESYNC_INTERVAL` tick (`workspace::frontmost_app_pid`,
+    /// a direct AX query, not a notification) independently of
+    /// `resync_watchers`, which now only runs every `WATCHER_RESYNC_INTERVAL`.
+    /// This is the only signal that catches Cmd-Tab or a
     /// Mission Control/Control Center click switching to an app whose
     /// window lives in a currently-parked workspace — neither
     /// `NSWorkspaceDidActivateApplicationNotification` (dead for this
@@ -170,10 +185,11 @@ pub fn spawn_event_watcher(
     // in `onscreen_owner_pids` as the owner of some overlay windows but will
     // never support an AX subscription). Without this, `resync_watchers`
     // would retry — and log a failure for — the exact same permanently
-    // unwatchable pid on every single `RESYNC_INTERVAL` tick forever,
-    // wasting AX calls and flooding the log. Cleared when the pid actually
-    // disappears (see the `retain` below and `AppEvent::Terminated`), so a
-    // *new* process reusing the same pid gets a fresh attempt.
+    // unwatchable pid on every single `WATCHER_RESYNC_INTERVAL` cycle
+    // forever, wasting AX calls and flooding the log. Cleared when the pid
+    // actually disappears (see the `retain` below and
+    // `AppEvent::Terminated`), so a *new* process reusing the same pid gets
+    // a fresh attempt.
     let mut unwatchable: HashSet<i32> = HashSet::new();
     seed_watchers(&rt, &event_tx, &mut watched, &mut unwatchable);
 
@@ -204,6 +220,11 @@ pub fn spawn_event_watcher(
         // to whatever (possibly now-empty) workspace that pid's window
         // belongs to and undoing a manual switch to an empty workspace.
         let mut last_frontmost_pid: Option<i32> = None;
+        // Separate from `last_full_resync` above: this one gates
+        // `resync_watchers` itself (attach/detach watchers), which now runs
+        // on its own `WATCHER_RESYNC_INTERVAL` cadence rather than every
+        // tick — see that constant's doc comment.
+        let mut last_watcher_resync = Instant::now();
         loop {
             let recv_result = app_rx.recv_timeout(RESYNC_INTERVAL);
             match recv_result {
@@ -244,13 +265,25 @@ pub fn spawn_event_watcher(
                         last_full_resync = now;
                         debounce_deadline = None;
                     }
-                    resync_watchers(
-                        &rt,
-                        &event_tx,
-                        &mut watched,
-                        &mut unwatchable,
-                        full_window_resync,
-                    );
+
+                    let watcher_resync_due =
+                        now.duration_since(last_watcher_resync) >= WATCHER_RESYNC_INTERVAL;
+                    // `|| full_window_resync`: that path needs a fresh
+                    // `resync_watchers` pass regardless of this cadence —
+                    // in practice it's never actually earlier than
+                    // `WATCHER_RESYNC_INTERVAL` (both `FULL_RESYNC_DEBOUNCE`
+                    // and `FULL_RESYNC_MAX_INTERVAL` are >= it), but this
+                    // doesn't rely on that coincidence to stay correct.
+                    if watcher_resync_due || full_window_resync {
+                        last_watcher_resync = now;
+                        resync_watchers(
+                            &rt,
+                            &event_tx,
+                            &mut watched,
+                            &mut unwatchable,
+                            full_window_resync,
+                        );
+                    }
 
                     if let Some(pid) = workspace::frontmost_app_pid() {
                         if last_frontmost_pid != Some(pid) {
@@ -303,12 +336,13 @@ fn seed_watchers(
     }
 }
 
-/// Correctness backstop — see `RESYNC_INTERVAL`'s doc comment. Watches any
-/// pid that should be watched but isn't yet (a missed/never-fired launch
-/// notification), and drops watchers for pids that are no longer running
-/// (a missed termination notification). Only re-signals `WindowsChanged`
-/// for every *already-watched* on-screen pid — the rarer safety net for a
-/// missed window-level notification — when `full_window_resync` is set; see
+/// Correctness backstop — see `WATCHER_RESYNC_INTERVAL`'s doc comment.
+/// Watches any pid that should be watched but isn't yet (a missed/never-
+/// fired launch notification), and drops watchers for pids that are no
+/// longer running (a missed termination notification). Only re-signals
+/// `WindowsChanged` for every *already-watched* on-screen pid — the rarer
+/// safety net for a missed window-level notification — when
+/// `full_window_resync` is set; see
 /// `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL`.
 ///
 /// A pid newly discovered *by this function* (as opposed to via the
@@ -316,11 +350,12 @@ fn seed_watchers(
 /// `WindowsChanged` itself) always gets an immediate `WindowsChanged` the
 /// moment its watcher is attached, regardless of `full_window_resync` —
 /// mirrors `seed_watchers`. Without this, a missed launch notification
-/// still got a watcher attached promptly (within one `RESYNC_INTERVAL`
-/// tick) but its already-existing window(s) sat untiled until the next
-/// full resync — up to `FULL_RESYNC_MAX_INTERVAL` later — since attaching
-/// a watcher only catches *future* per-window notifications, not windows
-/// that already existed before the subscription began.
+/// still got a watcher attached promptly (within one
+/// `WATCHER_RESYNC_INTERVAL` cycle) but its already-existing window(s) sat
+/// untiled until the next full resync — up to `FULL_RESYNC_MAX_INTERVAL`
+/// later — since attaching a watcher only catches *future* per-window
+/// notifications, not windows that already existed before the subscription
+/// began.
 ///
 /// `unwatchable` skips re-attempting a subscription for a pid that already
 /// failed once (see its doc comment at the call site) — otherwise a

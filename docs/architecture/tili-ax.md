@@ -147,22 +147,27 @@ sleep/wake cycles, after the `NSApplication` restructuring landed,
 confirmed the notification is delivered reliably again on its own — see
 [invariants.md](invariants.md)'s polling-exceptions section.
 
-The 250ms reconciliation tick (`resync_watchers`) also drives two fixes
-added in 0.1.1:
+The 250ms tick tracks `workspace::frontmost_app_pid()` on every firing,
+emitting `WmEvent::FrontmostAppChanged { pid }` on an edge-triggered change
+— the only signal that catches Cmd-Tab or a Mission Control/Control Center
+click switching to an app whose window lives in a parked workspace, since
+neither `NSWorkspaceDidActivateApplicationNotification` (dead for this
+process, see the focus-sync section in [tili-daemon.md](tili-daemon.md))
+nor per-window `WindowFocused` reacts to a pure OS-level frontmost change.
+Kept at 250ms since this needs to feel close to instant.
 
-- it cross-checks each watched pid's kernel-level liveness via
-  `libc::kill(pid, 0)` (independent of `NSWorkspace`, which the primary
-  termination notification and this tick's own pre-existing backstop both
-  already depend on — closing a gap where both could go stale together for
-  a backgrounded, windowless pre-existing app);
-- it tracks `workspace::frontmost_app_pid()` across ticks, emitting
-  `WmEvent::FrontmostAppChanged { pid }` on an edge-triggered change — the
-  only signal that catches Cmd-Tab or a Mission Control/Control Center
-  click switching to an app whose window lives in a parked workspace, since
-  neither `NSWorkspaceDidActivateApplicationNotification` (dead for this
-  process, see the focus-sync section in [tili-daemon.md](tili-daemon.md))
-  nor per-window `WindowFocused` reacts to a pure OS-level frontmost
-  change.
+`resync_watchers` — attach/detach watchers for the current pid set — used
+to run on that same 250ms cadence too, back when `NSWorkspace` launch/
+terminate notifications were also unreliable; it now runs on its own,
+separate `WATCHER_RESYNC_INTERVAL` (2s), since those notifications are
+confirmed reliably delivered (`tili-daemon` has a real `NSApplication`) and
+this is now a rare-miss backstop rather than the primary detection path —
+see that constant's doc comment. It drives one fix added in 0.1.1: it
+cross-checks each watched pid's kernel-level liveness via `libc::kill(pid,
+0)` (independent of `NSWorkspace`, which the primary termination
+notification and this backstop both already depend on — closing a gap
+where both could go stale together for a backgrounded, windowless
+pre-existing app).
 
 `resync_watchers`' `unwatchable` set caches a pid whose AX subscription
 already failed once (a system compositor process like WindowServer or Dock,
