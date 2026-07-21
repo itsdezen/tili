@@ -12,3 +12,11 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex = "1.13.0"
+# Same version pins as tili-ax/tili-menubar so Cargo resolves one shared
+# dependency tree, not two — needed for a real NSApplication instance (see
+# main.rs), not just AX/window calls (which stay in tili-ax).
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSResponder",
+] }

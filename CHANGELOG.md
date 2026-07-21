@@ -8,6 +8,89 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Changed
+
+- **`tili-daemon` now creates a real `NSApplication` instance and gives it
+  the actual process main thread** (`main.rs`'s `fn main()`, no longer
+  `#[tokio::main]` — the whole prior daemon body moved to `async_daemon_main`
+  on a background thread with its own Tokio runtime), matching
+  `tili-menubar`'s existing pattern. Root-cause fix for
+  `NSWorkspaceDidLaunchApplicationNotification`/`DidWakeNotification` being
+  silently undelivered to this process (see the `Fixed` entries below) —
+  confirmed on real hardware, across multiple independent code comments
+  already in this codebase, that several notification-delivery gaps
+  (`DidActivateApplication`, and now confirmed `DidLaunchApplication`/
+  `DidWakeNotification` too) all traced to `tili-daemon` never having a real
+  `NSApplication`. `NSWorkspace` registration moved from its own dedicated
+  background `CFRunLoopRun()` thread to the real main thread with
+  `queue: .main` delivery (`tili_ax::register_on_main`). **Confirmed fixed
+  on real hardware**, across several repeated real sleep/wake cycles and
+  app launch/quit cycles: both notifications are now reliably delivered.
+
+### Fixed
+
+- **`NSWorkspaceDidWakeNotification` could silently never reach the daemon
+  for an entire real sleep/wake cycle**, confirmed on real hardware with a
+  process that stayed alive (same pid) throughout and still never received
+  it — meaning `note_system_wake` and everything gated on it (below, and in
+  v0.1.18) never ran at all, not just too late. Fixed by the `NSApplication`
+  restructuring above. A temporary `SystemTime`-based wall-clock-gap
+  backstop (`SLEEP_GAP_THRESHOLD`) was added and tested while diagnosing
+  this, then removed once the restructuring was confirmed on real hardware,
+  across several repeated sleep/wake cycles, to make the notification
+  reliably delivered on its own.
+- **`place_new_window`'s `workspace-rules` auto-switch had no wake-grace
+  guard at all** — only a log line noting whether wake grace was active,
+  never actually skipping the switch. Confirmed on real hardware after the
+  `NSApplication` restructuring above: a real sleep/wake cycle (including a
+  multi-stage one — a dark-wake followed by a real wake, both triggering
+  `note_system_wake`) could still finalize a still-open window as closed
+  *before* wake grace activated, then rediscover it moments *after* wake
+  grace was active — which reached this switch, not `reveal_frontmost`'s
+  (already guarded), producing a visible flicker to the wrong workspace and
+  back rather than getting stuck there. `place_new_window` now skips the
+  switch (still placing the window into its target workspace, just parked)
+  whenever `wake_grace_until` is active, mirroring the guard
+  `reveal_frontmost` already had.
+- **A still-open app's windows could get force-purged and rediscovered as
+  brand new, re-triggering `workspace-rules` and yanking the active
+  workspace — with none of the wake-grace protection below, since this path
+  bypassed it entirely.** `resync_watchers`' `watched.retain` sent a
+  synthetic `WmEvent::AppTerminated` (which routes to `WmState::remove_app`,
+  an immediate, ungraced purge of every window tracked for that pid) for any
+  pid that dropped out of `current` for even one 250ms tick — but `current`
+  is partly sourced from `NSWorkspace.runningApplications()`, which real
+  hardware confirmed can transiently omit a still-genuinely-running app's
+  pid, most readily right after waking from sleep while the WindowServer/AX
+  subsystem is still settling. `watched.retain` now only sends
+  `AppTerminated` when the pid is confirmed dead via a kernel-level
+  liveness check; a pid that's merely off `current` this tick just loses
+  its subscription (silently re-attached once it's back), matching the
+  same fix already applied to the `unwatchable` cache below.
+- **Waking from sleep could still, up to roughly a minute later, silently
+  switch away from whichever workspace was active before sleep** — the part
+  of this bug v0.1.18's wake-grace fix didn't cover, plus its grace window
+  was confirmed too short on real hardware. `frontmost_app_pid()` (a
+  synchronous `AXFocusedApplication` query, polled every 250ms) can itself
+  transiently misread which app is frontmost while the WindowServer/AX
+  subsystem is still reconnecting after wake; that misread pid still owned
+  live windows, so it wasn't caught by `reveal_frontmost`'s existing
+  "previous app has zero windows left" suppression, and once its assigned
+  workspace wasn't the one visible, `reveal_frontmost` force-switched to it.
+  `reveal_frontmost` now also distrusts a `frontmost_app_pid()` read for the
+  same wake-grace window `note_system_wake` already established for the
+  removal-grace boost. Separately, `WAKE_REMOVAL_GRACE` was raised from 8s
+  to 90s: `NSWorkspaceDidWakeNotification` fires at the hardware wake
+  itself, which can precede the user actually finishing unlock by close to a
+  minute, and apps don't meaningfully resume reconnecting until after that.
+- **A system compositor process (WindowServer, Dock) could get retried and
+  logged as a failed AX subscription on every single resync tick, forever**,
+  flooding the daemon's log. `resync_watchers`' `unwatchable` cache was
+  evicting a pid whenever it momentarily stopped owning any on-screen
+  window that tick — which a compositor process's menu bar/cursor-layer
+  windows do routinely — instead of only when the pid actually exits,
+  defeating the cache's whole purpose.
+
 ## [0.1.18] - 2026-07-20
 
 ### Fixed

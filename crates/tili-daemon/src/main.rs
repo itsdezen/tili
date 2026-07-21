@@ -6,6 +6,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use dispatch::dispatch;
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use state::WmState;
 use tili_ax::WmEvent;
 use tili_ipc::{Command, Response};
@@ -35,16 +37,62 @@ const REVEAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(10
 /// TCC entry; see `reset_accessibility_tcc`.
 const ACCESSIBILITY_BUNDLE_ID: &str = "com.tili.daemon";
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+/// The real process entry point — deliberately not `#[tokio::main]`. A real
+/// `NSApplication` instance needs its `run()` to own the actual OS process
+/// main thread (the way `tili-menubar/src/main.rs` already does) for
+/// `NSWorkspace` notifications to be delivered reliably: confirmed on real
+/// hardware that `NSWorkspaceDidLaunchApplicationNotification`/
+/// `DidWakeNotification` were never delivered to this process when it had
+/// no `NSApplication` at all and Tokio's `block_on` occupied the main
+/// thread instead (see `tili_ax::workspace::register_on_main`'s doc comment
+/// for the full history). So the whole existing async daemon body moves to
+/// `async_daemon_main`, run on a background thread with its own Tokio
+/// runtime, while this real `fn main()` sets up `NSApplication` and parks
+/// the actual main thread in `app.run()`.
+///
+/// Every exit path of `async_daemon_main` must reach `std::process::exit`
+/// below — unlike before, simply returning from it no longer ends the
+/// process, since `app.run()` on the main thread never returns on its own.
+/// Without this, the background thread would end quietly while `app.run()`
+/// stayed parked forever: a zombie process that answers no commands and
+/// never disappears from `ps`.
+fn main() {
     // IOHIDRequestAccess (Input Monitoring) must run before anything calls
     // into Accessibility's AXIsProcessTrustedWithOptions in this process's
     // lifetime — rdar://7381305: once Accessibility's check has run once,
     // Input Monitoring's prompt silently stops appearing for a first-time
-    // grant. Don't reorder this below ensure_accessibility_permission(),
-    // and don't add any AX call before it.
+    // grant. Kept as the literal first statement of the real process (not
+    // just of `async_daemon_main`'s body) so this ordering guarantee holds
+    // unconditionally, rather than trusting that `NSApplication` setup
+    // below makes no AX call of its own.
     tili_ax::request_input_monitoring_permission();
 
+    let mtm =
+        MainThreadMarker::new().expect("tili-daemon must start on the real process main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    // No Dock icon, no app-switcher entry — matches tili-daemon's own
+    // Info.plist LSUIElement marking and tili-menubar's identical policy.
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+    // Must happen here, on the real main thread, before `app.run()` starts
+    // pumping it — see `register_on_main`'s doc comment.
+    let app_event_rx = tili_ax::register_on_main(mtm);
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("failed to build tokio runtime");
+        let result = rt.block_on(async_daemon_main(app_event_rx));
+        if let Err(e) = &result {
+            eprintln!("tili-daemon: fatal error: {e}");
+        }
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    });
+
+    app.run(); // never returns — parks the real main thread in Cocoa's event loop
+}
+
+async fn async_daemon_main(
+    app_event_rx: std::sync::mpsc::Receiver<tili_ax::AppEvent>,
+) -> std::io::Result<()> {
     let listener = socket::bind()?;
     println!(
         "tili-daemon: listening on {}",
@@ -89,7 +137,7 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
-    let mut events = tili_ax::spawn_event_watcher();
+    let mut events = tili_ax::spawn_event_watcher(app_event_rx);
     let mut config_updates = spawn_config_reload_bridge();
     let active_combos = Arc::new(Mutex::new(HashSet::new()));
     let mut hotkeys = spawn_hotkey_bridge(active_combos.clone());
@@ -488,12 +536,14 @@ fn handle_event(
             pending_pids.insert(pid);
         }
         WmEvent::AppTerminated { pid } => {
+            eprintln!("tili-daemon: NSWorkspace AppTerminated pid={pid}");
             // The process is gone — no point rescanning a pid that was
             // merely queued for one.
             pending_pids.remove(&pid);
             state.remove_app(pid);
         }
         WmEvent::AppLaunched { pid, .. } => {
+            eprintln!("tili-daemon: NSWorkspace AppLaunched pid={pid}");
             // The watcher always follows this with a `WindowsChanged` for
             // the same pid once it has windows to report — this just marks
             // `pid` in `pending_launch_pids` in the meantime, so
@@ -503,6 +553,7 @@ fn handle_event(
             state.note_app_launched(pid);
         }
         WmEvent::SystemDidWake => {
+            eprintln!("tili-daemon: NSWorkspace SystemDidWake received");
             state.note_system_wake();
         }
         WmEvent::WindowFocused { .. } => {

@@ -25,15 +25,26 @@ Four sanctioned, narrowly-scoped exceptions:
    debounced-since-quiet full-window resync capped at 20s
    (`FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL`) — since `NSWorkspace`
    launch/terminate notifications and `AXObserver` window-level
-   notifications have both been observed to occasionally never fire.
+   notifications have both been observed to occasionally never fire. An
+   earlier version of this tick also carried a `SLEEP_GAP_THRESHOLD`
+   wall-clock-gap wake-detection backstop, added while
+   `NSWorkspaceDidWakeNotification` was confirmed undelivered to a
+   `tili-daemon` with no `NSApplication`; removed once `main.rs`'s
+   `NSApplication` restructuring (see `tili-daemon.md`/`tili-ax.md`'s
+   `workspace.rs` section) was confirmed on real hardware, across several
+   repeated sleep/wake cycles, to make that notification reliably delivered
+   again without it.
 3. **`tili-ax/src/display.rs`'s `spawn_display_watcher`**, which bounds its
    `CFRunLoopRun` into `RESOLUTION_POLL_INTERVAL` (1s) chunks and re-diffs
    `list_monitors()` after every wake — confirmed on real hardware
    (temporary debug logging, since removed) that
    `CGDisplayRegisterReconfigurationCallback` reliably fires for
    hot-plug/unplug and sleep/wake but never fires at all for a
-   resolution-only change (same monitor id, no add/remove) in this process,
-   which has no `NSApplication`/UI-session-activation context by design.
+   resolution-only change (same monitor id, no add/remove) in this process —
+   at the time, attributed to no `NSApplication`/UI-session-activation
+   context. Now that `tili-daemon` has a real `NSApplication` (see
+   exception 2 above), whether this also becomes unnecessary hasn't been
+   separately tested — left in place, not removed opportunistically.
 4. **`tili-daemon/src/main.rs`'s `maintenance_tick`**, an unconditional
    30ms `tokio::time::interval` branch of the main `select!` loop. Unlike
    the other three, this isn't a fallback for a notification that sometimes

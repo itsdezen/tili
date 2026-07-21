@@ -505,16 +505,38 @@ hotkey `select!` arms check for it and `break` the loop directly instead of
 routing it through `dispatch()` (which would have nowhere to signal "please
 exit the process" from).
 
-## main.rs — the event loop
+## main.rs — process structure and the event loop
 
-One `tokio::select!` loop merging socket accepts,
-`tili_ax::spawn_event_watcher()`'s channel, the config-reload bridge, the
-hotkey-tap bridge, the display-watcher bridge (M9), and the mouse-watcher
-bridge (M10) — no locks around `WmState` itself, because only one branch of
-the loop ever touches it at a time; `sync_active_combos` is called after
-every branch that could change the active mode/bindings, to keep the hotkey
-tap's `Mutex<HashSet<KeyCombo>>` from drifting out of sync with what
-`WmState` actually has bound.
+The real process entry point, `fn main()`, is deliberately *not*
+`#[tokio::main]`. It sets up a real `NSApplication` (matching
+`tili-menubar`'s identical pattern), registers `NSWorkspace` notifications
+on the real main thread via `tili_ax::register_on_main` (see
+[tili-ax.md](tili-ax.md) — this exists because that registration reliably
+delivers `NSWorkspaceDidLaunchApplicationNotification`/`DidWakeNotification`
+only when a real `NSApplication.run()` is pumping the main run loop that
+receives it, confirmed on real hardware after those notifications were
+silently never delivered to an `NSApplication`-less process), then spawns a
+background thread that builds its own `tokio::runtime::Runtime` and
+`block_on`s `async_daemon_main` — the whole daemon body that used to be
+`main()` itself, essentially unchanged otherwise. The real main thread then
+parks in `app.run()`, which never returns.
+
+Because `app.run()` never returns on its own, `async_daemon_main` returning
+no longer ends the process the way it used to when it *was* `main()` —
+every exit path (the accessibility-not-granted early return, and the
+`Command::Shutdown` `break`) must reach the `std::process::exit` call after
+`block_on` returns in `fn main()`, or the process would become a zombie:
+background thread gone, `app.run()` still parked, answering nothing.
+
+One `tokio::select!` loop inside `async_daemon_main` merges socket accepts,
+`tili_ax::spawn_event_watcher()`'s channel (fed by the main-thread-registered
+`NSWorkspace` receiver, passed in as a parameter), the config-reload bridge,
+the hotkey-tap bridge, the display-watcher bridge (M9), and the
+mouse-watcher bridge (M10) — no locks around `WmState` itself, because only
+one branch of the loop ever touches it at a time; `sync_active_combos` is
+called after every branch that could change the active mode/bindings, to
+keep the hotkey tap's `Mutex<HashSet<KeyCombo>>` from drifting out of sync
+with what `WmState` actually has bound.
 
 `ensure_starter_config_exists` (M10) writes `example/tili.kdl` (via
 `include_str!`) to `~/.config/tili/tili.kdl` before the first
@@ -525,18 +547,47 @@ just falls back to `Config::default()` like before M10.
 of the main `select!` loop — see [invariants.md](invariants.md)'s
 polling-exceptions section for why it exists and what it costs.
 
-`WmEvent::SystemDidWake` (from `NSWorkspaceDidWakeNotification`, bridged via
-`tili-ax`'s workspace watcher — see [tili-ax.md](tili-ax.md)) calls
-`WmState::note_system_wake`, which boosts `finalize_expired_removals`'s
-effective grace period from `REMOVAL_GRACE_PERIOD` (100ms) to
-`WAKE_REMOVAL_GRACE` (8s) for the following 8 seconds. Without this, a still
--open window whose owning app simply hasn't reconnected to the WindowServer/
-AX yet after wake (observed to take several seconds, far longer than
-100ms — apps don't all reconnect at once) missed a scan, got
-`finalize_expired_removals`'d as closed, then reappeared on the next scan
-and was treated as a brand-new window — re-triggering any matching
-`workspace-rules` entry and yanking the active workspace out from under
-whatever the user was looking at right before sleep, a few seconds after
-waking. `REMOVAL_GRACE_PERIOD` itself stays at 100ms for the ordinary case
-(a genuinely-closed window should disappear promptly, not linger up to 8s);
-the boost only applies in the bounded window right after a real wake.
+`WmEvent::SystemDidWake` (from `NSWorkspaceDidWakeNotification`, registered
+via `tili_ax::register_on_main` — see [tili-ax.md](tili-ax.md), confirmed on
+real hardware across several repeated sleep/wake cycles to be reliably
+delivered now that `tili-daemon` has a real `NSApplication`) calls
+`WmState::note_system_wake`, which for the following `WAKE_REMOVAL_GRACE`
+(90s) does two things:
+
+- Boosts `finalize_expired_removals`'s effective grace period from
+  `REMOVAL_GRACE_PERIOD` (100ms) to `WAKE_REMOVAL_GRACE`. Without this, a
+  still-open window whose owning app simply hasn't reconnected to the
+  WindowServer/AX yet after wake (observed to take several seconds, far
+  longer than 100ms — apps don't all reconnect at once) missed a scan, got
+  `finalize_expired_removals`'d as closed, then reappeared on the next scan
+  and was treated as a brand-new window — re-triggering any matching
+  `workspace-rules` entry and yanking the active workspace out from under
+  whatever the user was looking at right before sleep.
+- Makes `reveal_frontmost` distrust the `frontmost_app_pid()` read it's
+  given — that function is a synchronous `AXFocusedApplication` query, and
+  it too can transiently misread which app is frontmost while AX/WindowServer
+  is still reconnecting post-wake. A misread pid still owns live windows (so
+  `reveal_frontmost`'s "previous app has zero windows left" suppression
+  doesn't catch it), so left unguarded it looks exactly like a genuine
+  Cmd-Tab and force-switches the active workspace to that pid's workspace.
+
+Both failure modes produce the same user-visible symptom — the active
+workspace silently jumping away sometime after waking — just through
+different call paths, so both are gated on the same `wake_grace_until`
+window rather than two separate timers. `REMOVAL_GRACE_PERIOD` itself stays
+at 100ms for the ordinary case (a genuinely-closed window should disappear
+promptly, not linger up to 90s); both boosts only apply in the bounded
+window right after a real wake, so a genuine post-wake app switch or window
+close isn't permanently ignored. `WAKE_REMOVAL_GRACE` was raised from an
+initial 8s to 90s after real-hardware confirmation that 8s was still too
+short — `NSWorkspaceDidWakeNotification` fires at the hardware wake itself,
+which can precede the user finishing unlock (password/Touch ID) by close to
+a minute, and apps don't meaningfully resume reconnecting to the
+WindowServer/AX until after that, not from the wake instant.
+
+`note_system_wake`, `finalize_expired_removals` (when it actually finalizes
+something), and both `switch_workspace` auto-trigger call sites
+(`place_new_window`, `reveal_frontmost`) each log a line via `eprintln!` —
+this class of bug has recurred across several releases and only reproduces
+on real hardware after a real sleep/wake cycle, so a log trail of which path
+fired and when is worth more than trying to reason about it statically.

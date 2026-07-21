@@ -41,17 +41,27 @@ const FLOAT_DRIFT_EPSILON: f64 = 0.5;
 /// instead of sleeping for real.
 const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
-/// How long `removal_grace` is boosted to after `WmEvent::SystemDidWake`
+/// How long `removal_grace` is boosted to, and how long `reveal_frontmost`
+/// distrusts a `frontmost_app_pid()` read, after `WmEvent::SystemDidWake`
 /// fires — real hardware has shown an app's AX/WindowServer connection can
-/// take several seconds to come back after wake, far longer than
-/// `REMOVAL_GRACE_PERIOD` tolerates. Without this, a still-open window that
-/// simply hasn't reconnected yet gets `finalize_expired_removals`'d as
-/// "closed," then reappears on the next scan and gets treated as brand new
-/// — re-triggering any `workspace-rules` match and yanking the active
-/// workspace out from under whatever the user was looking at before sleep.
-/// Bounded (not indefinite) so a window that's genuinely closed during this
-/// window is still eventually cleaned up.
-const WAKE_REMOVAL_GRACE: Duration = Duration::from_secs(8);
+/// take far longer to come back after wake than `REMOVAL_GRACE_PERIOD`
+/// tolerates. An earlier, shorter value (8s) was confirmed on real hardware
+/// to still be too short: `NSWorkspaceDidWakeNotification` fires at the
+/// hardware wake itself, which can precede the user actually finishing
+/// unlock (password/Touch ID) by up to roughly a minute — apps effectively
+/// don't resume reconnecting to the WindowServer/AX until after that, not
+/// from the wake instant. `frontmost_app_pid()` itself can also transiently
+/// misread which app is frontmost during that same window. Without the
+/// removal-grace boost, a still-open window that simply hasn't reconnected
+/// yet gets `finalize_expired_removals`'d as "closed," then reappears on the
+/// next scan and gets treated as brand new — re-triggering any
+/// `workspace-rules` match. Without the `reveal_frontmost` distrust, a
+/// misread pid can look like a genuine app switch and force one instead.
+/// Both yank the active workspace out from under whatever the user was
+/// looking at before sleep. Bounded (not indefinite) so a window that's
+/// genuinely closed during this window is still eventually cleaned up, and
+/// so a real post-wake app switch isn't permanently ignored.
+const WAKE_REMOVAL_GRACE: Duration = Duration::from_secs(90);
 
 /// How long a pid stays in `WmState::pending_launch_pids` after
 /// `AppLaunched` before being dropped even without ever getting a window —
@@ -609,6 +619,15 @@ impl WmState {
         if expired.is_empty() {
             return;
         }
+        for id in &expired {
+            if let Some(&since) = self.pending_removal.get(id) {
+                eprintln!(
+                    "tili-daemon: finalizing window {id} as closed after {:?} pending (grace={grace:?}, wake_grace_active={})",
+                    now.duration_since(since),
+                    self.wake_grace_until.is_some_and(|until| now < until)
+                );
+            }
+        }
         for id in expired {
             self.pending_removal.remove(&id);
             self.windows.remove(&id);
@@ -635,9 +654,11 @@ impl WmState {
     /// effective grace period to `WAKE_REMOVAL_GRACE` for the next
     /// `WAKE_REMOVAL_GRACE` seconds, so a window whose owning app hasn't
     /// reconnected to the WindowServer/AX yet doesn't get finalized as
-    /// closed and then re-placed as brand new (see `WAKE_REMOVAL_GRACE`'s
-    /// doc comment).
+    /// closed and then re-placed as brand new, and makes `reveal_frontmost`
+    /// distrust `frontmost_app_pid()` reads for that same window (see
+    /// `WAKE_REMOVAL_GRACE`'s doc comment).
     pub fn note_system_wake(&mut self) {
+        eprintln!("tili-daemon: system woke, granting {WAKE_REMOVAL_GRACE:?} wake grace");
         self.wake_grace_until = Some(Instant::now() + WAKE_REMOVAL_GRACE);
     }
 
@@ -827,7 +848,18 @@ impl WmState {
     /// focused monitor. If `target_workspace` isn't active on the focused
     /// monitor, the focused monitor switches to it immediately (via
     /// `switch_workspace`, same as `move_focused_to_workspace`) so a window
-    /// auto-placed by a `workspace-rules` match is never left off-screen.
+    /// auto-placed by a `workspace-rules` match is never left off-screen —
+    /// unless `wake_grace_until` is still active, in which case the window
+    /// still gets placed into `target_workspace` (parked, not shown) but the
+    /// switch itself is skipped. Confirmed on real hardware: a window whose
+    /// app hasn't reconnected to the WindowServer/AX yet after a real wake
+    /// can get wrongly finalized as closed (see `WAKE_REMOVAL_GRACE`) and
+    /// then rediscovered moments later — `is_new` from this function's
+    /// caller's perspective, but not from the user's — matching its
+    /// `workspace-rules` entry and switching away from whatever workspace
+    /// was showing before sleep with no real trigger. `reveal_frontmost`
+    /// already gets this same wake-grace guard for its own auto-switch
+    /// branch; this mirrors it for the `workspace-rules` one.
     /// Deliberately keyed only by `WindowId`/`PlacementKind`, no `AxWindow`
     /// — this is the seam that makes per-app-workspace placement
     /// unit-testable without a live `AXUIElement`, unlike
@@ -882,10 +914,23 @@ impl WmState {
         }
 
         if inactive {
-            // Can only fail on an undeclared workspace, which can't happen
-            // here — `target_workspace` was just inserted into
-            // `self.workspaces` above via `entry(...).or_default()`.
-            let _ = self.switch_workspace(target_workspace);
+            let in_wake_grace = self
+                .wake_grace_until
+                .is_some_and(|until| Instant::now() < until);
+            eprintln!(
+                "tili-daemon: {} workspace '{target_workspace}' for new window {id} (wake_grace_active={in_wake_grace})",
+                if in_wake_grace {
+                    "skipping auto-switch to"
+                } else {
+                    "auto-switching to"
+                }
+            );
+            if !in_wake_grace {
+                // Can only fail on an undeclared workspace, which can't
+                // happen here — `target_workspace` was just inserted into
+                // `self.workspaces` above via `entry(...).or_default()`.
+                let _ = self.switch_workspace(target_workspace);
+            }
         }
     }
 
@@ -1909,6 +1954,18 @@ impl WmState {
     /// comment and `pending_launch_pids`'s doc comment on `WmState` for the
     /// full mechanism.
     ///
+    /// Same branch also distrusts `pid` while `wake_grace_until` (see
+    /// `note_system_wake`) is still in effect — `frontmost_app_pid()` is a
+    /// synchronous `AXFocusedApplication` query, and right after a real wake
+    /// it can transiently report a different app than the one genuinely
+    /// frontmost while everyone's AX/WindowServer connection is still
+    /// reconnecting (the same underlying instability `WAKE_REMOVAL_GRACE`
+    /// exists for). Without this, that misread pid still owns live windows
+    /// (so `suppress` above doesn't catch it either) and can force-switch
+    /// the active workspace a few seconds after wake — the exact symptom
+    /// `note_system_wake` was introduced to fix, just through this path
+    /// instead of `finalize_expired_removals`.
+    ///
     /// `allow_unchanged_pid` controls whether the `None`/not-visible branch
     /// below is allowed to switch workspaces when `pid` is the *same* pid
     /// `last_frontmost_pid` already recorded (`pid_unchanged`). A Dock icon
@@ -2020,12 +2077,19 @@ impl WmState {
                 // chasing means nothing really changed since the last
                 // resolved-to-a-real-window pid, so there's nothing to
                 // reveal.
+                let in_wake_grace = self
+                    .wake_grace_until
+                    .is_some_and(|until| Instant::now() < until);
                 if (pid_unchanged && !allow_unchanged_pid)
                     || suppress
                     || !self.pending_launch_pids.is_empty()
+                    || in_wake_grace
                 {
                     return;
                 }
+                eprintln!(
+                    "tili-daemon: auto-switching to workspace '{workspace}' to reveal frontmost pid {pid} (previous_pid={previous_pid:?})"
+                );
                 if self.switch_workspace(&workspace).is_err() {
                     return;
                 }

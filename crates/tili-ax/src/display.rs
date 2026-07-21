@@ -220,25 +220,28 @@ unsafe extern "C" fn reconfiguration_callback(
 const RESOLUTION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Spawns a dedicated OS thread that registers a `CGDisplayRegisterReconfigurationCallback`
-/// and pumps a `CFRunLoop` on that thread for the process's lifetime — same
-/// pattern as `workspace::spawn_workspace_watcher`, since reconfiguration
-/// callbacks are delivered on whichever thread's run loop is running when
-/// they're registered. Each signal on the returned channel just means "call
-/// `list_monitors` again," not any specific change.
+/// and pumps a `CFRunLoop` on that thread for the process's lifetime, since
+/// reconfiguration callbacks are delivered on whichever thread's run loop is
+/// running when they're registered. Each signal on the returned channel just
+/// means "call `list_monitors` again," not any specific change.
 ///
 /// The callback alone isn't sufficient: confirmed on real hardware that
 /// `CGDisplayRegisterReconfigurationCallback` reliably fires for hot-plug/
 /// unplug and sleep/wake in this process, but never fires at all for a
-/// resolution-only change (no monitor added or removed) — `tili-daemon` has
-/// no `NSApplication`/UI-session-activation context (by design, see M9's own
-/// notes and the confirmed-dead `NSWorkspaceDidActivateApplicationNotification`
-/// case this mirrors), and pure mode-switch reconfiguration events appear to
-/// need that context to be delivered, unlike hot-plug/sleep-wake which don't.
-/// So this is the third sanctioned exception to the "no polling" invariant
-/// (see docs/architecture/invariants.md) — the run loop below is bounded
-/// to `RESOLUTION_POLL_INTERVAL` chunks instead of running forever
-/// unattended, and after every wake (whether from a real callback or a
-/// timeout) it diffs a fresh `list_monitors()` against the last snapshot,
+/// resolution-only change (no monitor added or removed) — attributed at the
+/// time to `tili-daemon` having no `NSApplication`/UI-session-activation
+/// context, the same explanation for `NSWorkspaceDidActivateApplicationNotification`
+/// (and, later, `DidLaunchApplication`/`DidWakeNotification`) never firing —
+/// see `main.rs`'s process setup and `workspace::register_on_main`'s doc
+/// comment, which gave `tili-daemon` a real `NSApplication` context to fix
+/// those. Whether that also fixes resolution-only reconfiguration delivery
+/// hasn't been separately re-verified — this polling fallback is left in
+/// place pending that, not removed opportunistically alongside an unrelated
+/// change. So this remains the third sanctioned exception to the "no
+/// polling" invariant (see docs/architecture/invariants.md) — the run loop
+/// below is bounded to `RESOLUTION_POLL_INTERVAL` chunks instead of running
+/// forever unattended, and after every wake (whether from a real callback or
+/// a timeout) it diffs a fresh `list_monitors()` against the last snapshot,
 /// only signaling the channel when something actually changed.
 pub fn spawn_display_watcher() -> std::sync::mpsc::Receiver<()> {
     let (tx, rx) = std::sync::mpsc::channel();

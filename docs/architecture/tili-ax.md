@@ -65,17 +65,23 @@ worth the risk for what M9 needs).
 
 `spawn_display_watcher()` registers a
 `CGDisplayRegisterReconfigurationCallback` on its own dedicated `CFRunLoop`
-thread (same reasoning as the NSWorkspace/AX watchers) and just signals
-"something changed, re-enumerate" per callback — it doesn't interpret
-`CGDisplayChangeSummaryFlags`. It also bounds its `CFRunLoopRun` into
-`RESOLUTION_POLL_INTERVAL` (1s) chunks and re-diffs `list_monitors()` after
-every wake — confirmed on real hardware (temporary debug logging, since
-removed) that `CGDisplayRegisterReconfigurationCallback` reliably fires for
-hot-plug/unplug and sleep/wake but never fires at all for a
-resolution-only change (same monitor id, no add/remove) in this process,
-which has no `NSApplication`/UI-session-activation context by design. This
-is one of the four sanctioned polling exceptions (see
-[invariants.md](invariants.md)).
+thread and just signals "something changed, re-enumerate" per callback — it
+doesn't interpret `CGDisplayChangeSummaryFlags`. It also bounds its
+`CFRunLoopRun` into `RESOLUTION_POLL_INTERVAL` (1s) chunks and re-diffs
+`list_monitors()` after every wake — confirmed on real hardware (temporary
+debug logging, since removed) that `CGDisplayRegisterReconfigurationCallback`
+reliably fires for hot-plug/unplug and sleep/wake but never fires at all for
+a resolution-only change (same monitor id, no add/remove) in this process —
+at the time, attributed to `tili-daemon` having no `NSApplication`/
+UI-session-activation context, the same explanation given for
+`NSWorkspaceDidActivateApplicationNotification` (and, later,
+`DidLaunchApplication`/`DidWakeNotification`) never firing (see
+`workspace.rs`'s section below). `main.rs` has since given `tili-daemon` a
+real `NSApplication` context to fix those; whether that also fixes
+resolution-only reconfiguration delivery hasn't been separately
+re-verified, so this remains one of the four sanctioned polling exceptions
+(see [invariants.md](invariants.md)) pending that check, not removed
+opportunistically alongside an unrelated change.
 
 ## workspace.rs — NSWorkspace bridge
 
@@ -83,14 +89,34 @@ Bridges `NSWorkspace` app-launch/quit notifications, plus
 `NSWorkspaceDidWakeNotification` (forwarded as `AppEvent::SystemDidWake` →
 `WmEvent::SystemDidWake` → `WmState::note_system_wake`, see
 [tili-daemon.md](tili-daemon.md) for what that does), via
-`objc2`/`objc2-app-kit` — note it spawns its own dedicated `CFRunLoop`
-thread, since a process without `NSApplication` needs *some* thread pumping
-a run loop to receive Cocoa notifications at all (same reason
-`axuielement`'s own `AXNotificationStream` does the same for AX
-notifications). Also has `bundle_id_for_pid` (M8, via
+`objc2`/`objc2-app-kit`. Also has `bundle_id_for_pid` (M8, via
 `NSRunningApplication`) — `enumerate.rs` resolves this once per process and
 shares it across all of that process's `AxWindow`s, rather than once per
 window, since it's used to match floating rules.
+
+`register_on_main(mtm: MainThreadMarker)` registers the three `NSWorkspace`
+observers directly on the real process main thread, with `queue: .main`
+delivery, and returns immediately — no thread spawned, no `CFRunLoop`
+pumped here. `tili-daemon/src/main.rs`'s real `fn main()` calls this after
+creating a real `NSApplication` and before calling `app.run()`, which is
+what actually pumps the main run loop that delivers these blocks
+afterward. Main-thread registration with `queue: .main` is load-bearing,
+not incidental: confirmed on real hardware that `DidLaunchApplication`/
+`DidWakeNotification` are not reliably delivered to a process with no
+`NSApplication` pumping its main run loop (only `DidTerminateApplication`
+was, evidently via some other delivery path) — registering from an
+arbitrary background thread with a bare `CFRunLoopRun()` and `queue: nil`
+(the pattern `display.rs`'s watcher and `axuielement`'s own
+`AXNotificationStream` both still use, and which still holds for AX
+notifications specifically) isn't sufficient for these two `NSWorkspace`
+notifications.
+
+`watch.rs::spawn_event_watcher` takes the `Receiver<AppEvent>` this
+function returns as a parameter now, rather than spawning its own
+registration — registration must happen on the main thread before the
+Tokio runtime (and `spawn_event_watcher`, which needs
+`tokio::runtime::Handle::current()`) even exists, so `tili-daemon/src/main.rs`
+does it first and passes the receiver down.
 
 ## watch.rs — event watcher and reconciliation tick
 
@@ -101,6 +127,18 @@ re-read that process's windows via `list_windows_for_pid` rather than
 trying to interpret individual notification payloads (this sidesteps having
 to reason about whether a specific `AXUIElement` is still valid to query at
 the exact moment its destroyed-notification fires).
+
+An earlier version of this loop also carried a `SystemTime`-based
+wall-clock-gap wake-detection backstop (`SLEEP_GAP_THRESHOLD`), added
+because real hardware confirmed `NSWorkspaceDidWakeNotification` could
+silently never reach the daemon for an entire sleep/wake cycle, even though
+the observing thread stayed alive throughout — `workspace.rs`'s
+`register_on_main` section above describes the fix for the underlying
+cause (giving `tili-daemon` a real `NSApplication`). That backstop has
+since been removed: real-hardware testing across several repeated
+sleep/wake cycles, after the `NSApplication` restructuring landed,
+confirmed the notification is delivered reliably again on its own — see
+[invariants.md](invariants.md)'s polling-exceptions section.
 
 The 250ms reconciliation tick (`resync_watchers`) also drives two fixes
 added in 0.1.1:
@@ -118,6 +156,38 @@ added in 0.1.1:
   process, see the focus-sync section in [tili-daemon.md](tili-daemon.md))
   nor per-window `WindowFocused` reacts to a pure OS-level frontmost
   change.
+
+`resync_watchers`' `unwatchable` set caches a pid whose AX subscription
+already failed once (a system compositor process like WindowServer or Dock,
+which owns on-screen windows — menu bar, cursor layer — but isn't a real
+AX-subscribable app), so it isn't retried and re-logged every tick forever.
+That cache is deliberately evicted only when the pid actually dies
+(`pid_is_dead`), not merely when it stops appearing in the current
+on-screen-owner set — a compositor process's on-screen ownership flickers
+tick to tick, and gating eviction on it (as an earlier version did) meant
+the pid fell out of the cache, got retried, failed, and got re-inserted on
+every single flicker, flooding the log with the same subscription failure
+indefinitely.
+
+`watched.retain` mirrors that same liveness-first ordering, for a sharper
+reason than log noise: it used to send a synthetic `WmEvent::AppTerminated`
+for any pid that dropped out of `current` for even one tick, and that event
+routes to `WmState::remove_app` — an *immediate*, ungraced purge of every
+window the daemon still has for that pid, with none of the `pending_removal`/
+`removal_grace` (or wake-boosted `WAKE_REMOVAL_GRACE`) protection a real
+window close goes through. `current` is partly sourced from
+`NSWorkspace.runningApplications()`, and real hardware confirmed that list
+can transiently omit a still-genuinely-running app's pid — most readily
+right after waking from sleep, while the WindowServer/AX subsystem is still
+settling — which force-purged that app's still-open windows and had them
+rediscovered moments later as brand new, re-triggering any matching
+`workspace-rules` entry with no grace period able to stop it (see the wake
+section in [tili-daemon.md](tili-daemon.md) — this bug produced the same
+"workspace silently changes after wake" symptom as the two fixes documented
+there, just through a path neither one touched). `watched.retain` now only
+sends `AppTerminated` on a confirmed-dead pid; one that's merely off
+`current` this tick just loses its AXNotificationStream subscription
+(silently re-attached once it reappears), never triggering `remove_app`.
 
 ## hotkey.rs — global hotkey capture (M6)
 

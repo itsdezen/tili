@@ -20,7 +20,7 @@ pub use hotkey::{
 pub use mouse::{MouseSignal, spawn_mouse_watcher, warp_cursor_to};
 pub use watch::{WmEvent, spawn_event_watcher};
 pub use window::{AxWindow, WindowKind};
-pub use workspace::{AppEvent, bundle_id_for_pid, is_app_hidden, spawn_workspace_watcher};
+pub use workspace::{AppEvent, bundle_id_for_pid, is_app_hidden, register_on_main};
 
 /// Checks Accessibility permission, prompting the user via the system
 /// dialog if it hasn't been granted yet. Every AX call in this crate will

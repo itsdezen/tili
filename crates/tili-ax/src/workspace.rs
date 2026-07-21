@@ -1,7 +1,8 @@
 use std::ptr::NonNull;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::Receiver;
 
 use block2::RcBlock;
+use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
@@ -9,11 +10,6 @@ use objc2_app_kit::{
     NSWorkspace,
 };
 use objc2_foundation::{NSNotification, NSOperationQueue};
-
-unsafe extern "C" {
-    fn CFRunLoopGetCurrent() -> *mut std::ffi::c_void;
-    fn CFRunLoopRun();
-}
 
 /// A process launching or quitting, or the system waking from sleep, as
 /// reported by `NSWorkspace`.
@@ -24,69 +20,73 @@ pub enum AppEvent {
     SystemDidWake,
 }
 
-/// Spawns a dedicated OS thread that registers for
-/// `NSWorkspaceDidLaunchApplicationNotification`/`DidTerminateApplication`/
-/// `DidWakeNotification` and pumps a `CFRunLoop` on that thread for the
-/// lifetime of the process.
+/// Registers `NSWorkspaceDidLaunchApplicationNotification`/
+/// `DidTerminateApplication`/`DidWakeNotification` on the real process main
+/// thread, with `queue: .main` delivery, and returns immediately (no thread
+/// spawned, no `CFRunLoop` pumped here) — `NSApplication::run()`, called by
+/// the caller afterward, is what pumps the main run loop that delivers
+/// these blocks. Must be called after a real `NSApplication` instance
+/// exists and before `run()` starts, on the real main thread (the
+/// `MainThreadMarker` parameter documents that requirement; the
+/// `objc2-app-kit` calls themselves aren't gated behind it).
 ///
-/// This mirrors exactly the pattern `axuielement`'s own `AXNotificationStream`
-/// uses for AX notifications: Cocoa/AX notification delivery for a
-/// non-`NSApplication` process needs *some* thread running an active
-/// `CFRunLoop` to receive the underlying system messages, regardless of
-/// which `NSOperationQueue` the resulting block is dispatched onto — so a
-/// dedicated thread is created and immediately parked in `CFRunLoopRun()`
-/// after registering the observer.
-pub fn spawn_workspace_watcher(tx: Sender<AppEvent>) {
-    std::thread::spawn(move || {
-        // SAFETY: `sharedWorkspace`/`notificationCenter` are safe to call
-        // off the main thread (objc2-app-kit does not gate them behind
-        // `MainThreadMarker`); the block below only touches `Send` data
-        // (`Sender<AppEvent>`, primitives) and is itself `Send`.
-        unsafe {
-            let workspace = NSWorkspace::sharedWorkspace();
-            let center = workspace.notificationCenter();
+/// Main-thread registration with `queue: .main` is load-bearing, not
+/// incidental: confirmed on real hardware that `DidLaunchApplication`/
+/// `DidWakeNotification` are not reliably delivered to a process with no
+/// `NSApplication` pumping its main run loop (only `DidTerminateApplication`
+/// was, evidently via some other delivery path) — a bare `CFRunLoopRun()`
+/// on an arbitrary background thread, with `queue: nil`, isn't sufficient
+/// for these two specifically, unlike AX notifications elsewhere in this
+/// crate.
+pub fn register_on_main(_mtm: MainThreadMarker) -> Receiver<AppEvent> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    // SAFETY: `sharedWorkspace`/`notificationCenter` are safe to call from
+    // any thread (objc2-app-kit does not gate them behind
+    // `MainThreadMarker`); the blocks below only touch `Send` data
+    // (`Sender<AppEvent>`, primitives) and are themselves `Send`.
+    unsafe {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let center = workspace.notificationCenter();
+        let main_queue = NSOperationQueue::mainQueue();
 
-            let launched_tx = tx.clone();
-            let launched_block = RcBlock::new(move |note: NonNull<NSNotification>| {
-                if let Some((pid, bundle_id)) = running_app_from_notification(note) {
-                    let _ = launched_tx.send(AppEvent::Launched { pid, bundle_id });
-                }
-            });
-            center.addObserverForName_object_queue_usingBlock(
-                Some(objc2_app_kit::NSWorkspaceDidLaunchApplicationNotification),
-                None,
-                None::<&NSOperationQueue>,
-                &launched_block,
-            );
+        let launched_tx = tx.clone();
+        let launched_block = RcBlock::new(move |note: NonNull<NSNotification>| {
+            if let Some((pid, bundle_id)) = running_app_from_notification(note) {
+                let _ = launched_tx.send(AppEvent::Launched { pid, bundle_id });
+            }
+        });
+        center.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSWorkspaceDidLaunchApplicationNotification),
+            None,
+            Some(&main_queue),
+            &launched_block,
+        );
 
-            let terminated_tx = tx.clone();
-            let terminated_block = RcBlock::new(move |note: NonNull<NSNotification>| {
-                if let Some((pid, _)) = running_app_from_notification(note) {
-                    let _ = terminated_tx.send(AppEvent::Terminated { pid });
-                }
-            });
-            center.addObserverForName_object_queue_usingBlock(
-                Some(objc2_app_kit::NSWorkspaceDidTerminateApplicationNotification),
-                None,
-                None::<&NSOperationQueue>,
-                &terminated_block,
-            );
+        let terminated_tx = tx.clone();
+        let terminated_block = RcBlock::new(move |note: NonNull<NSNotification>| {
+            if let Some((pid, _)) = running_app_from_notification(note) {
+                let _ = terminated_tx.send(AppEvent::Terminated { pid });
+            }
+        });
+        center.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSWorkspaceDidTerminateApplicationNotification),
+            None,
+            Some(&main_queue),
+            &terminated_block,
+        );
 
-            let wake_tx = tx.clone();
-            let wake_block = RcBlock::new(move |_note: NonNull<NSNotification>| {
-                let _ = wake_tx.send(AppEvent::SystemDidWake);
-            });
-            center.addObserverForName_object_queue_usingBlock(
-                Some(objc2_app_kit::NSWorkspaceDidWakeNotification),
-                None,
-                None::<&NSOperationQueue>,
-                &wake_block,
-            );
-
-            CFRunLoopGetCurrent();
-            CFRunLoopRun();
-        }
-    });
+        let wake_tx = tx.clone();
+        let wake_block = RcBlock::new(move |_note: NonNull<NSNotification>| {
+            let _ = wake_tx.send(AppEvent::SystemDidWake);
+        });
+        center.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSWorkspaceDidWakeNotification),
+            None,
+            Some(&main_queue),
+            &wake_block,
+        );
+    }
+    rx
 }
 
 /// Every currently running "regular" (Dock-visible) application's pid,
@@ -138,11 +138,15 @@ pub fn activate_app(pid: i32) {
 /// Accessibility element (`AXUIElementCreateSystemWide`'s
 /// `AXFocusedApplication` attribute) — a direct, synchronous query, not a
 /// notification. Used instead of `NSWorkspaceDidActivateApplicationNotification`
-/// (confirmed on real hardware to never fire for a process like
-/// `tili-daemon` that never creates an `NSApplication` instance, unlike the
-/// process-lifecycle `Launch`/`Terminate` notifications above, which don't
-/// depend on window-server UI-activation machinery and do work) —
-/// `watch.rs` polls this on its existing cheap resync tick instead.
+/// — confirmed on real hardware to never fire for `tili-daemon` prior to
+/// `main.rs` giving it a real `NSApplication` instance and main-thread
+/// `register_on_main` registration (see that function's doc comment); even
+/// `DidLaunchApplication`/`DidWakeNotification` were confirmed silently
+/// undelivered without that context, and only `DidTerminateApplication`
+/// worked reliably beforehand. `frontmost_app_pid` stays a polled query
+/// rather than switching to `DidActivateApplication` now that a real
+/// `NSApplication` exists, since it's cheap and already proven — `watch.rs`
+/// polls this on its existing cheap resync tick.
 pub fn frontmost_app_pid() -> Option<i32> {
     axuielement::system_wide()?
         .focused_application()

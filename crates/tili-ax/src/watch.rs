@@ -129,10 +129,13 @@ pub enum WmEvent {
     FrontmostAppChanged {
         pid: i32,
     },
-    /// The system just woke from sleep (`NSWorkspaceDidWakeNotification`).
-    /// Every AX-observing process can take several seconds to reconnect to
-    /// the WindowServer after wake, so a still-open window can easily miss
-    /// one `apply_windows_changed` scan right after this fires — see
+    /// The system just woke from sleep (`NSWorkspaceDidWakeNotification`,
+    /// registered via `workspace::register_on_main` — see that function's
+    /// doc comment for why main-thread/`queue: .main` registration was
+    /// needed for this to be delivered reliably at all). Every AX-observing
+    /// process can take several seconds to reconnect to the WindowServer
+    /// after wake, so a still-open window can easily miss one
+    /// `apply_windows_changed` scan right after this fires — see
     /// `WmState::note_system_wake`'s doc comment for what reacting to this
     /// actually does about it.
     SystemDidWake,
@@ -144,16 +147,22 @@ pub enum WmEvent {
 /// per-app watch tasks from a plain OS thread that isn't itself part of the
 /// runtime).
 ///
+/// `app_rx` is the `NSWorkspace` notification receiver from
+/// `workspace::register_on_main` — registered by the caller on the real
+/// main thread *before* this function (and the Tokio runtime it needs) even
+/// exist, since that registration must happen before `NSApplication::run()`
+/// starts pumping the main run loop that delivers it. This function no
+/// longer registers those notifications itself.
+///
 /// Already-running apps are seeded as synthetic `WindowsChanged` events
 /// immediately, so callers don't need a separate "initial full scan" path —
 /// starting from an empty cache and reacting to this channel is sufficient
 /// both at startup and for the rest of the process's life.
-pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
+pub fn spawn_event_watcher(
+    app_rx: std::sync::mpsc::Receiver<AppEvent>,
+) -> mpsc::UnboundedReceiver<WmEvent> {
     let rt = tokio::runtime::Handle::current();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-
-    let (app_tx, app_rx) = std::sync::mpsc::channel();
-    workspace::spawn_workspace_watcher(app_tx);
 
     let mut watched: HashMap<i32, tokio::task::JoinHandle<()>> = HashMap::new();
     // Pids a subscription attempt has already failed for (e.g. WindowServer,
@@ -196,7 +205,8 @@ pub fn spawn_event_watcher() -> mpsc::UnboundedReceiver<WmEvent> {
         // belongs to and undoing a manual switch to an empty workspace.
         let mut last_frontmost_pid: Option<i32> = None;
         loop {
-            match app_rx.recv_timeout(RESYNC_INTERVAL) {
+            let recv_result = app_rx.recv_timeout(RESYNC_INTERVAL);
+            match recv_result {
                 Ok(AppEvent::Launched { pid, bundle_id }) => {
                     let _ = event_tx.send(WmEvent::AppLaunched { pid, bundle_id });
                     match watch_app(&rt, pid, event_tx.clone()) {
@@ -350,9 +360,7 @@ fn resync_watchers(
     }
 
     watched.retain(|&pid, handle| {
-        if current.contains(&pid) && !pid_is_dead(pid) {
-            true
-        } else {
+        if pid_is_dead(pid) {
             // The pid is gone but no `AppTerminated` ever arrived (the same
             // notification-delivery gap as a missed launch) — without this,
             // `WmState` never learns the app quit, so its windows are never
@@ -360,12 +368,43 @@ fn resync_watchers(
             let _ = event_tx.send(WmEvent::AppTerminated { pid });
             handle.abort();
             false
+        } else if !current.contains(&pid) {
+            // Still genuinely alive, just not currently watchable (its only
+            // window(s) closed and it isn't a `Regular`-policy app kept in
+            // `current` unconditionally by `all_regular_app_pids`) —
+            // unsubscribe, but deliberately *without* the synthetic
+            // `AppTerminated` above: `WmEvent::AppTerminated` routes to
+            // `WmState::remove_app`, which purges every window the state
+            // still has for this pid immediately, with no grace period at
+            // all (unlike a real window close, which goes through
+            // `pending_removal`/`removal_grace`). Confirmed on real
+            // hardware that `current` — partly sourced from
+            // `NSWorkspace.runningApplications()` — can transiently drop a
+            // still-running app's pid for a tick, which previously meant a
+            // real app's still-open windows got force-purged and
+            // re-discovered as brand new moments later, re-triggering a
+            // `workspace-rules` match with none of the wake-grace
+            // protection `WmState::note_system_wake` provides (that only
+            // covers the `pending_removal` path this bypasses). Re-attached
+            // automatically once the pid is back in `current`.
+            handle.abort();
+            false
+        } else {
+            true
         }
     });
     unwatchable.retain(|&pid| {
-        if current.contains(&pid) && !pid_is_dead(pid) {
-            true
-        } else {
+        // Deliberately keyed on liveness alone, not `current.contains(&pid)`
+        // like `watched.retain` above — confirmed on real hardware that a
+        // system compositor process (WindowServer, Dock) can own an
+        // on-screen window (menu bar, cursor layer, ...) on some ticks and
+        // not others, so gating eviction on `current` here made a
+        // permanently-unwatchable pid drop out of the set and get retried
+        // — and fail, and log, and get re-inserted — every time its
+        // on-screen ownership happened to flicker, defeating the whole
+        // point of this set (see this function's doc comment) and flooding
+        // the log.
+        if pid_is_dead(pid) {
             // Mirrors `watched.retain` above — a pid whose AXObserver
             // subscription failed at discovery time can still have real
             // windows recorded in `WmState` (`seed_watchers`/the launch
@@ -378,6 +417,8 @@ fn resync_watchers(
             // already accounts for).
             let _ = event_tx.send(WmEvent::AppTerminated { pid });
             false
+        } else {
+            true
         }
     });
 }
