@@ -649,14 +649,24 @@ fn stop_daemon() {
         println!("tili: daemon is not running");
         return;
     }
-    for plist_path in [&daemon_plist, &menubar_plist] {
+    for (label, plist_path) in [
+        (LAUNCH_AGENT_LABEL, &daemon_plist),
+        (MENUBAR_LAUNCH_AGENT_LABEL, &menubar_plist),
+    ] {
         if !plist_path.exists() {
             continue;
         }
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", "-w"])
-            .arg(plist_path)
-            .status();
+        // Only unload if launchd actually has the job loaded — e.g. a
+        // daemon that already self-stopped (see tili-daemon's
+        // `stop_self`) leaves its plist file behind but isn't loaded
+        // anymore, and `launchctl unload` on that prints its own noisy
+        // "Unload failed: 5: Input/output error" straight to stderr.
+        if launch_agent_is_loaded(label) {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", "-w"])
+                .arg(plist_path)
+                .status();
+        }
         if let Err(e) = std::fs::remove_file(plist_path) {
             eprintln!("tili: couldn't remove {}: {e}", plist_path.display());
         }

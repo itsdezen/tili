@@ -66,6 +66,16 @@ binary with its own LaunchAgent — running both `tili start` and `tili-dev
 start` without stopping one first leaves two daemons registered at once, so
 run `tili stop`/`tili-dev stop` when switching between them.
 
+If you regenerate your local cert (or otherwise shift your dev build's
+signing identity) after already granting Accessibility once, TCC can get
+stuck holding a stale grant tied to the old identity, silently refusing to
+prompt again for the new one. `tili-daemon` does *not* auto-reset this for
+you — an automatic reset here would race the system's own prompt and
+delete it before you could ever see or toggle it in System Settings. Clear
+the stale record yourself instead: `tccutil reset Accessibility
+com.tili.daemon` (or your dev bundle id), then run `tili start`/`tili-dev
+start` again.
+
 With the cert in place, build/bundle/sign/run with the same commands
 `build-dev.sh` runs internally:
 

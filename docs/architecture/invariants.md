@@ -17,9 +17,14 @@ The daemon reacts to AXObserver/NSWorkspace/display notifications
 Four sanctioned, narrowly-scoped exceptions:
 
 1. **`tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap`** retries installing the
-   `CGEventTap` every few seconds for the process's whole lifetime, since
-   Input Monitoring can be granted at any point after the daemon starts
-   with no accompanying event to react to.
+   `CGEventTap` every few seconds for the process's whole lifetime.
+   `tili-daemon`'s `async_daemon_main` now hard-stops (mirroring its
+   Accessibility check) if Input Monitoring isn't already granted, so the
+   daemon never reaches this loop without it — this retry instead covers
+   Input Monitoring being revoked and re-granted while the daemon is
+   already running, or a `CGEventTap` install failing for an unrelated
+   transient reason, neither of which has an accompanying event to react
+   to.
 2. **`tili-ax/src/watch.rs`'s window/app-watcher resync backstop** — a
    `WATCHER_RESYNC_INTERVAL` (2s) tick running `resync_watchers` (attach/
    detach watchers, no relayout), plus a debounced-since-quiet full-window

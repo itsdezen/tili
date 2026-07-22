@@ -31,12 +31,6 @@ const WAIT_FOR_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// this stays short rather than growing to cover a full app launch.
 const REVEAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The daemon's bundle id, duplicated from `xtask/src/main.rs`'s `BUNDLE_ID`
-/// const (used when wrapping the daemon in `tili.app`) — keep the two in
-/// sync if either changes. Used only to target `tccutil reset` at our own
-/// TCC entry; see `reset_accessibility_tcc`.
-const ACCESSIBILITY_BUNDLE_ID: &str = "com.tili.daemon";
-
 /// The real process entry point — deliberately not `#[tokio::main]`. A real
 /// `NSApplication` instance needs its `run()` to own the actual OS process
 /// main thread (the way `tili-menubar/src/main.rs` already does) for
@@ -112,15 +106,16 @@ async fn async_daemon_main(
         // they've granted it — that next invocation is a genuinely fresh
         // process, which is the one case already proven to work.
         //
-        // A dev binary rebuilt across iterations can shift code identity,
-        // leaving TCC holding a stale grant record tied to a previous
-        // signature that a plain trust check gets stuck against —
-        // resetting here clears that before the user's next `tili start`
-        // attempt (the same fix other AX-based tiling WMs apply for the
-        // same dev-signing-churn problem). Best-effort: a raw unsigned
-        // dev binary has no real bundle id for tccutil to match, so this
-        // silently no-ops in that case; harmless either way.
-        reset_accessibility_tcc();
+        // Deliberately no `tccutil reset` here: the prompt this same call
+        // just triggered is created asynchronously by macOS, so this
+        // check always reports `false` the instant the dialog appears —
+        // no human has clicked yet. A reset issued at that moment deletes
+        // the TCC row before it's ever visible in System Settings, every
+        // single time, which is worse than the stale-signature problem it
+        // was meant to solve. If a rebuilt dev binary's shifted signing
+        // identity leaves TCC stuck against a stale record, clear it
+        // manually with `tccutil reset Accessibility <bundle-id>` before
+        // the next `tili start` (see CONTRIBUTING.md).
         eprintln!(
             "tili-daemon: Accessibility permission not granted — grant it in System Settings \
              > Privacy & Security > Accessibility, then run `tili start` again."
@@ -129,12 +124,18 @@ async fn async_daemon_main(
         return Ok(());
     }
 
+    // Settled, not racy, unlike the Accessibility check above:
+    // `request_input_monitoring_permission` already blocked on the user's
+    // response to the system dialog at the very top of `main`, before
+    // this run got anywhere near here. So a hard stop here (mirroring
+    // Accessibility) doesn't risk cutting off an in-flight prompt.
     if !tili_ax::has_input_monitoring_permission() {
         eprintln!(
-            "tili-daemon: Input Monitoring permission not granted yet — hotkeys will start \
-             working automatically once you grant it in System Settings > Privacy & Security \
-             > Input Monitoring, no restart needed."
+            "tili-daemon: Input Monitoring permission not granted — grant it in System \
+             Settings > Privacy & Security > Input Monitoring, then run `tili start` again."
         );
+        stop_self();
+        return Ok(());
     }
 
     let mut events = tili_ax::spawn_event_watcher(app_event_rx);
@@ -469,17 +470,6 @@ async fn async_daemon_main(
 
     let _ = std::fs::remove_file(tili_ipc::default_socket_path());
     Ok(())
-}
-
-/// Best-effort `tccutil reset Accessibility <bundle-id>` for our own bundle
-/// id — see the call site in `main` for why. Discards the result entirely:
-/// a raw unsigned dev binary has no real bundle id for tccutil to match, so
-/// this silently no-ops in that case, and a failure here has no fallback
-/// worth taking beyond continuing to poll normally.
-fn reset_accessibility_tcc() {
-    let _ = std::process::Command::new("tccutil")
-        .args(["reset", "Accessibility", ACCESSIBILITY_BUNDLE_ID])
-        .status();
 }
 
 /// Unloads and removes this daemon's own LaunchAgent, the same end-state as
