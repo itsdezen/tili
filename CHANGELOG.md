@@ -8,6 +8,36 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-22
+
+### Fixed
+
+- **`tili uninstall` could print a spurious `Unload failed: 5:
+  Input/output error` from `launchctl` before its own "uninstalled"
+  message.** `stop_daemon` called `launchctl unload` on a LaunchAgent
+  plist whenever the file existed on disk, even if launchd no longer had
+  that job loaded (e.g. the daemon had already unloaded itself via
+  `stop_self`). Now skips the unload when the job isn't actually loaded,
+  still removing the stale plist file either way.
+- **A fresh install's first `tili start` could show no `tili` item to
+  toggle in System Settings' Accessibility list.** Right after
+  triggering the Accessibility prompt, `tili-daemon` ran `tccutil reset`
+  on its own TCC entry — since the prompt's row is created
+  asynchronously by macOS, this reset raced it and deleted the row
+  before it was ever visible to toggle, on every single attempt. That
+  reset is gone.
+- **`tili status` could report the daemon "running" while hotkeys
+  silently didn't work.** Input Monitoring was treated as a soft
+  condition — the daemon kept running in a degraded state if it wasn't
+  granted. It's now a hard gate like Accessibility: if Input Monitoring
+  isn't granted, the daemon stops itself and requires an explicit `tili
+  start` once both permissions are granted, instead of half-running.
+- **`brew install`/`brew upgrade` could skip restarting the menu bar
+  badge (or the daemon) after an asymmetric LaunchAgent state.**
+  `post_install`'s restart gate checked only `com.tili.daemon.plist`'s
+  existence before restarting both processes; each LaunchAgent is now
+  checked independently.
+
 ## [0.4.3] - 2026-07-22
 
 ### Fixed
