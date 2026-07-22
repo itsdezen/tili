@@ -78,4 +78,24 @@ unreachable for long enough — see [tili-menubar.md](tili-menubar.md).
 `tili.kdl` is left in place rather than unlinked, since a dotfiles manager
 (stow, chezmoi, ...) likely put it there and removing even just the link
 (not the real target file `remove_file` would leave untouched) still
-breaks that tool's arrangement.
+breaks that tool's arrangement. `symlinked_ancestor` covers the other half
+of this: a dotfiles tool symlinking the whole `~/.config/tili` directory
+rather than just the file inside it — `symlink_metadata` on the file alone
+resolves transparently through a symlinked parent and reports an ordinary
+regular file, so `uninstall()` walks every ancestor directory first and
+skips deletion if any of them is itself a symlink.
+
+`sibling_binary_path` resolves the daemon/menubar's own sibling binary path
+for `install_launch_agent`'s `ProgramArguments`, canonicalized so it lands
+inside `tili.app/Contents/MacOS/` rather than Homebrew's flat `bin/`
+symlink (needed for System Settings/the menu bar to resolve tili's name and
+icon). Under a Homebrew install specifically, `homebrew_stable_equivalent`
+rewrites that canonicalized path through `<prefix>/opt/tili` instead of the
+literal, version-pinned Cellar path — `opt/tili` is a symlink Homebrew
+relinks to whichever keg is current on every `brew upgrade`, so a
+LaunchAgent plist built from it keeps pointing at the right binary across
+upgrades. This matters because `Formula/tili.rb`'s `post_install` can only
+restart the process (`pkill` + the plist's own `KeepAlive`), never rewrite
+an already-loaded plist — without this, every upgrade kept relaunching
+whatever binary path a prior `tili start` had baked in, silently running
+stale code until a manual `tili stop && tili start`.

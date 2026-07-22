@@ -331,12 +331,13 @@ async fn async_daemon_main(
                                 | Command::ListMonitors
                                 | Command::Doctor
                         );
+                        let pids_changed = drain_pending_windows(&mut state, &mut pending_pids);
                         let response = dispatch(&mut state, command);
                         if let Err(e) = socket::write_response(&mut stream, &response).await {
                             eprintln!("tili-daemon: failed to write response: {e}");
                         }
                         sync_active_combos(&active_combos, &state);
-                        changed = mutates;
+                        changed = mutates || pids_changed;
                     }
                     Err(e) => eprintln!("tili-daemon: failed to read command: {e}"),
                 }
@@ -369,11 +370,7 @@ async fn async_daemon_main(
                 state.step_animations();
             }
             _ = maintenance_tick.tick() => {
-                let pids_changed = !pending_pids.is_empty();
-                for pid in pending_pids.drain() {
-                    let windows = tili_ax::list_windows_for_pid(pid);
-                    state.apply_windows_changed(pid, windows);
-                }
+                let pids_changed = drain_pending_windows(&mut state, &mut pending_pids);
                 state.finalize_expired_removals();
                 state.finalize_expired_launches();
 
@@ -408,6 +405,15 @@ async fn async_daemon_main(
                 // CLAUDE.md's design invariants for why that's non-negotiable.
                 // Shutdown is the one exception, same reasoning as the
                 // socket branch above.
+                //
+                // Drained before dispatch() (not just left for the next
+                // maintenance_tick) so a window created just before this
+                // hotkey fires — e.g. a floating window opened right before
+                // "move focused window to workspace" — is already placed
+                // and focus-synced by the time dispatch() reads state,
+                // instead of this command still seeing the previous focus.
+                let pids_changed = drain_pending_windows(&mut state, &mut pending_pids);
+                changed = pids_changed;
                 if let Some(command) = state.resolve_hotkey(combo) {
                     if matches!(command, Command::Shutdown) {
                         state.unpark_all();
@@ -582,6 +588,22 @@ async fn handle_wait_for_change(
 ) {
     let _ = tokio::time::timeout(WAIT_FOR_CHANGE_TIMEOUT, notified).await;
     let _ = socket::write_response(&mut stream, &Response::Ok).await;
+}
+
+/// Applies every pid queued by a prior `WmEvent::WindowsChanged`, registering
+/// any new windows into `WmState` before whatever's about to run next reads
+/// it. Shared by `maintenance_tick` (its original, 30ms-debounced caller) and
+/// by the socket-command/hotkey branches below — those call it right before
+/// `dispatch()` so a window created just before a command fires (e.g. a
+/// hotkey pressed right after opening a new floating window) is already
+/// placed and focus-synced, instead of only catching up on the next tick.
+fn drain_pending_windows(state: &mut WmState, pending_pids: &mut HashSet<i32>) -> bool {
+    let pids_changed = !pending_pids.is_empty();
+    for pid in pending_pids.drain() {
+        let windows = tili_ax::list_windows_for_pid(pid);
+        state.apply_windows_changed(pid, windows);
+    }
+    pids_changed
 }
 
 fn handle_event(

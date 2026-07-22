@@ -344,11 +344,21 @@ navigation is.
 `dispatch()` calls `WmState::sync_focus_from_frontmost()` before the
 command match — resolves which window real macOS currently considers
 focused (via `tili_ax::AxWindow::system_focused_id`, an
-`AXUIElementCreateSystemWide`-based query of the system-wide
-`kAXFocusedWindowAttribute` directly, not "which app is frontmost, then
+`AXUIElementCreateSystemWide`-based query, not "which app is frontmost, then
 that app's own focused window") and updates `workspace_focus`
-synchronously, immediately before that command runs. The direct
-system-wide query matters: a floating panel/utility window can hold real
+synchronously, immediately before that command runs. Reads
+`kAXFocusedUIElementAttribute`, not `kAXFocusedWindowAttribute` — confirmed
+on real hardware that the system-wide element never populates the latter
+at all (always returns no value, regardless of what's actually focused;
+that attribute is only meaningful queried on a specific application
+element, which is exactly what `focused_id_for_pid`'s app-first lookup
+already does). `kAXFocusedUIElementAttribute` is the one attribute the
+system-wide object reliably supports; it can return any focused control (a
+text field, a button, ...), not necessarily the window itself, so
+`resolve_window_id` resolves it via `_AXUIElementGetWindow` — which works
+on any element, not just ones with an `AXWindow` role — to get back to
+whatever window actually contains it. The direct system-wide query
+matters: a floating panel/utility window can hold real
 AX focus without its owning app ever becoming
 `NSWorkspace.frontmostApplication` (confirmed for some non-activating
 panels), which an app-first two-hop lookup — `tili_ax::workspace::

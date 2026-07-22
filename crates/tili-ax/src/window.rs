@@ -182,26 +182,37 @@ impl AxWindow {
     }
 
     /// The `WindowId` of whatever window genuinely holds OS focus right
-    /// now, system-wide — `AXUIElementCreateSystemWide()`'s
-    /// `kAXFocusedWindowAttribute`, read directly rather than going through
-    /// "which app is frontmost" first. That two-hop path
-    /// (`workspace::frontmost_app_pid()`, then *that* app's own focused
-    /// window via `focused_id_for_pid`) misses a floating panel/utility
-    /// window belonging to a *different* app than whatever
-    /// `NSWorkspace.frontmostApplication` still reports: some
+    /// now, system-wide, read directly rather than going through "which app
+    /// is frontmost" first. That two-hop path (`workspace::frontmost_app_pid()`,
+    /// then *that* app's own focused window via `focused_id_for_pid`) misses
+    /// a floating panel/utility window belonging to a *different* app than
+    /// whatever `NSWorkspace.frontmostApplication` still reports: some
     /// non-activating panels can become the real AX-focused window without
     /// their owning app ever becoming frontmost, so `frontmost_app_pid()`
     /// keeps returning the previously-frontmost app's pid and the focus
-    /// sync silently no-ops. Querying the system-wide focused window
-    /// directly sidesteps the "which app" hop entirely — used by
+    /// sync silently no-ops. Querying the system-wide focus directly
+    /// sidesteps the "which app" hop entirely — used by
     /// `WmState::sync_focus_from_frontmost`, the one call site that needs
     /// "whatever's really focused right now" rather than "this specific
     /// pid's focused window" (`apply_windows_changed`'s own re-sync still
     /// wants the latter, since it already knows the exact pid it just
     /// placed windows for).
+    ///
+    /// Reads `kAXFocusedUIElementAttribute`, not `kAXFocusedWindowAttribute`
+    /// — confirmed on real hardware that the system-wide element never
+    /// populates the latter at all (`SystemWideElement::focused_window()`
+    /// returns `None` on every single call, regardless of what's actually
+    /// focused; `kAXFocusedWindowAttribute` is only meaningful queried on a
+    /// specific application element, which is exactly what `focused_id_for_pid`
+    /// already does). `kAXFocusedUIElementAttribute` is the one attribute
+    /// Apple's system-wide object reliably supports, but it can return any
+    /// focused control (a text field, a button, ...), not necessarily the
+    /// window itself — `resolve_window_id` still resolves it correctly
+    /// either way, since `_AXUIElementGetWindow` works on any element and
+    /// returns the `CGWindowID` of whatever window contains it.
     pub fn system_focused_id() -> Option<WindowId> {
         let focused = axuielement::system_wide()?
-            .focused_window()
+            .focused_ui_element()
             .ok()
             .flatten()?;
         Self::resolve_window_id(&focused)

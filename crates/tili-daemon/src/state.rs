@@ -1866,7 +1866,7 @@ impl WmState {
     /// hotkey-triggered commands.
     ///
     /// Uses `tili_ax::AxWindow::system_focused_id` (the system-wide
-    /// `kAXFocusedWindowAttribute`, not "which app is frontmost then that
+    /// `kAXFocusedUIElementAttribute`, not "which app is frontmost then that
     /// app's focused window") — a floating panel/utility window can hold
     /// real AX focus without its owning app ever becoming
     /// `NSWorkspace.frontmostApplication`, which the app-first two-hop
@@ -5614,6 +5614,156 @@ mod tests {
                 .unwrap()
                 .tiled_window_ids()
                 .contains(&1)
+        );
+    }
+
+    #[test]
+    fn place_new_window_tiled_into_an_already_focused_workspace_defers_to_the_reactive_resync() {
+        // A brand-new window created into a workspace that already has a
+        // recorded focus must not silently steal it (`place_new_window`'s
+        // `or_insert` only seeds focus for an empty workspace) — but once
+        // `sync_focus_to_window` confirms it actually holds real OS focus,
+        // `workspace_focus` (and therefore `move_focused_to_workspace`) must
+        // follow it, not the stale node.
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+
+        let existing_node = state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_window(1, None, root_orientation);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), existing_node);
+
+        // Mirrors apply_windows_changed: the placement is recorded before
+        // place_new_window runs.
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.place_new_window(2, &PlacementKind::Tiled, DEFAULT_WORKSPACE);
+
+        assert_eq!(
+            state.workspace_focus.get(DEFAULT_WORKSPACE),
+            Some(&existing_node),
+            "a background-opened window must not steal focus by itself"
+        );
+
+        // Simulates the live AX resync (sync_focus_from_pid/
+        // sync_focus_from_frontmost) discovering window 2 actually holds
+        // real OS focus.
+        state.sync_focus_to_window(2);
+
+        let new_node = state
+            .workspaces
+            .get(DEFAULT_WORKSPACE)
+            .unwrap()
+            .node_for_window(2)
+            .unwrap();
+        assert_eq!(
+            state.workspace_focus.get(DEFAULT_WORKSPACE),
+            Some(&new_node)
+        );
+
+        state
+            .workspaces
+            .insert("elsewhere".to_string(), Tree::new());
+        assert!(state.move_focused_to_workspace("elsewhere").is_ok());
+        assert_eq!(
+            state.placements.get(&2).map(|p| &p.workspace),
+            Some(&"elsewhere".to_string())
+        );
+        assert_eq!(
+            state.placements.get(&1).map(|p| &p.workspace),
+            Some(&DEFAULT_WORKSPACE.to_string()),
+            "the pre-existing tiled window must stay put"
+        );
+    }
+
+    #[test]
+    fn place_new_window_floating_into_an_already_focused_workspace_defers_to_the_reactive_resync() {
+        // Same race as the tiled variant above, but for a floating window
+        // (e.g. Note) created into a workspace that already has a focused
+        // tiled window (e.g. Ghostty) — the exact reported repro.
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+
+        let existing_node = state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_window(1, None, root_orientation);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), existing_node);
+
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+        state.place_new_window(
+            2,
+            &PlacementKind::Floating { manual: None },
+            DEFAULT_WORKSPACE,
+        );
+
+        assert_eq!(
+            state.workspace_focus.get(DEFAULT_WORKSPACE),
+            Some(&existing_node),
+            "a background-opened floating window must not steal focus by itself"
+        );
+
+        state.sync_focus_to_window(2);
+
+        let new_node = state
+            .workspaces
+            .get(DEFAULT_WORKSPACE)
+            .unwrap()
+            .node_for_window(2)
+            .unwrap();
+        assert_eq!(
+            state.workspace_focus.get(DEFAULT_WORKSPACE),
+            Some(&new_node)
+        );
+
+        state
+            .workspaces
+            .insert("elsewhere".to_string(), Tree::new());
+        assert!(state.move_focused_to_workspace("elsewhere").is_ok());
+        assert_eq!(
+            state.placements.get(&2).map(|p| &p.workspace),
+            Some(&"elsewhere".to_string())
+        );
+        assert!(matches!(
+            state.placements.get(&2).map(|p| &p.kind),
+            Some(PlacementKind::Floating { .. })
+        ));
+        assert_eq!(
+            state.placements.get(&1).map(|p| &p.workspace),
+            Some(&DEFAULT_WORKSPACE.to_string()),
+            "the pre-existing tiled window must stay put"
         );
     }
 

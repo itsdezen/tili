@@ -423,14 +423,50 @@ fn launch_agent_path(label: &str) -> std::path::PathBuf {
 /// side, so an unresolved `current_exe()` would find the sibling right
 /// there and bake that symlink path into the LaunchAgent plist instead of
 /// the real path inside `tili.app` — which is what actually carries the
-/// bundle's name/icon in System Settings.
+/// bundle's name/icon in System Settings. Routed through
+/// `homebrew_stable_equivalent` first so that, under Homebrew, the baked-in
+/// path survives a future `brew upgrade` instead of pinning this exact
+/// version forever (see that function's doc comment).
 fn sibling_binary_path(name: &str) -> std::path::PathBuf {
     std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .ok()
+        .map(|real| homebrew_stable_equivalent(&real).unwrap_or(real))
         .and_then(|p| p.parent().map(|dir| dir.join(name)))
         .filter(|p| p.exists())
         .unwrap_or_else(|| std::path::PathBuf::from(name))
+}
+
+/// Rewrites a canonicalized path that runs through Homebrew's Cellar
+/// (`<prefix>/Cellar/tili/<version>/tili.app/Contents/MacOS/<bin>`) into the
+/// equivalent path through `<prefix>/opt/tili` instead — the symlink
+/// Homebrew relinks to whichever keg is current on every `brew upgrade`
+/// (`bin/tili` gets the same treatment), unlike the version-pinned Cellar
+/// path itself. Still lands inside `tili.app`'s bundle structure — the
+/// property `sibling_binary_path`'s canonicalize actually needs for System
+/// Settings/the menu bar to resolve tili's name/icon — just through one
+/// stable symlink hop instead of zero, so a LaunchAgent plist built from it
+/// keeps pointing at the right binary after a future upgrade instead of
+/// caching this exact version forever (`post_install` can restart the
+/// process via `KeepAlive`, but can't rewrite an already-loaded plist — see
+/// `Formula/tili.rb`). Returns `None` for anything that doesn't match this
+/// exact layout (a `cargo install`/dev build, or an `opt/tili` that doesn't
+/// currently resolve back to this same keg), so the caller falls back to
+/// the literal canonicalized path.
+fn homebrew_stable_equivalent(real_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let comps: Vec<_> = real_exe.components().collect();
+    let cellar_at = comps.iter().position(|c| c.as_os_str() == "Cellar")?;
+    if comps.get(cellar_at + 1)?.as_os_str() != "tili" {
+        return None;
+    }
+    let prefix: std::path::PathBuf = comps[..cellar_at].iter().collect();
+    let keg: std::path::PathBuf = comps[..cellar_at + 3].iter().collect();
+    let opt_tili = prefix.join("opt").join("tili");
+    if std::fs::canonicalize(&opt_tili).ok()? != keg {
+        return None;
+    }
+    let rest: std::path::PathBuf = comps[cellar_at + 3..].iter().collect();
+    Some(opt_tili.join(rest))
 }
 
 /// Parses `tili move-workspace-to-monitor <workspace> <target>`'s target
@@ -731,6 +767,24 @@ fn default_config_path() -> std::path::PathBuf {
     std::path::PathBuf::from(home).join(".config/tili/tili.kdl")
 }
 
+/// Walks every ancestor directory of `path` (its parent, that parent's
+/// parent, ...) up to the filesystem root, returning the first one that's
+/// itself a symlink. Catches what `symlink_metadata` on `path` alone can't:
+/// a dotfiles tool symlinking the whole `~/.config/tili` directory (or
+/// anything above it) into a repo, rather than just `tili.kdl` inside it —
+/// `symlink_metadata(path)` resolves transparently through a symlinked
+/// parent, so the file itself still reports as an ordinary regular file.
+fn symlinked_ancestor(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
 /// `tili uninstall` — a full teardown, unlike `tili stop` (which only
 /// removes the LaunchAgents so a later `tili start` can bring things back
 /// unchanged). Removes every file tili writes outside of a Homebrew
@@ -755,7 +809,13 @@ fn uninstall() {
             );
         }
         Ok(_) => {
-            if let Err(e) = std::fs::remove_file(&config_path) {
+            if let Some(dir) = symlinked_ancestor(&config_path) {
+                println!(
+                    "tili: {} is inside {}, a symlink (likely managed by a dotfiles tool) — leaving it in place",
+                    config_path.display(),
+                    dir.display()
+                );
+            } else if let Err(e) = std::fs::remove_file(&config_path) {
                 eprintln!("tili: couldn't remove {}: {e}", config_path.display());
             }
         }
@@ -1066,5 +1126,122 @@ fn doctor_report_launch_agent(label: &str, installed: bool, loaded: bool) {
         doctor_line(label, "ok", "installed and loaded");
     } else {
         doctor_line(label, "FAIL", "installed but not loaded");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("tili-cli-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // `std::env::temp_dir()` runs through `/var` -> `/private/var` on
+        // macOS, itself a symlink — canonicalizing here keeps that OS-level
+        // detail from masquerading as the thing these tests are actually
+        // checking for.
+        std::fs::canonicalize(&dir).unwrap()
+    }
+
+    #[test]
+    fn symlinked_ancestor_finds_a_symlinked_grandparent() {
+        let root = scratch_dir("symlinked-ancestor-grandparent");
+        let real_target = root.join("dotfiles/tili/.config/tili");
+        std::fs::create_dir_all(&real_target).unwrap();
+        let config_dir_link = root.join("config-link");
+        std::os::unix::fs::symlink(&real_target, &config_dir_link).unwrap();
+        let config_path = config_dir_link.join("tili.kdl");
+        std::fs::write(&config_path, "").unwrap();
+
+        assert_eq!(symlinked_ancestor(&config_path), Some(config_dir_link));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn symlinked_ancestor_is_none_for_an_ordinary_path() {
+        let root = scratch_dir("symlinked-ancestor-ordinary");
+        let config_path = root.join(".config/tili/tili.kdl");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "").unwrap();
+
+        assert_eq!(symlinked_ancestor(&config_path), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn homebrew_stable_equivalent_rewrites_through_the_opt_symlink() {
+        let root = scratch_dir("homebrew-stable-rewrite");
+        let daemon = root.join("Cellar/tili/0.5.0/tili.app/Contents/MacOS/tili-daemon");
+        std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
+        std::fs::write(&daemon, "").unwrap();
+        std::fs::create_dir_all(root.join("opt")).unwrap();
+        std::os::unix::fs::symlink(root.join("Cellar/tili/0.5.0"), root.join("opt/tili")).unwrap();
+
+        let resolved = homebrew_stable_equivalent(&daemon).unwrap();
+        assert_eq!(
+            resolved,
+            root.join("opt/tili/tili.app/Contents/MacOS/tili-daemon")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn homebrew_stable_equivalent_survives_a_simulated_upgrade() {
+        let root = scratch_dir("homebrew-stable-upgrade");
+        let old_daemon = root.join("Cellar/tili/0.5.0/tili.app/Contents/MacOS/tili-daemon");
+        std::fs::create_dir_all(old_daemon.parent().unwrap()).unwrap();
+        std::fs::write(&old_daemon, "").unwrap();
+        std::fs::create_dir_all(root.join("opt")).unwrap();
+        std::os::unix::fs::symlink(root.join("Cellar/tili/0.5.0"), root.join("opt/tili")).unwrap();
+
+        // Computed once, as `tili start` would when writing the LaunchAgent
+        // plist while running as v0.5.0.
+        let plist_path = homebrew_stable_equivalent(&old_daemon).unwrap();
+        assert_eq!(
+            plist_path,
+            root.join("opt/tili/tili.app/Contents/MacOS/tili-daemon")
+        );
+
+        // Mirrors exactly what `brew upgrade`'s `finish` step does: install
+        // the new keg, then relink `opt/tili` to it.
+        let new_daemon = root.join("Cellar/tili/0.5.1/tili.app/Contents/MacOS/tili-daemon");
+        std::fs::create_dir_all(new_daemon.parent().unwrap()).unwrap();
+        std::fs::write(&new_daemon, "").unwrap();
+        std::fs::remove_file(root.join("opt/tili")).unwrap();
+        std::os::unix::fs::symlink(root.join("Cellar/tili/0.5.1"), root.join("opt/tili")).unwrap();
+
+        // The exact path string already baked into a plist from before the
+        // upgrade — unchanged, never rewritten — now resolves straight
+        // through to the new binary, which is the whole point: no plist
+        // rewrite needed for `post_install`'s restart to land on it.
+        assert_eq!(
+            std::fs::canonicalize(&plist_path).unwrap(),
+            std::fs::canonicalize(&new_daemon).unwrap()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn homebrew_stable_equivalent_is_none_when_opt_does_not_match() {
+        let root = scratch_dir("homebrew-stable-no-opt");
+        let daemon = root.join("Cellar/tili/0.5.0/tili.app/Contents/MacOS/tili-daemon");
+        std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
+        std::fs::write(&daemon, "").unwrap();
+        // No `opt/tili` symlink created at all.
+
+        assert_eq!(homebrew_stable_equivalent(&daemon), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn homebrew_stable_equivalent_is_none_for_a_non_cellar_path() {
+        let root = scratch_dir("homebrew-stable-dev-build");
+        let daemon = root.join("target/debug/tili-daemon");
+        std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
+        std::fs::write(&daemon, "").unwrap();
+
+        assert_eq!(homebrew_stable_equivalent(&daemon), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

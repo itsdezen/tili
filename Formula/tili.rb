@@ -61,10 +61,16 @@ class Tili < Formula
     # read-only existence check below. For the actual restart, just kill
     # the running process instead of touching any LaunchAgent file:
     # `KeepAlive` in the already-loaded plist makes launchd relaunch it
-    # immediately, through the same `bin/tili-daemon`/`bin/tili-menubar`
-    # symlinks Homebrew has already relinked to this version by the time
-    # post_install runs — sending a signal isn't a sandboxed filesystem
-    # operation, so this works where a plist rewrite doesn't.
+    # immediately, at whatever `ProgramArguments` path is already baked
+    # into that plist from the last `tili start` — sending a signal isn't a
+    # sandboxed filesystem operation, so this works where a plist rewrite
+    # doesn't. As of v0.5.1, `tili start` resolves that path through the
+    # `opt/tili` symlink Homebrew keeps relinked to the current keg (see
+    # `sibling_binary_path`/`homebrew_stable_equivalent` in
+    # `crates/tili-cli/src/main.rs`), so this relaunch keeps landing on the
+    # right binary across upgrades; a plist written by an older `tili`
+    # still has that version's literal Cellar path baked in until the user
+    # re-runs `tili start` once.
     #
     # `quiet_system`, not `system`: pkill exits 1 when no process matches
     # (e.g. the plist exists but the process isn't currently running),
