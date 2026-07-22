@@ -43,7 +43,10 @@ class Tili < Formula
     # daemon/menu bar pick up the freshly installed binaries right away
     # instead of continuing to run the old ones until the user remembers
     # to `tili stop && tili start` by hand. A fresh install has no plist
-    # yet, so this is a no-op then.
+    # yet, so this is a no-op then. Checked independently per component
+    # (rather than gating both restarts on the daemon's plist alone) so
+    # an asymmetric state — one LaunchAgent present without the other —
+    # still restarts whichever one actually needs it.
     #
     # post_install runs inside Homebrew's install sandbox, which fakes
     # `$HOME`/`Dir.home` to a throwaway temp dir and denies filesystem
@@ -56,24 +59,27 @@ class Tili < Formula
     # sandbox.rb uses) resolves the *real* home via the user database
     # instead of the faked `$HOME` env var, which is enough for the
     # read-only existence check below. For the actual restart, just kill
-    # the running processes instead of touching any LaunchAgent file:
-    # `KeepAlive` in the already-loaded plist makes launchd relaunch them
+    # the running process instead of touching any LaunchAgent file:
+    # `KeepAlive` in the already-loaded plist makes launchd relaunch it
     # immediately, through the same `bin/tili-daemon`/`bin/tili-menubar`
     # symlinks Homebrew has already relinked to this version by the time
     # post_install runs — sending a signal isn't a sandboxed filesystem
     # operation, so this works where a plist rewrite doesn't.
     #
     # `quiet_system`, not `system`: pkill exits 1 when no process matches
-    # (e.g. the plist exists but the daemon/menubar isn't currently
-    # running), which `system` treats as a build failure and surfaces as a
+    # (e.g. the plist exists but the process isn't currently running),
+    # which `system` treats as a build failure and surfaces as a
     # "post-install step did not complete successfully" warning even
     # though there's nothing actually wrong.
     real_home = Dir.home(ENV.fetch("USER"))
-    daemon_plist = "#{real_home}/Library/LaunchAgents/com.tili.daemon.plist"
-    return unless File.exist?(daemon_plist)
 
-    quiet_system "pkill", "-x", "tili-daemon"
-    quiet_system "pkill", "-x", "tili-menubar"
+    restart_if_running = lambda do |label, process_name|
+      plist = "#{real_home}/Library/LaunchAgents/#{label}.plist"
+      quiet_system "pkill", "-x", process_name if File.exist?(plist)
+    end
+
+    restart_if_running.call("com.tili.daemon", "tili-daemon")
+    restart_if_running.call("com.tili.menubar", "tili-menubar")
   end
 
   def caveats
