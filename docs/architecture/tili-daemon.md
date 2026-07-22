@@ -71,10 +71,11 @@ A brand-new window's disposition (`Tile`/`Float`/`Ignore`, resolved once at
 creation — see `resolve_disposition`/`classify_new_window`) is decided by
 `apply_windows_changed` in priority order: `is_system_ui_bundle` first,
 then `is_protected_finder_dialog`, then `is_transient_empty_dialog`, then
-the user's own `floating-rules` (`matching_floating_rule`), then finally
-`tili_ax::WindowKind`'s AX-derived fallback. The first three are
-unconditional overrides — checked *before* `self.floating_rules` is
-consulted at all, so no config entry can win against them.
+`is_system_settings_suggestion_popup`, then the user's own `floating-rules`
+(`matching_floating_rule`), then finally `tili_ax::WindowKind`'s AX-derived
+fallback. The first four are unconditional overrides — checked *before*
+`self.floating_rules` is consulted at all, so no config entry can win
+against them.
 `is_system_ui_bundle` force-`Ignore`s a small denylist of system UI bundle
 ids (Dock, Spotlight, SecurityAgent, `OSDUIHelper` — the volume/brightness
 HUD host — etc.; see its own doc comment for the confirmed cases and why
@@ -102,11 +103,33 @@ volume/brightness HUD, it isn't owned by a dedicated system helper process
 at all: it's attributed to whichever app happens to be frontmost at the
 moment (e.g. `com.mitchellh.ghostty`), so a bundle-id denylist entry can't
 catch it without also force-`Ignore`ing that app's real windows. Matched by
-shape instead — `WindowKind::Dialog` with an empty title — confirmed to
-exist for well under `REMOVAL_GRACE_PERIOD` (closed ~100-120ms after
-creation) each time. Deliberately not scoped to a specific bundle id: a
-real floating dialog with no title at all is the rare case, not the
-common one.
+shape instead — `WindowKind::Dialog` with *no zoom button* and an empty
+title — confirmed to exist for well under `REMOVAL_GRACE_PERIOD` (closed
+~100-120ms after creation) each time. Deliberately not scoped to a specific
+bundle id: a real floating dialog with no title at all is the rare case,
+not the common one. The zoom-button exclusion matters because
+`WindowKind::Dialog` has a second, unrelated source: `classify_window_kind`'s
+zoom-but-no-fullscreen heuristic for Preferences/Settings-style windows
+(`tili-ax/src/window.rs`), which always carries a zoom button — without
+excluding it here, a real Settings-style window (e.g. System Settings' own
+main window) whose `AXTitle` simply hadn't populated yet at scan time got
+misidentified as the transient glyph and force-`Ignore`d, silently
+overriding any `floating-rules` entry the user had for it.
+
+`is_system_settings_suggestion_popup` handles System Settings' own
+search-suggestions dropdown (shown while typing in its search field) —
+confirmed via diagnostic logging to be a borderless, `AXUnknown`-subrole,
+chrome-less, empty-titled window: `WindowKind::Popup`, the same ambiguous
+shape as an ordinary tooltip/context-menu overlay, which normally defaults
+to `Ignore`. The problem is that a bare `rule app-id="com.apple.systempreferences"`
+`floating-rules` entry (written for the app's real Preferences/Settings
+windows) has no way to exclude just this one auxiliary window, and an
+explicit rule always wins over the kind-based default — so the user's own
+config was forcing this popup to float/center too. Scoped to this one
+bundle id (unlike `is_transient_empty_dialog`'s deliberately app-agnostic
+match), since a `Popup`-shaped, empty-titled window is the common,
+unremarkable shape for tooltips/menus in general — force-`Ignore`ing that
+globally would be too broad.
 
 `workspace_focus` remembers each workspace's last-focused node — tiled or
 floating — so switching back restores where you left off. A new window

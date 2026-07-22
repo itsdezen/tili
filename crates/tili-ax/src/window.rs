@@ -127,6 +127,7 @@ pub struct AxWindow {
     frame: Rect,
     element: AXUIElement,
     kind: WindowKind,
+    has_zoom_button: bool,
     minimized: bool,
     fullscreen: bool,
 }
@@ -301,6 +302,7 @@ impl AxWindow {
             frame,
             element,
             kind,
+            has_zoom_button,
             minimized,
             fullscreen,
         })
@@ -352,6 +354,16 @@ impl AxWindow {
 
     pub fn kind(&self) -> WindowKind {
         self.kind
+    }
+
+    /// Whether the window reported an `AXZoomButton` at classification
+    /// time — the exact signal `classify_window_kind` uses to promote a
+    /// standard-subrole window to `Dialog` for Preferences/Settings-style
+    /// windows. Exposed so callers can tell that case apart from a
+    /// `Dialog` reached via subrole match alone (see
+    /// `is_transient_empty_dialog` in `tili-daemon`).
+    pub fn has_zoom_button(&self) -> bool {
+        self.has_zoom_button
     }
 
     pub fn minimized(&self) -> bool {

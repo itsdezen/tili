@@ -8,6 +8,34 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-23
+
+### Fixed
+
+- **A Preferences/Settings-style window (e.g. System Settings' own main
+  window) could be force-`Ignore`d instead of floating/centering**, even
+  with an explicit `floating-rules` entry asking for it to float.
+  `is_transient_empty_dialog` (added to catch the input-source-switch HUD
+  glyph) matched any `WindowKind::Dialog` with an empty title, but a
+  Preferences/Settings-style window also reaches `Dialog` via
+  `classify_window_kind`'s zoom-but-no-fullscreen heuristic — and its
+  `AXTitle` routinely reads empty at the exact moment tili scans it,
+  before AX has populated it. That race got it misidentified as the
+  transient HUD glyph and force-`Ignore`d, overriding the user's own
+  config. `is_transient_empty_dialog` now also requires the window to have
+  no zoom button, which the HUD glyph never has but a Settings-style
+  window always does.
+- **System Settings' search-suggestions dropdown (shown while typing in its
+  search field) was floating and centering instead of being left alone.**
+  Confirmed via diagnostic logging it's a borderless, chrome-less,
+  empty-titled `WindowKind::Popup` — the same ambiguous shape as an
+  ordinary tooltip/menu, which normally defaults to `Ignore`. The user's own
+  `rule app-id="com.apple.systempreferences"` `floating-rules` entry (meant
+  for the app's real Preferences windows) has no way to exclude just this
+  one auxiliary window, and an explicit rule always wins over the
+  kind-based default. Now force-`Ignore`d unconditionally, regardless of
+  `floating-rules` config, the same way Finder's protected dialogs are.
+
 ## [0.5.1] - 2026-07-22
 
 ### Fixed

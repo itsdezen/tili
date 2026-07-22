@@ -524,14 +524,55 @@ fn is_protected_finder_dialog(bundle_id: Option<&str>, title: &str) -> bool {
 /// (e.g. `com.mitchellh.ghostty`), not a dedicated system helper process,
 /// so `SYSTEM_UI_BUNDLE_IDS` can't catch it without also force-`Ignore`ing
 /// that app's real windows. Scoped by shape instead: it classifies
-/// `WindowKind::Dialog` (no chrome buttons, matching the default AX
-/// subrole) with an empty title, and was confirmed to exist for well under
-/// `REMOVAL_GRACE_PERIOD` (closed ~100-120ms after creation) — a real
-/// floating dialog is the rare case that also happens to have no title, not
-/// the common one, so this is a deliberately broad match rather than one
-/// scoped to a specific app.
-fn is_transient_empty_dialog(kind: tili_ax::WindowKind, title: &str) -> bool {
-    kind == tili_ax::WindowKind::Dialog && title.is_empty()
+/// `WindowKind::Dialog` with no zoom button and an empty title, and was
+/// confirmed to exist for well under `REMOVAL_GRACE_PERIOD` (closed
+/// ~100-120ms after creation) — a real floating dialog is the rare case
+/// that also happens to have no title, not the common one, so this is a
+/// deliberately broad match rather than one scoped to a specific app.
+///
+/// The `!has_zoom_button` guard excludes the *other* way a window reaches
+/// `WindowKind::Dialog`: `classify_window_kind`'s zoom-but-no-fullscreen
+/// heuristic for Preferences/Settings-style windows (see
+/// `tili-ax/src/window.rs`), which by construction always has a zoom
+/// button. Without it, a real Preferences/Settings window (e.g. System
+/// Settings' own main window) whose `AXTitle` just hasn't populated yet at
+/// scan time — a routine AX timing race, not a transient overlay — got
+/// force-`Ignore`d here, silently overriding the user's own `floating-rules`
+/// entry for it.
+fn is_transient_empty_dialog(
+    kind: tili_ax::WindowKind,
+    title: &str,
+    has_zoom_button: bool,
+) -> bool {
+    kind == tili_ax::WindowKind::Dialog && title.is_empty() && !has_zoom_button
+}
+
+const SYSTEM_SETTINGS_BUNDLE_ID: &str = "com.apple.systempreferences";
+
+/// System Settings' search-suggestions dropdown (shown while typing in its
+/// search field): confirmed via diagnostic logging to be a borderless
+/// `AXUnknown`-subrole window with no chrome buttons and no title —
+/// `tili_ax::WindowKind::Popup`, the same ambiguous shape as an ordinary
+/// tooltip/context-menu overlay, which normally defaults to `Ignore`
+/// (see `resolve_disposition`). But the user's own `com.apple.systempreferences`
+/// `floating-rules` entry — meant for the app's real Preferences/Settings
+/// windows — matches this popup too, since a plain app-id rule has no way
+/// to exclude one specific auxiliary window, and an explicit rule always
+/// wins over the kind-based default. Force-`Ignore`d unconditionally here,
+/// same override mechanism as `is_protected_finder_dialog`, since — unlike
+/// the input-source-switch HUD glyph `is_transient_empty_dialog` already
+/// handles — a `Popup`-shaped, empty-titled window is common enough
+/// elsewhere (ordinary tooltips/menus in other apps) that force-`Ignore`ing
+/// it globally would be too broad; scoping to this one bundle id keeps it
+/// safe.
+fn is_system_settings_suggestion_popup(
+    bundle_id: Option<&str>,
+    kind: tili_ax::WindowKind,
+    title: &str,
+) -> bool {
+    bundle_id.is_some_and(|id| id == SYSTEM_SETTINGS_BUNDLE_ID)
+        && kind == tili_ax::WindowKind::Popup
+        && title.is_empty()
 }
 
 /// What a brand-new window's placement disposition should be: an explicit
@@ -1028,7 +1069,8 @@ impl WmState {
             let rule_mode = if is_new {
                 if is_system_ui_bundle(window.bundle_id())
                     || is_protected_finder_dialog(window.bundle_id(), window.title())
-                    || is_transient_empty_dialog(kind, window.title())
+                    || is_transient_empty_dialog(kind, window.title(), window.has_zoom_button())
+                    || is_system_settings_suggestion_popup(window.bundle_id(), kind, window.title())
                 {
                     Some(tili_config::FloatingRuleMode::Ignore)
                 } else {
@@ -3680,6 +3722,94 @@ mod tests {
             "Copy"
         ));
         assert!(!is_protected_finder_dialog(None, "Copy"));
+    }
+
+    #[test]
+    fn is_transient_empty_dialog_matches_the_chromeless_hud_glyph_shape() {
+        assert!(is_transient_empty_dialog(
+            tili_ax::WindowKind::Dialog,
+            "",
+            false
+        ));
+    }
+
+    #[test]
+    fn is_transient_empty_dialog_does_not_match_a_zoom_button_settings_window() {
+        // A Preferences/Settings-style window (e.g. System Settings' own
+        // main window) reaches `WindowKind::Dialog` via the zoom-but-no-
+        // fullscreen heuristic, not via subrole match, and always has a
+        // zoom button. Its `AXTitle` can legitimately still be empty at
+        // scan time (a routine AX timing race, not a transient overlay) —
+        // this must not force-`Ignore` it and override the user's own
+        // `floating-rules` entry for it.
+        assert!(!is_transient_empty_dialog(
+            tili_ax::WindowKind::Dialog,
+            "",
+            true
+        ));
+    }
+
+    #[test]
+    fn is_transient_empty_dialog_requires_an_empty_title() {
+        assert!(!is_transient_empty_dialog(
+            tili_ax::WindowKind::Dialog,
+            "Some Dialog",
+            false
+        ));
+    }
+
+    #[test]
+    fn is_transient_empty_dialog_requires_dialog_kind() {
+        assert!(!is_transient_empty_dialog(
+            tili_ax::WindowKind::Standard,
+            "",
+            false
+        ));
+        assert!(!is_transient_empty_dialog(
+            tili_ax::WindowKind::Popup,
+            "",
+            false
+        ));
+    }
+
+    #[test]
+    fn is_system_settings_suggestion_popup_matches_the_confirmed_shape() {
+        // Confirmed via diagnostic logging: the search-suggestions dropdown
+        // is a borderless, empty-titled `Popup`-kind window belonging to
+        // System Settings.
+        assert!(is_system_settings_suggestion_popup(
+            Some("com.apple.systempreferences"),
+            tili_ax::WindowKind::Popup,
+            ""
+        ));
+    }
+
+    #[test]
+    fn is_system_settings_suggestion_popup_is_scoped_to_the_app() {
+        assert!(!is_system_settings_suggestion_popup(
+            Some("com.apple.finder"),
+            tili_ax::WindowKind::Popup,
+            ""
+        ));
+        assert!(!is_system_settings_suggestion_popup(
+            None,
+            tili_ax::WindowKind::Popup,
+            ""
+        ));
+    }
+
+    #[test]
+    fn is_system_settings_suggestion_popup_requires_popup_kind_and_empty_title() {
+        assert!(!is_system_settings_suggestion_popup(
+            Some("com.apple.systempreferences"),
+            tili_ax::WindowKind::Dialog,
+            ""
+        ));
+        assert!(!is_system_settings_suggestion_popup(
+            Some("com.apple.systempreferences"),
+            tili_ax::WindowKind::Popup,
+            "Wi‑Fi"
+        ));
     }
 
     #[test]
