@@ -8,6 +8,18 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-22
+
+### Fixed
+
+- **`brew install`/`brew upgrade` could report a false "post-install step
+  did not complete successfully" warning.** `post_install` used `system`
+  to run `pkill -x tili-daemon`/`pkill -x tili-menubar`, which treats
+  `pkill`'s exit 1 (no matching process — the normal case whenever the
+  LaunchAgent plist exists but the process isn't currently running) as a
+  build failure. Switched to `quiet_system`, which doesn't raise on a
+  non-zero exit.
+
 ## [0.4.1] - 2026-07-22
 
 ### Fixed

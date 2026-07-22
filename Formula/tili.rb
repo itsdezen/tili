@@ -62,12 +62,18 @@ class Tili < Formula
     # symlinks Homebrew has already relinked to this version by the time
     # post_install runs — sending a signal isn't a sandboxed filesystem
     # operation, so this works where a plist rewrite doesn't.
+    #
+    # `quiet_system`, not `system`: pkill exits 1 when no process matches
+    # (e.g. the plist exists but the daemon/menubar isn't currently
+    # running), which `system` treats as a build failure and surfaces as a
+    # "post-install step did not complete successfully" warning even
+    # though there's nothing actually wrong.
     real_home = Dir.home(ENV.fetch("USER"))
     daemon_plist = "#{real_home}/Library/LaunchAgents/com.tili.daemon.plist"
     return unless File.exist?(daemon_plist)
 
-    system "pkill", "-x", "tili-daemon"
-    system "pkill", "-x", "tili-menubar"
+    quiet_system "pkill", "-x", "tili-daemon"
+    quiet_system "pkill", "-x", "tili-menubar"
   end
 
   def caveats
