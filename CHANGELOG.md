@@ -8,6 +8,22 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-22
+
+### Fixed
+
+- **The menu bar badge could show up in System Settings' Menu Bar list as
+  `tili-menubar` with no icon instead of `tili` with its logo.**
+  `sibling_binary_path` derived the badge's LaunchAgent path from
+  `current_exe()`'s parent directory without canonicalizing first — since
+  Homebrew's `bin/` prefix holds a `tili-menubar` symlink right next to
+  `tili`'s own, an unresolved `current_exe()` found it there and baked
+  that symlink path into the plist instead of the real path inside
+  `tili.app`, which is what actually carries the bundle's name/icon.
+  `sibling_binary_path` now canonicalizes first. Existing installs pick
+  this up after `tili stop && tili start` (or a fresh `brew upgrade` per
+  its caveats).
+
 ## [0.4.2] - 2026-07-22
 
 ### Fixed

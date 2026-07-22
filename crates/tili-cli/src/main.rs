@@ -392,9 +392,15 @@ fn launch_agent_path(label: &str) -> std::path::PathBuf {
 /// bin directory, whether that's a Homebrew prefix or `cargo build`'s
 /// `target/debug`) — resolved relative to this running binary rather than
 /// relying on it being on `PATH`, which a LaunchAgent's minimal
-/// environment doesn't guarantee.
+/// environment doesn't guarantee. Canonicalized first: Homebrew's `bin/`
+/// prefix holds a symlink to `tili` *and* one to `tili-menubar` side by
+/// side, so an unresolved `current_exe()` would find the sibling right
+/// there and bake that symlink path into the LaunchAgent plist instead of
+/// the real path inside `tili.app` — which is what actually carries the
+/// bundle's name/icon in System Settings.
 fn sibling_binary_path(name: &str) -> std::path::PathBuf {
     std::env::current_exe()
+        .and_then(std::fs::canonicalize)
         .ok()
         .and_then(|p| p.parent().map(|dir| dir.join(name)))
         .filter(|p| p.exists())
