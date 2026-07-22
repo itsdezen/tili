@@ -8,6 +8,46 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-22
+
+### Fixed
+
+- **Moving "the focused window" to another workspace could act on a stale,
+  previously-focused window instead of whatever the user actually had
+  focused** — most reliably reproduced with a floating window (e.g. Note)
+  sharing a workspace with a tiled one (e.g. Ghostty). Root-caused to two
+  compounding gaps: (1) `tili-daemon`'s event loop only applied a pending
+  new-window registration on the next 30ms maintenance tick, so a hotkey
+  fired right after opening a window could dispatch before that window was
+  even known about — now drained before dispatching a hotkey- or
+  socket-triggered command instead. (2) The system-wide focus check
+  (`sync_focus_from_frontmost`, run before every command) read
+  `kAXFocusedWindowAttribute`, an attribute macOS's system-wide
+  accessibility element never actually populates — confirmed on real
+  hardware it silently failed on *every* call, every time, regardless of
+  what was focused. Now reads `kAXFocusedUIElementAttribute` (the one
+  attribute the system-wide element reliably supports) and resolves the
+  owning window from whatever control that returns.
+- **`tili uninstall` could still delete the real config file when a
+  dotfiles tool symlinked the whole `~/.config/tili` directory**, rather
+  than just `tili.kdl` itself — the file-level symlink case was already
+  handled, but a symlinked ancestor directory wasn't. Now walks every
+  ancestor of the config path and leaves it in place if any of them is a
+  symlink.
+- **`brew upgrade tili` didn't actually restart onto the new binary.**
+  `post_install`'s restart works by signaling the running process and
+  relying on the LaunchAgent's `KeepAlive` to relaunch it — but the plist's
+  cached path was fully resolved to a specific, version-pinned Cellar path,
+  which never changes on its own, so every upgrade kept relaunching the
+  exact same old binary until a manual `tili stop && tili start`. `tili
+  start` now resolves that path through Homebrew's `opt/tili` symlink
+  instead, which Homebrew itself relinks to the current keg on every
+  upgrade. **If you're upgrading from an affected version (v0.4.3 or
+  later), run `tili stop && tili start` once after this upgrade** to
+  regenerate the LaunchAgent plist with the corrected path — this fix only
+  changes what a future `tili start` writes, not an already-installed
+  plist.
+
 ## [0.5.0] - 2026-07-22
 
 ### Added
