@@ -39,6 +39,56 @@ cargo build -p tili-daemon
 `tili-tree` has no macOS dependencies and is the easiest crate to
 contribute to without a Mac.
 
+## Testing local builds on-device
+
+`cargo build`/`cargo test` don't get you a runnable daemon — `tili-daemon`
+needs an Accessibility grant and a proper `.app` bundle. To test your
+changes on-device, first create a local code-signing identity so you don't
+have to re-grant Accessibility on every rebuild:
+
+1. Open Keychain Access > Certificate Assistant > Create a Certificate.
+2. Name it exactly `tili Self-Signed`, Identity Type "Self Signed Root",
+   Certificate Type "Code Signing".
+
+This is a certificate of your own, local to your machine — unrelated to the
+maintainer's actual release-signing certificate (see [Release
+engineering](#release-engineering) below); it just needs the same Common
+Name so the tooling's default `TILI_SIGN_IDENTITY` picks it up. TCC grants
+Accessibility permission per signing identity, so reusing this one cert
+across every dev rebuild means approving it once instead of on every build.
+
+**Caveat**: because your cert's key differs from the maintainer's real
+release-signing cert (even though both are named `tili Self-Signed`), TCC
+still treats them as different identities. If you already have the
+Homebrew release installed, your first dev build still needs a fresh
+Accessibility grant. The dev build also installs as a separate `tili-dev`
+binary with its own LaunchAgent — running both `tili start` and `tili-dev
+start` without stopping one first leaves two daemons registered at once, so
+run `tili stop`/`tili-dev stop` when switching between them.
+
+With the cert in place, build/bundle/sign/run with the same commands
+`build-dev.sh` runs internally:
+
+```sh
+tili stop 2>/dev/null || true # avoid a signing-prompt race with a running daemon
+
+target="$(rustc -vV | awk '/^host:/ { print $2 }')"
+version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
+
+cargo build --release --target "$target" -p tili-daemon -p tili-cli -p tili-menubar
+cargo run -p xtask -- bundle --target "$target" --version "$version"
+cargo run -p xtask -- codesign \
+  --app-path "target/$target/release/tili.app" \
+  --identity "tili Self-Signed"
+
+"target/$target/release/tili.app/Contents/MacOS/tili" start
+```
+
+Once you're comfortable with these steps, `sh build-dev.sh` runs all of them
+for you (plus installing a `tili-dev` wrapper on PATH at
+`/opt/homebrew/bin`) — after that, every test cycle is just `sh
+build-dev.sh` followed by `tili-dev start`.
+
 ## Before opening a PR
 
 Run the exact gate CI enforces — a red check blocks merge, so it's faster to
