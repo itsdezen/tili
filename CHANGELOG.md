@@ -8,6 +8,70 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-22
+
+### Added
+
+- **`tili doctor [--fix]`** — checks config syntax, daemon/menu-bar
+  LaunchAgent state, the IPC socket, Accessibility/Input Monitoring
+  permission grants, and the last config load's warnings. Offers
+  confirmed auto-fix for whatever's safely automatable (a stale socket, an
+  unloaded LaunchAgent, a missing half of the daemon/menu-bar pair); a bad
+  config file or an ungranted permission is reported only, never guessed
+  at. `--fix` skips the confirmation prompt for scripting.
+
+### Changed
+
+- **`tili-daemon` and `tili-menubar` now run as a synchronized pair,
+  never one without the other.** `tili start` requires both LaunchAgents
+  to install, rolling the daemon back if the menu bar badge's install
+  fails; `tili-menubar` gives up and stops itself after a sustained run of
+  daemon-unreachable retries; `tili-daemon`'s shutdown paths
+  (`Command::Shutdown`, `stop_self`) tear the menu bar's LaunchAgent down
+  too.
+
+### Fixed
+
+- **A hotkey-triggered command that failed (no window focused, an
+  undeclared workspace, ...) left no trace anywhere** — unlike the
+  socket path, which already reported the error back to `tili-cli`. Now
+  logged.
+- **The daemon's Unix socket had no cap on an incoming command's declared
+  length**, so a stray or malformed local client could drive an
+  unbounded allocation (up to ~4 GiB) just from its 4-byte length prefix.
+  Capped at 1 MiB.
+- **`tili start` could print a spurious `Load failed: 5: Input/output
+  error` from `launchctl` before its own "LaunchAgent installed" message.**
+  `install_launch_agent` called `launchctl load -w` unconditionally, even
+  when the label was already loaded (e.g. the menu bar badge's LaunchAgent
+  surviving from an earlier `tili start`) — a well-known legacy
+  `launchctl` quirk on an already-loaded label, harmless but noisy, and it
+  also meant a rewritten plist (e.g. a changed binary path after an
+  upgrade) silently didn't take effect. Now unloads first if already
+  loaded.
+- **`tili uninstall` deleted `~/.config/tili/tili.kdl` even when it was a
+  symlink**, breaking a dotfiles manager's (stow, chezmoi, ...) managed
+  arrangement. Now left in place if it's a symlink.
+- **Toggling input sources (Globe/Ctrl-Space) showed the "A" HUD glyph as
+  a floating window tili re-centered**, instead of leaving it alone like
+  other transient system UI. Unlike the volume/brightness HUD
+  (`com.apple.OSDUIHelper`, also added to the system-UI bundle-id
+  denylist while investigating this), this glyph isn't owned by a
+  dedicated system process at all — it's attributed to whichever app is
+  frontmost at the moment, confirmed via diagnostic logging. Now matched
+  by shape instead: any brand-new `Dialog`-kind window with an empty title
+  is ignored, regardless of which app it's attributed to.
+- **Moving a focused floating window to another workspace could move a
+  different, unrelated tiled window instead**, when the floating window
+  belonged to a different app than whatever macOS still considered
+  frontmost. `sync_focus_from_frontmost` resolved "what's focused" via
+  `frontmost_app_pid()` (which app is frontmost) then that app's own
+  focused window — a two-hop lookup that misses a floating panel/utility
+  window that can hold real AX focus without its owning app ever becoming
+  `NSWorkspace.frontmostApplication`. Now queries the system-wide focused
+  window directly (`AxWindow::system_focused_id`), sidestepping the
+  "which app" hop entirely.
+
 ## [0.4.4] - 2026-07-22
 
 ### Fixed

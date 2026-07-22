@@ -200,7 +200,10 @@ impl AxWindow {
     /// wants the latter, since it already knows the exact pid it just
     /// placed windows for).
     pub fn system_focused_id() -> Option<WindowId> {
-        let focused = axuielement::system_wide()?.focused_window().ok().flatten()?;
+        let focused = axuielement::system_wide()?
+            .focused_window()
+            .ok()
+            .flatten()?;
         Self::resolve_window_id(&focused)
     }
 
