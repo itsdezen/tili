@@ -181,6 +181,29 @@ impl AxWindow {
         Self::resolve_window_id(&focused)
     }
 
+    /// The `WindowId` of whatever window genuinely holds OS focus right
+    /// now, system-wide — `AXUIElementCreateSystemWide()`'s
+    /// `kAXFocusedWindowAttribute`, read directly rather than going through
+    /// "which app is frontmost" first. That two-hop path
+    /// (`workspace::frontmost_app_pid()`, then *that* app's own focused
+    /// window via `focused_id_for_pid`) misses a floating panel/utility
+    /// window belonging to a *different* app than whatever
+    /// `NSWorkspace.frontmostApplication` still reports: some
+    /// non-activating panels can become the real AX-focused window without
+    /// their owning app ever becoming frontmost, so `frontmost_app_pid()`
+    /// keeps returning the previously-frontmost app's pid and the focus
+    /// sync silently no-ops. Querying the system-wide focused window
+    /// directly sidesteps the "which app" hop entirely — used by
+    /// `WmState::sync_focus_from_frontmost`, the one call site that needs
+    /// "whatever's really focused right now" rather than "this specific
+    /// pid's focused window" (`apply_windows_changed`'s own re-sync still
+    /// wants the latter, since it already knows the exact pid it just
+    /// placed windows for).
+    pub fn system_focused_id() -> Option<WindowId> {
+        let focused = axuielement::system_wide()?.focused_window().ok().flatten()?;
+        Self::resolve_window_id(&focused)
+    }
+
     /// Builds an `AxWindow` from an `AXUIElement` known to be a window
     /// (typically an entry from an application's `AXWindows` attribute).
     /// `bundle_id` is resolved once per process by the caller (see

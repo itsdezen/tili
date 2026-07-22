@@ -482,6 +482,13 @@ const SYSTEM_UI_BUNDLE_IDS: &[&str] = &[
     "com.apple.notificationcenterui",
     // Siri AI.app's bundle id — not self-descriptive from the string alone.
     "com.apple.campo",
+    // The on-screen-display HUD host — volume/brightness/caps-lock. Unlike
+    // those, the input-source-switch glyph (Globe/Ctrl-Space) turned out
+    // *not* to be owned by this process — confirmed via diagnostic logging
+    // it's attributed to whichever app is frontmost at the moment instead
+    // (see `is_transient_empty_dialog`, which catches that one by shape
+    // rather than bundle id).
+    "com.apple.OSDUIHelper",
 ];
 
 fn is_system_ui_bundle(bundle_id: Option<&str>) -> bool {
@@ -508,6 +515,23 @@ static PROTECTED_FINDER_DIALOG_TITLE: LazyLock<Regex> =
 fn is_protected_finder_dialog(bundle_id: Option<&str>, title: &str) -> bool {
     bundle_id.is_some_and(|id| id == FINDER_BUNDLE_ID)
         && PROTECTED_FINDER_DIALOG_TITLE.is_match(title)
+}
+
+/// Transient system overlays like the input-source-switch HUD glyph
+/// (Globe/Ctrl-Space) don't have a fixed owning bundle id the way the
+/// volume/brightness HUD does — confirmed via diagnostic logging that it
+/// gets attributed to whichever app happens to be frontmost at the moment
+/// (e.g. `com.mitchellh.ghostty`), not a dedicated system helper process,
+/// so `SYSTEM_UI_BUNDLE_IDS` can't catch it without also force-`Ignore`ing
+/// that app's real windows. Scoped by shape instead: it classifies
+/// `WindowKind::Dialog` (no chrome buttons, matching the default AX
+/// subrole) with an empty title, and was confirmed to exist for well under
+/// `REMOVAL_GRACE_PERIOD` (closed ~100-120ms after creation) — a real
+/// floating dialog is the rare case that also happens to have no title, not
+/// the common one, so this is a deliberately broad match rather than one
+/// scoped to a specific app.
+fn is_transient_empty_dialog(kind: tili_ax::WindowKind, title: &str) -> bool {
+    kind == tili_ax::WindowKind::Dialog && title.is_empty()
 }
 
 /// What a brand-new window's placement disposition should be: an explicit
@@ -1004,6 +1028,7 @@ impl WmState {
             let rule_mode = if is_new {
                 if is_system_ui_bundle(window.bundle_id())
                     || is_protected_finder_dialog(window.bundle_id(), window.title())
+                    || is_transient_empty_dialog(kind, window.title())
                 {
                     Some(tili_config::FloatingRuleMode::Ignore)
                 } else {
@@ -1839,25 +1864,45 @@ impl WmState {
     /// background event.
     /// Called once at the top of `dispatch()`, covering both socket- and
     /// hotkey-triggered commands.
+    ///
+    /// Uses `tili_ax::AxWindow::system_focused_id` (the system-wide
+    /// `kAXFocusedWindowAttribute`, not "which app is frontmost then that
+    /// app's focused window") — a floating panel/utility window can hold
+    /// real AX focus without its owning app ever becoming
+    /// `NSWorkspace.frontmostApplication`, which the app-first two-hop
+    /// lookup would silently miss (the sync would keep resolving to
+    /// whichever *other* app's window was frontmost before, so a command
+    /// like `move-to-workspace` would act on that stale window instead of
+    /// the floating one actually focused). See `sync_focus_from_pid`, used
+    /// by `apply_windows_changed` instead, which *does* want the app-first
+    /// lookup since it already knows the exact pid it just placed windows
+    /// for.
     pub fn sync_focus_from_frontmost(&mut self) {
-        if let Some(pid) = tili_ax::workspace::frontmost_app_pid() {
-            self.sync_focus_from_pid(pid);
+        if let Some(window_id) = tili_ax::AxWindow::system_focused_id() {
+            self.sync_focus_to_window(window_id);
         }
     }
 
     /// Syncs `workspace_focus` to reflect a real OS focus change for `pid`'s
-    /// currently AX-focused/main window — see `sync_focus_from_frontmost`,
-    /// the only real caller. A no-op if: the pid's focused window can't be
-    /// resolved, it isn't one of ours, it's neither `Tiled` nor `Floating`
-    /// (every other special state has no tree node to focus), or it's
-    /// already the recorded focus for its workspace — deliberately doesn't
-    /// relayout or raise anything, since the OS already did the actual
-    /// focusing here; this only updates internal bookkeeping to match
-    /// reality.
+    /// currently AX-focused/main window — used by `apply_windows_changed`'s
+    /// own re-sync (see its call site's doc comment), which already knows
+    /// the specific pid it just placed windows for.
     fn sync_focus_from_pid(&mut self, pid: i32) {
-        let Some(window_id) = tili_ax::AxWindow::focused_id_for_pid(pid) else {
-            return;
-        };
+        if let Some(window_id) = tili_ax::AxWindow::focused_id_for_pid(pid) {
+            self.sync_focus_to_window(window_id);
+        }
+    }
+
+    /// Shared core: given a `WindowId` known to hold real OS focus right
+    /// now (however the caller resolved it — see `sync_focus_from_frontmost`
+    /// and `sync_focus_from_pid`), updates `workspace_focus` bookkeeping to
+    /// match. A no-op if: the window isn't one of ours, it's neither
+    /// `Tiled` nor `Floating` (every other special state has no tree node
+    /// to focus), or it's already the recorded focus for its workspace —
+    /// deliberately doesn't relayout or raise anything, since the OS
+    /// already did the actual focusing here; this only updates internal
+    /// bookkeeping to match reality.
+    fn sync_focus_to_window(&mut self, window_id: WindowId) {
         let Some(placement) = self.placements.get(&window_id) else {
             return;
         };

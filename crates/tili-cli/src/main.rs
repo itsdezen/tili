@@ -574,6 +574,15 @@ fn daemon_is_reachable() -> bool {
 /// `~/Library/Logs/tili/{log_name}.{log,err.log}`) and `launchctl load`s
 /// it. Shared by `start_daemon` (the daemon itself) and the menu bar
 /// badge — same mechanism, different binary/label/log prefix.
+///
+/// If `label` is already loaded (e.g. a previous `tili start` installed it
+/// and its process is still running), unloads it first. `launchctl load`
+/// on an already-loaded label doesn't apply a rewritten plist's contents —
+/// launchd keeps using the definition it cached at the earlier `load` — it
+/// just fails noisily (`Load failed: 5: Input/output error`) while still
+/// exiting 0, which this function would otherwise report as success.
+/// Unloading first avoids that noise and makes sure a changed
+/// `ProgramArguments` path (e.g. after an upgrade) actually takes effect.
 fn install_launch_agent(label: &str, binary: &std::path::Path, log_name: &str) -> Result<(), ()> {
     let plist_path = launch_agent_path(label);
     let Some(parent) = plist_path.parent() else {
@@ -582,6 +591,13 @@ fn install_launch_agent(label: &str, binary: &std::path::Path, log_name: &str) -
     if let Err(e) = std::fs::create_dir_all(parent) {
         eprintln!("tili: couldn't create {}: {e}", parent.display());
         return Err(());
+    }
+
+    if launch_agent_is_loaded(label) {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", "-w"])
+            .arg(&plist_path)
+            .status();
     }
 
     let home = std::env::var("HOME").unwrap_or_default();
@@ -725,10 +741,25 @@ fn uninstall() {
     stop_daemon();
 
     let config_path = default_config_path();
-    if config_path.exists()
-        && let Err(e) = std::fs::remove_file(&config_path)
-    {
-        eprintln!("tili: couldn't remove {}: {e}", config_path.display());
+    // `symlink_metadata` doesn't follow the link, unlike `Path::exists()` —
+    // needed to tell "a real file" from "a symlink a dotfiles manager
+    // (stow, chezmoi, ...) points here." Removing the symlink itself would
+    // still break that tool's arrangement even though it'd leave the real
+    // target file untouched (`remove_file` on a symlink only unlinks the
+    // link), so a symlinked config is left alone entirely.
+    match std::fs::symlink_metadata(&config_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            println!(
+                "tili: {} is a symlink (likely managed by a dotfiles tool) — leaving it in place",
+                config_path.display()
+            );
+        }
+        Ok(_) => {
+            if let Err(e) = std::fs::remove_file(&config_path) {
+                eprintln!("tili: couldn't remove {}: {e}", config_path.display());
+            }
+        }
+        Err(_) => {}
     }
 
     let home = std::env::var("HOME").unwrap_or_default();

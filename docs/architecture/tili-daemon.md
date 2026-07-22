@@ -70,29 +70,43 @@ native fullscreen all work correctly for a floating focus and don't guard.
 A brand-new window's disposition (`Tile`/`Float`/`Ignore`, resolved once at
 creation — see `resolve_disposition`/`classify_new_window`) is decided by
 `apply_windows_changed` in priority order: `is_system_ui_bundle` first,
-then `is_protected_finder_dialog`, then the user's own `floating-rules`
-(`matching_floating_rule`), then finally `tili_ax::WindowKind`'s AX-derived
-fallback. The first two are unconditional overrides — checked *before*
-`self.floating_rules` is consulted at all, so no config entry can win
-against them. `is_system_ui_bundle` force-`Ignore`s a small denylist of
-system UI bundle ids (Dock, Spotlight, SecurityAgent, etc. — see its own
-doc comment for the confirmed cases and why it's bundle-id-only).
-`is_protected_finder_dialog` does the same for exactly two Finder windows —
-the "Copy" progress sheet and the "Connect to Server" dialog — matched by
-bundle id *and* title, since (unlike the system UI cases) the rest of
-Finder's windows must still tile/float per the user's own config; only
-these two specific windows are unconditionally `Ignore`d. This is a
-confirmed real quirk, not preemptive: Finder's Copy dialog doesn't reliably
-self-report as a dialog via AX subrole (other tiling window managers hit
-the identical issue), so `tili_ax::WindowKind`'s structural classification
-alone can't be trusted to catch it — it's `Ignore`, not `Float`, because
-the user's ask was "never touch these windows at all," not "float them."
-Titles here are static (system-assigned, not content-derived), so the
-general title-not-yet-populated-at-window-creation risk that applies to
+then `is_protected_finder_dialog`, then `is_transient_empty_dialog`, then
+the user's own `floating-rules` (`matching_floating_rule`), then finally
+`tili_ax::WindowKind`'s AX-derived fallback. The first three are
+unconditional overrides — checked *before* `self.floating_rules` is
+consulted at all, so no config entry can win against them.
+`is_system_ui_bundle` force-`Ignore`s a small denylist of system UI bundle
+ids (Dock, Spotlight, SecurityAgent, `OSDUIHelper` — the volume/brightness
+HUD host — etc.; see its own doc comment for the confirmed cases and why
+it's bundle-id-only). `is_protected_finder_dialog` does the same for
+exactly two Finder windows — the "Copy" progress sheet and the "Connect to
+Server" dialog — matched by bundle id *and* title, since (unlike the
+system UI cases) the rest of Finder's windows must still tile/float per
+the user's own config; only these two specific windows are unconditionally
+`Ignore`d. This is a confirmed real quirk, not preemptive: Finder's Copy
+dialog doesn't reliably self-report as a dialog via AX subrole (other
+tiling window managers hit the identical issue), so `tili_ax::WindowKind`'s
+structural classification alone can't be trusted to catch it — it's
+`Ignore`, not `Float`, because the user's ask was "never touch these
+windows at all," not "float them." Titles here are static
+(system-assigned, not content-derived), so the general
+title-not-yet-populated-at-window-creation risk that applies to
 user-authored `title=` rules is low in practice for this specific pair.
 Extend `is_protected_finder_dialog` only for another *confirmed* Finder
 window with the same problem, not preemptively — same rule as
 `is_system_ui_bundle`.
+
+`is_transient_empty_dialog` handles the input-source-switch HUD glyph
+(Globe/Ctrl-Space) — confirmed via diagnostic logging that, unlike the
+volume/brightness HUD, it isn't owned by a dedicated system helper process
+at all: it's attributed to whichever app happens to be frontmost at the
+moment (e.g. `com.mitchellh.ghostty`), so a bundle-id denylist entry can't
+catch it without also force-`Ignore`ing that app's real windows. Matched by
+shape instead — `WindowKind::Dialog` with an empty title — confirmed to
+exist for well under `REMOVAL_GRACE_PERIOD` (closed ~100-120ms after
+creation) each time. Deliberately not scoped to a specific bundle id: a
+real floating dialog with no title at all is the rare case, not the
+common one.
 
 `workspace_focus` remembers each workspace's last-focused node — tiled or
 floating — so switching back restores where you left off. A new window
@@ -329,9 +343,21 @@ navigation is.
 
 `dispatch()` calls `WmState::sync_focus_from_frontmost()` before the
 command match — resolves which window real macOS currently considers
-focused (via `tili_ax::workspace::frontmost_app_pid`, an
-`AXUIElementCreateSystemWide`-based query) and updates `workspace_focus`
-synchronously, immediately before that command runs. This is deliberately
+focused (via `tili_ax::AxWindow::system_focused_id`, an
+`AXUIElementCreateSystemWide`-based query of the system-wide
+`kAXFocusedWindowAttribute` directly, not "which app is frontmost, then
+that app's own focused window") and updates `workspace_focus`
+synchronously, immediately before that command runs. The direct
+system-wide query matters: a floating panel/utility window can hold real
+AX focus without its owning app ever becoming
+`NSWorkspace.frontmostApplication` (confirmed for some non-activating
+panels), which an app-first two-hop lookup — `tili_ax::workspace::
+frontmost_app_pid()` then that pid's own focused window — would silently
+miss, leaving `workspace_focus` on whatever a *different* app's window was
+before. `apply_windows_changed`'s own re-sync (`sync_focus_from_pid`) still
+uses the per-pid, app-first lookup, since it already knows the exact pid it
+just placed windows for — both funnel into the same `sync_focus_to_window`
+bookkeeping. This is deliberately
 not a reactive background sync triggered by an event arriving whenever —
 confirmed on real hardware that a background poll/notification updating
 focus asynchronously has an unavoidable race against the very next hotkey
@@ -349,13 +375,14 @@ resync tick) all failed to fully close: even a reliably-delivered push
 notification still races the very next hotkey press, since there's no
 ordering guarantee between "the notification arrived" and "the keypress got
 processed" — only a synchronous, on-demand resolve at the top of every
-command closes that gap. `sync_focus_from_pid`
-(the function `sync_focus_from_frontmost` actually calls) updates
+command closes that gap. `sync_focus_to_window` (the shared core both
+`sync_focus_from_frontmost` and `sync_focus_from_pid` funnel into) updates
 `workspace_focus` for both `Tiled` and `Floating` placements — since
 `Node::Floating` gave floating windows a tree node too (see the
 "WmState, placements, and floating windows" section above), a real click
-into a floating window is now correctly reflected before the next command
-runs, not just a tiled one.
+into a floating window is correctly reflected before the next command
+runs, not just a tiled one, including one belonging to a different app
+than whatever macOS still considers frontmost (see above).
 
 `handle_event`'s `WmEvent::FrontmostAppChanged { .. }` arm (0.1.1) reacts by
 (eventually — see the debounce note further down) calling

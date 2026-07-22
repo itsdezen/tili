@@ -26,11 +26,17 @@ through to the generic `send()`/`print_response` path):
   `PATH` — a LaunchAgent's environment doesn't guarantee one), writes
   `~/Library/LaunchAgents/com.tili.daemon.plist` (`RunAtLoad` + `KeepAlive`
   both `true`), and `launchctl load -w`s it — this is the *only* way to run
-  tili-daemon; there's no separate foreground mode. `stop_daemon()` is the
-  reverse: `launchctl unload -w` then remove the plist. Unloading (not just
-  killing the process) is load-bearing — `KeepAlive` only respawns the job
-  while it stays loaded, so `tili stop` has to unload before the daemon can
-  actually stay down.
+  tili-daemon; there's no separate foreground mode. `install_launch_agent`
+  (shared with the menu bar badge) unloads the label first if it's already
+  loaded — `launchctl load` on an already-loaded label doesn't apply a
+  rewritten plist (launchd keeps using what it cached at the earlier
+  `load`), it just fails noisily (`Load failed: 5: Input/output error`)
+  while still exiting 0; unloading first avoids that noise and makes a
+  changed `ProgramArguments` path (e.g. after an upgrade) actually take
+  effect. `stop_daemon()` is the reverse: `launchctl unload -w` then remove
+  the plist. Unloading (not just killing the process) is load-bearing —
+  `KeepAlive` only respawns the job while it stays loaded, so `tili stop`
+  has to unload before the daemon can actually stay down.
 - `tili status` *does* talk to the socket (via `Command::Ping`) but gets
   its own wording instead of the generic "couldn't reach daemon" error
   path.
@@ -66,3 +72,10 @@ pair. Runtime desyncs (one crashing outside `tili stop`) are handled on the
 other two sides instead: `tili-daemon`'s shutdown paths tear the badge's
 LaunchAgent down too, and `tili-menubar` stops itself if the daemon goes
 unreachable for long enough — see [tili-menubar.md](tili-menubar.md).
+
+`uninstall()`'s config-file removal checks `std::fs::symlink_metadata`
+(doesn't follow the link, unlike `Path::exists()`) first — a symlinked
+`tili.kdl` is left in place rather than unlinked, since a dotfiles manager
+(stow, chezmoi, ...) likely put it there and removing even just the link
+(not the real target file `remove_file` would leave untouched) still
+breaks that tool's arrangement.
