@@ -8,6 +8,22 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-22
+
+### Fixed
+
+- **Preferences/Settings-style windows no longer get tiled.** Some apps
+  (e.g. Safari's own Settings window) present their preferences panel as
+  an ordinary `AXStandardWindow`, indistinguishable by subrole from a real
+  content window, so it fell through to `WindowKind::Standard` and got
+  tiled like any other window. `classify_window_kind` now also treats a
+  standard-subrole window as `Dialog` (tili's default float/center
+  treatment) when it has a zoom button but no full-screen button — AppKit
+  gives fullscreen-capable content windows a full-screen button and
+  non-fullscreenable utility panels a classic zoom button instead, so this
+  generalizes to any app with the same window shape rather than a
+  per-bundle-id fix.
+
 ## [0.4.0] - 2026-07-22
 
 ### Added

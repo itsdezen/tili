@@ -21,7 +21,14 @@ presenting a window with no close button is always `Popup` regardless of AX
 role/subrole, after live-hardware testing showed system-UI chrome
 occasionally slipping through the old subrole-only check and getting
 tiled/re-centered.
-A missing/ambiguous subrole otherwise falls back to whether the window has
+A standard subrole with a zoom button but no full-screen button is also
+`Dialog` — real content windows are fullscreen-capable
+(`AXFullScreenButton`), while AppKit gives non-fullscreenable utility
+panels a classic zoom button instead (`AXZoomButton`); Preferences/
+Settings-style windows are the textbook case, hardware-confirmed on
+Safari's own Settings window, which reports `AXStandardWindow` — same as
+its ordinary browser windows — but swaps full-screen for zoom. A
+missing/ambiguous subrole otherwise falls back to whether the window has
 *any* chrome button (close/fullscreen/zoom/minimize), not just fullscreen.
 `tili-daemon/src/state.rs`'s `SYSTEM_UI_BUNDLE_IDS` is a second,
 belt-and-suspenders bundle-id denylist forcing `FloatingRuleMode::Ignore`

@@ -44,22 +44,34 @@ pub enum WindowKind {
 /// app's own dialogs/popups still fall through to the subrole logic below
 /// unaffected, since `is_regular_app` is `true` for them.
 ///
-/// Below that: a known dialog subrole is `Dialog`; the standard subrole is
-/// `Standard`; a missing/ambiguous subrole falls back to whether the window
-/// has *any* window-chrome button (close/fullscreen/zoom/minimize) — a
-/// window with none of them and an ambiguous subrole is essentially always
-/// a tooltip/context-menu/popover rather than a real top-level window.
+/// Below that: a known dialog subrole is `Dialog`. A standard subrole with a
+/// zoom button but no full-screen button is also `Dialog` — real content
+/// windows are fullscreen-capable (`AXFullScreenButton`) while AppKit gives
+/// non-fullscreenable utility panels a classic zoom button instead
+/// (`AXZoomButton`), and Preferences/Settings-style windows are the
+/// textbook case: hardware-confirmed on Safari's own Settings window, which
+/// reports `AXStandardWindow` like a real browser window but swaps
+/// full-screen for zoom. Otherwise a standard subrole is `Standard`; a
+/// missing/ambiguous subrole falls back to whether the window has *any*
+/// window-chrome button (close/fullscreen/zoom/minimize) — a window with
+/// none of them and an ambiguous subrole is essentially always a
+/// tooltip/context-menu/popover rather than a real top-level window.
 fn classify_window_kind(
     subrole: Option<&str>,
     has_any_chrome_button: bool,
     has_close_button: bool,
     is_regular_app: bool,
+    has_zoom_button: bool,
+    has_fullscreen_button: bool,
 ) -> WindowKind {
     if !is_regular_app && !has_close_button {
         return WindowKind::Popup;
     }
     match subrole {
         Some(s) if s == AX_DIALOG_SUBROLE || s == AX_SYSTEM_DIALOG_SUBROLE => WindowKind::Dialog,
+        Some(s) if s == AX_STANDARD_WINDOW_SUBROLE && has_zoom_button && !has_fullscreen_button => {
+            WindowKind::Dialog
+        }
         Some(s) if s == AX_STANDARD_WINDOW_SUBROLE => WindowKind::Standard,
         None if has_any_chrome_button => WindowKind::Standard,
         _ => WindowKind::Popup,
@@ -198,13 +210,14 @@ impl AxWindow {
             .ok()
             .flatten()
             .is_some();
+        let has_zoom_button = element
+            .element_attribute(AX_ZOOM_BUTTON_ATTRIBUTE)
+            .ok()
+            .flatten()
+            .is_some();
         let has_any_chrome_button = has_fullscreen_button
             || has_close_button
-            || element
-                .element_attribute(AX_ZOOM_BUTTON_ATTRIBUTE)
-                .ok()
-                .flatten()
-                .is_some()
+            || has_zoom_button
             || element
                 .element_attribute(AX_MINIMIZE_BUTTON_ATTRIBUTE)
                 .ok()
@@ -216,6 +229,8 @@ impl AxWindow {
             has_any_chrome_button,
             has_close_button,
             is_regular_app,
+            has_zoom_button,
+            has_fullscreen_button,
         );
 
         let id = Self::resolve_window_id(&element)?;
@@ -434,11 +449,18 @@ mod tests {
     #[test]
     fn dialog_subrole_classifies_as_dialog() {
         assert_eq!(
-            classify_window_kind(Some(AX_DIALOG_SUBROLE), false, false, true),
+            classify_window_kind(Some(AX_DIALOG_SUBROLE), false, false, true, false, false),
             WindowKind::Dialog
         );
         assert_eq!(
-            classify_window_kind(Some(AX_SYSTEM_DIALOG_SUBROLE), true, false, true),
+            classify_window_kind(
+                Some(AX_SYSTEM_DIALOG_SUBROLE),
+                true,
+                false,
+                true,
+                false,
+                false
+            ),
             WindowKind::Dialog
         );
     }
@@ -446,7 +468,48 @@ mod tests {
     #[test]
     fn standard_subrole_classifies_as_standard() {
         assert_eq!(
-            classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), false, false, true),
+            classify_window_kind(
+                Some(AX_STANDARD_WINDOW_SUBROLE),
+                false,
+                false,
+                true,
+                false,
+                false
+            ),
+            WindowKind::Standard
+        );
+    }
+
+    #[test]
+    fn standard_subrole_with_zoom_but_no_fullscreen_button_is_dialog() {
+        // Real content windows are fullscreen-capable; AppKit gives
+        // non-fullscreenable utility panels (Preferences/Settings-style
+        // windows) a classic zoom button instead — hardware-confirmed on
+        // Safari's own Settings window vs. its browser window.
+        assert_eq!(
+            classify_window_kind(
+                Some(AX_STANDARD_WINDOW_SUBROLE),
+                true,
+                true,
+                true,
+                true,
+                false
+            ),
+            WindowKind::Dialog
+        );
+    }
+
+    #[test]
+    fn standard_subrole_with_zoom_and_fullscreen_button_is_standard() {
+        assert_eq!(
+            classify_window_kind(
+                Some(AX_STANDARD_WINDOW_SUBROLE),
+                true,
+                true,
+                true,
+                true,
+                true
+            ),
             WindowKind::Standard
         );
     }
@@ -454,7 +517,7 @@ mod tests {
     #[test]
     fn missing_subrole_with_chrome_button_ties_break_to_standard() {
         assert_eq!(
-            classify_window_kind(None, true, false, true),
+            classify_window_kind(None, true, false, true, false, false),
             WindowKind::Standard
         );
     }
@@ -462,7 +525,7 @@ mod tests {
     #[test]
     fn missing_subrole_without_chrome_button_is_popup() {
         assert_eq!(
-            classify_window_kind(None, false, false, true),
+            classify_window_kind(None, false, false, true, false, false),
             WindowKind::Popup
         );
     }
@@ -470,7 +533,7 @@ mod tests {
     #[test]
     fn unrecognized_subrole_is_popup() {
         assert_eq!(
-            classify_window_kind(Some("AXFloatingWindow"), false, false, true),
+            classify_window_kind(Some("AXFloatingWindow"), false, false, true, false, false),
             WindowKind::Popup
         );
     }
@@ -482,7 +545,14 @@ mod tests {
         // prompt, the screenshot toolbar's thumbnail preview, etc.
         // regardless of what subrole they happen to report.
         assert_eq!(
-            classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), true, false, false),
+            classify_window_kind(
+                Some(AX_STANDARD_WINDOW_SUBROLE),
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
             WindowKind::Popup
         );
     }
@@ -493,7 +563,14 @@ mod tests {
         // preference window (has a close button) isn't caught by the gate
         // above — falls through to ordinary subrole-based classification.
         assert_eq!(
-            classify_window_kind(Some(AX_STANDARD_WINDOW_SUBROLE), true, true, false),
+            classify_window_kind(
+                Some(AX_STANDARD_WINDOW_SUBROLE),
+                true,
+                true,
+                false,
+                false,
+                false
+            ),
             WindowKind::Standard
         );
     }
