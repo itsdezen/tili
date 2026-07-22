@@ -69,6 +69,25 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
         }
         Command::WorkspaceBack => result_response(state.switch_to_previous_workspace()),
         Command::SetFloating(floating) => result_response(state.set_floating(floating)),
+        Command::Doctor => {
+            // Both permission checks are plain, non-prompting reads at this
+            // point: the daemon is only alive to answer this at all because
+            // it already passed `ensure_accessibility_permission()` once at
+            // its own startup (see `main.rs`'s `stop_self` path for what
+            // happens when it doesn't), so macOS won't re-prompt for a
+            // decision it already has — it just reports the existing grant.
+            let report = tili_ipc::DoctorReport {
+                accessibility_granted: tili_ax::ensure_accessibility_permission(),
+                input_monitoring_granted: tili_ax::has_input_monitoring_permission(),
+                config_warnings: state.config_warnings(),
+            };
+            match serde_json::to_value(report) {
+                Ok(payload) => Response::OkWithPayload(payload),
+                Err(e) => Response::Err {
+                    message: e.to_string(),
+                },
+            }
+        }
         _ => Response::Err {
             message: "not implemented yet".to_string(),
         },

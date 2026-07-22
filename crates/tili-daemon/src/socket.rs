@@ -20,11 +20,25 @@ pub fn bind() -> io::Result<UnixListener> {
     UnixListener::bind(&path)
 }
 
+/// Hard cap on an incoming `Command`'s JSON payload size — without it, the
+/// 4-byte length prefix (read from *any* local client that can reach this
+/// per-user socket) sizes `vec![0u8; len]` unchecked, up to ~4 GiB. A real
+/// command is a few hundred bytes at most; this is generous headroom, not a
+/// tight fit — it exists to reject a stray/malformed/malicious frame before
+/// the allocation attempt, not to constrain legitimate traffic.
+const MAX_COMMAND_LEN: usize = 1024 * 1024;
+
 /// Reads one length-prefixed JSON `Command` from a connection.
 pub async fn read_command(stream: &mut UnixStream) -> io::Result<Command> {
     let mut len_buf = [0_u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_COMMAND_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("command too large: {len} bytes (max {MAX_COMMAND_LEN})"),
+        ));
+    }
     let mut payload = vec![0_u8; len];
     stream.read_exact(&mut payload).await?;
     serde_json::from_slice(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))

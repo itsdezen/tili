@@ -762,6 +762,12 @@ pub struct WmState {
     /// uses `WAKE_REMOVAL_GRACE` instead of `removal_grace`. `None` the rest
     /// of the time.
     wake_grace_until: Option<Instant>,
+    /// Rules `apply_config` skipped on its *most recent* call (not a
+    /// lifetime accumulation — cleared and rebuilt on every call), mirroring
+    /// the `eprintln!` already logged at each skip site. Exists so
+    /// `Command::Doctor` has something to report beyond the log file, which
+    /// nobody reads day to day.
+    config_warnings: Vec<String>,
 }
 
 impl Default for WmState {
@@ -813,6 +819,7 @@ impl Default for WmState {
             floating_placed: HashSet::new(),
             floating_centered: HashSet::new(),
             wake_grace_until: None,
+            config_warnings: Vec::new(),
         }
     }
 }
@@ -1474,6 +1481,10 @@ impl WmState {
     /// stays tiled until it's recreated (matches the M8 acceptance bar:
     /// "auto-center/size on window creation").
     pub fn apply_config(&mut self, config: &tili_config::Config) {
+        // Rebuilt from scratch on every call — see this field's own doc
+        // comment for why it's the *last* load's warnings, not a lifetime
+        // accumulation.
+        self.config_warnings.clear();
         self.gaps = to_tree_gaps(config.gaps);
         self.workspace_gaps = config
             .workspace_gaps
@@ -1556,11 +1567,13 @@ impl WmState {
                         workspace: rule.workspace.clone(),
                     })
                 } else {
-                    eprintln!(
-                        "tili-daemon: skipping workspace rule for '{}' — workspace '{}' isn't \
-                         declared in config",
+                    let warning = format!(
+                        "skipping workspace rule for '{}' — workspace '{}' isn't declared in \
+                         config",
                         rule.app_id, rule.workspace
                     );
+                    eprintln!("tili-daemon: {warning}");
+                    self.config_warnings.push(warning);
                     None
                 }
             })
@@ -1574,10 +1587,13 @@ impl WmState {
                     Some(pattern) => match Regex::new(pattern) {
                         Ok(re) => Some(re),
                         Err(e) => {
-                            eprintln!(
-                                "tili-daemon: skipping floating rule for '{}' — invalid title regex '{pattern}': {e}",
+                            let warning = format!(
+                                "skipping floating rule for '{}' — invalid title regex \
+                                 '{pattern}': {e}",
                                 rule.app_id
                             );
+                            eprintln!("tili-daemon: {warning}");
+                            self.config_warnings.push(warning);
                             return None;
                         }
                     },
@@ -1693,6 +1709,12 @@ impl WmState {
                 },
             })
             .collect()
+    }
+
+    /// Rules skipped by the most recent `apply_config` call — see this
+    /// field's own doc comment. Backs `Command::Doctor`.
+    pub fn config_warnings(&self) -> Vec<String> {
+        self.config_warnings.clone()
     }
 
     /// Cycles `focused_monitor` to the next connected monitor, wrapping —

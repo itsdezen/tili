@@ -62,7 +62,17 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   The one deliberate exception: a 1s backoff between reconnect attempts
   while the daemon is unreachable at all (not running, or between
   `tili stop`/`tili start`) — there's no notification to wait on when
-  there's no connection to notify over.
+  there's no connection to notify over. After `MAX_CONSECUTIVE_FAILURES`
+  (60, roughly a minute) of these back-to-back, `main.rs` calls `stop_self`
+  — unloads and removes this badge's own LaunchAgent, then exits — rather
+  than retrying forever: the daemon and the badge are meant to run as a
+  synchronized pair, so a daemon gone this long is treated as stopped on
+  purpose, not a transient blip (e.g. the brief restart a Homebrew
+  upgrade's `post_install` triggers). `stop_self` mirrors `tili-daemon`'s
+  own function of the same name and `tili-cli`'s `stop_daemon` — plain
+  `std::process::exit` alone wouldn't stick, since `KeepAlive` in the plist
+  would just have launchd respawn this process right back into the same
+  dead end.
   `ListMonitors`/`ListWorkspaces` (and `Ping`/`ListWindows`) are excluded
   from what counts as "changed" on the server side
   (`tili-daemon/src/main.rs`'s socket command arm) precisely because this

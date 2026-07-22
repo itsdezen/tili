@@ -101,12 +101,22 @@ focus sync, polling/timing, multi-monitor handling, or release signing.**
   locks around `WmState`, only one branch touches it at a time.
 - **`tili-cli`** — thin socket client; the binary is named `tili`. No
   business logic here — new behavior belongs in `tili-daemon` behind a
-  `Command`. Two documented exceptions: `tili start`/`stop` (LaunchAgent
-  management, filesystem-only) and `tili status`'s custom wording.
+  `Command`. Three documented exceptions: `tili start`/`stop` (LaunchAgent
+  management, filesystem-only), `tili status`'s custom wording, and `tili
+  doctor` (filesystem/LaunchAgent/socket checks locally, `Command::Doctor`
+  for anything only the daemon knows — permission grants, the last config
+  load's warnings — never re-implementing that daemon-side logic here). The
+  one dependency exception to "thin": `tili-config` (zero macOS-specific
+  deps, unlike `tili-ax`) for `doctor`'s local config-syntax check, which
+  needs to work even when the daemon isn't running.
 - **`tili-menubar`** — `NSStatusItem` workspace badge; stays in sync via a
   server-side long-poll (`Command::WaitForChange`), not polling. Its
   LaunchAgent is managed by `tili start`/`stop`/`uninstall` alongside the
-  daemon's.
+  daemon's, and required (not best-effort) by `tili start` — the two run as
+  a synchronized pair, never one without the other: `tili-daemon`'s own
+  shutdown paths (`Command::Shutdown`, `stop_self`) tear this LaunchAgent
+  down too, and `tili-menubar` gives up and stops itself if the daemon goes
+  unreachable for a sustained run of reconnect attempts.
 - **`xtask`** — release/signing tooling: `bundle`/`codesign`/`package`
   build a signed `tili.app`. `xtask/entitlements.plist` must stay free of
   XML comments (`codesign`'s parser rejects them). Certificate generation

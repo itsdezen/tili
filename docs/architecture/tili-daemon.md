@@ -599,6 +599,26 @@ HashMap<KeyCombo, Command>>`) from `config.keybindings`.
 `active_key_combos()` returns just the keys (for syncing the `Mutex` the
 hotkey tap reads — see [tili-ax.md](tili-ax.md)'s hotkey section).
 
+A `workspace-rules` entry naming an undeclared workspace, or a
+`floating-rules` entry with a title regex that fails to compile, is skipped
+rather than rejecting the whole config — both sites `eprintln!` (for the
+log file) *and* push the same message into `WmState::config_warnings`,
+cleared and rebuilt on every `apply_config` call so it always reflects only
+the *last* load. `Command::Doctor` (below) is what makes this reachable
+from outside the log file.
+
+`Command::Doctor`, requested by `tili doctor` (see
+[tili-cli.md](tili-cli.md)), reports `config_warnings()` alongside a fresh
+read of both permission grants (`tili_ax::ensure_accessibility_permission()`
+and `has_input_monitoring_permission()`). Calling the former again here
+doesn't re-prompt: the daemon is only alive to answer this at all because
+it already passed that exact check once at its own startup (see
+`stop_self` below for what happens when it doesn't), and macOS only shows
+the system dialog for a *not-yet-decided* grant — a re-check against an
+already-trusted process just reports `true` with no dialog. Read-only, so
+it's excluded from `mutates` in `main.rs`'s socket arm the same way
+`Ping`/`ListWindows`/`ListWorkspaces`/`ListMonitors` are.
+
 `src/dispatch.rs` has the single `dispatch(&mut WmState, Command) ->
 Response` function — both the Unix-socket handler and the global-hotkey
 handler must call this same function, never a separate code path, or
@@ -607,7 +627,16 @@ CLI-invoked and hotkey-invoked behavior can drift apart.
 lifecycle, not a `WmState` mutation, so both `main.rs`'s socket-accept and
 hotkey `select!` arms check for it and `break` the loop directly instead of
 routing it through `dispatch()` (which would have nowhere to signal "please
-exit the process" from).
+exit the process" from). Both arms also call `stop_menubar()` before
+breaking — the daemon and `tili-menubar` are meant to run as a synchronized
+pair, so any path that shuts this process down on purpose tears the badge's
+LaunchAgent down too, rather than leaving it running (and polling a socket
+that's about to disappear) alone. `stop_self` (called when Accessibility/
+Input Monitoring permission isn't granted) does the same. This only covers
+*intentional* shutdown paths — an unexpected crash runs no code at all — so
+`tili-menubar` separately guards against that case by giving up on its own
+after a sustained run of unreachable-daemon retries (see
+[tili-menubar.md](tili-menubar.md)).
 
 ## main.rs — process structure and the event loop
 
@@ -641,6 +670,22 @@ touches it at a time; `sync_active_combos` is called after every branch that
 could change the active mode/bindings, to keep the hotkey tap's
 `Mutex<HashSet<KeyCombo>>` from drifting out of sync with what `WmState`
 actually has bound.
+
+The hotkey arm's dispatch result is checked, unlike the socket arm it
+mirrors having a `Response` to write back to — there's no connection to
+reply on for a hotkey, so `eprintln!("tili-daemon: hotkey command failed:
+{message}")` on a `Response::Err` is the only feedback channel available;
+a hotkey that legitimately fails (no focused window, an undeclared
+workspace) at least leaves a trace now instead of vanishing silently.
+
+`socket.rs::read_command` caps an incoming frame's declared length at
+`MAX_COMMAND_LEN` (1 MiB) before allocating a buffer for it — the 4-byte
+length prefix comes from whatever connects to this per-user socket, so
+without a cap a stray or malformed frame can request an allocation up to
+~4 GiB. A real `Command` is a few hundred bytes; the cap is headroom, not a
+tight fit. Over-length frames are rejected with a descriptive `io::Error`,
+surfaced through the same generic `eprintln!("tili-daemon: failed to read
+command: {e}")` the accept arm already had for any other read failure.
 
 `tili_ax::spawn_hotkey_tap`/`spawn_display_watcher`/`spawn_mouse_watcher`
 each build and send on a `tokio::sync::mpsc` channel directly from their own

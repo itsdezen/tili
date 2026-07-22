@@ -255,7 +255,7 @@ async fn async_daemon_main(
         // connection ~33 times/sec regardless of whether anything
         // happened, defeating the entire point of replacing polling with
         // this. The generic socket arm below excludes read-only commands
-        // (`Ping`/`ListWindows`/`ListWorkspaces`/`ListMonitors`) from this
+        // (`Ping`/`ListWindows`/`ListWorkspaces`/`ListMonitors`/`Doctor`) from this
         // for the same reason, not just "rare enough not to bother" —
         // `tili-menubar`'s own steady-state polling calls exactly those
         // commands every time it wakes up, so counting them as "changed"
@@ -282,6 +282,7 @@ async fn async_daemon_main(
                         // not a WmState mutation.
                         let _ = socket::write_response(&mut stream, &Response::Ok).await;
                         state.unpark_all();
+                        stop_menubar();
                         println!("tili-daemon: shutting down");
                         break;
                     }
@@ -328,6 +329,7 @@ async fn async_daemon_main(
                                 | Command::ListWindows
                                 | Command::ListWorkspaces
                                 | Command::ListMonitors
+                                | Command::Doctor
                         );
                         let response = dispatch(&mut state, command);
                         if let Err(e) = socket::write_response(&mut stream, &response).await {
@@ -409,6 +411,7 @@ async fn async_daemon_main(
                 if let Some(command) = state.resolve_hotkey(combo) {
                     if matches!(command, Command::Shutdown) {
                         state.unpark_all();
+                        stop_menubar();
                         println!("tili-daemon: shutting down (hotkey)");
                         break;
                     }
@@ -416,7 +419,14 @@ async fn async_daemon_main(
                     // pressed in, not whatever it becomes after (e.g. a
                     // bind that itself switches modes).
                     let auto_exits = state.current_mode_auto_exits();
-                    let _ = dispatch(&mut state, command);
+                    // Unlike the socket arm above, there's no connection to
+                    // write a `Response::Err` back to — logging is the only
+                    // channel available, so a hotkey-triggered command that
+                    // legitimately fails (no window focused, an undeclared
+                    // workspace, ...) no longer disappears with zero trace.
+                    if let Response::Err { message } = dispatch(&mut state, command) {
+                        eprintln!("tili-daemon: hotkey command failed: {message}");
+                    }
                     if auto_exits {
                         state.exit_mode();
                     }
@@ -476,19 +486,52 @@ async fn async_daemon_main(
 /// running `tili stop` — called when `main` gives up waiting for
 /// Accessibility permission, so a timed-out daemon doesn't linger in a
 /// half-broken state that only a manual restart could fix, and so the next
-/// `tili start` is a clean retry. Mirrors `tili-cli`'s `stop_daemon`/
-/// `launch_agent_path` (`crates/tili-cli/src/main.rs`) — duplicated rather
-/// than shared, since it's a handful of lines; keep the plist path/label in
-/// sync with that file if either changes. Best-effort: `launchctl unload`
-/// may terminate this very process before it returns, so there's no
-/// meaningful error handling to add beyond letting each step fail silently.
+/// `tili start` is a clean retry. Also tears down the menu bar badge's
+/// LaunchAgent (see `stop_menubar`) — the daemon and the badge are meant to
+/// run as a synchronized pair, so a daemon that gives up shouldn't leave the
+/// badge running alone, polling a socket that will never come back. Mirrors
+/// `tili-cli`'s `stop_daemon`/`launch_agent_path`
+/// (`crates/tili-cli/src/main.rs`) — duplicated rather than shared, since
+/// it's a handful of lines; keep the plist path/label in sync with that file
+/// if either changes. Best-effort: `launchctl unload` may terminate this
+/// very process before it returns, so there's no meaningful error handling
+/// to add beyond letting each step fail silently.
 fn stop_self() {
+    stop_menubar();
     let Ok(home) = std::env::var("HOME") else {
         return;
     };
     let plist_path = std::path::PathBuf::from(home)
         .join("Library/LaunchAgents")
         .join("com.tili.daemon.plist");
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w"])
+        .arg(&plist_path)
+        .status();
+    let _ = std::fs::remove_file(&plist_path);
+}
+
+/// Unloads and removes `tili-menubar`'s LaunchAgent — called from every path
+/// that shuts this daemon down on purpose (`Command::Shutdown`, both the
+/// socket and hotkey arms, and `stop_self`), so the badge never keeps
+/// running once the daemon it depends on is gone. Doesn't cover an
+/// unexpected daemon crash (no graceful-shutdown code runs for that by
+/// definition) — `tili-menubar` guards against that case itself by giving up
+/// after a sustained string of unreachable-daemon retries (see its own
+/// `MAX_CONSECUTIVE_FAILURES`). Mirrors `tili-cli`'s `stop_daemon`
+/// (`crates/tili-cli/src/main.rs`) — duplicated rather than shared, same
+/// reasoning as `stop_self` above; keep the plist path/label in sync with
+/// that file if either changes.
+fn stop_menubar() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let plist_path = std::path::PathBuf::from(home)
+        .join("Library/LaunchAgents")
+        .join("com.tili.menubar.plist");
+    if !plist_path.exists() {
+        return;
+    }
     let _ = std::process::Command::new("launchctl")
         .args(["unload", "-w"])
         .arg(&plist_path)

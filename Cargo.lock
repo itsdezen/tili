@@ -1496,6 +1496,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "serde_json",
+ "tili-config",
  "tili-ipc",
 ]
 

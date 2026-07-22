@@ -13,3 +13,10 @@ infallible by design, an unrecognized string becomes `Command::Raw` rather
 than a parse error, so a config referencing a command ahead of its
 milestone (or with a typo) still loads and just fails at `dispatch()` time
 with "not implemented yet" instead of refusing to start the daemon.
+
+`Command::Doctor`'s payload, `DoctorReport`, is the one `Command` whose
+answer only the daemon can give (current Accessibility/Input Monitoring
+permission grants, and the previous config load's skipped-rule warnings) —
+`tili doctor` combines it with checks it can run without a daemon at all
+(LaunchAgent files, the socket, config syntax). See
+[tili-cli.md](tili-cli.md) and [tili-daemon.md](tili-daemon.md).

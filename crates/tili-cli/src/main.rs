@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use tili_ipc::{
-    Command, Direction, LayoutKind, MonitorInfo, PlacementInfo, Response, WindowInfo, WorkspaceInfo,
+    Command, Direction, DoctorReport, LayoutKind, MonitorInfo, PlacementInfo, Response, WindowInfo,
+    WorkspaceInfo,
 };
 
 #[derive(Parser)]
@@ -154,6 +155,20 @@ enum Commands {
     /// permission grant. Doesn't touch a Homebrew install itself — run
     /// `brew uninstall tili` separately if that's how tili was installed.
     Uninstall,
+    /// Checks daemon/menu-bar LaunchAgent state, the IPC socket, and the
+    /// config file, then reports any problems found. A stale socket file,
+    /// an installed-but-unloaded LaunchAgent, or one half of the
+    /// daemon/menu-bar pair missing while the other is installed can all be
+    /// auto-fixed (with confirmation, unless --fix is passed). A bad config
+    /// file or a missing permission grant is reported only — never
+    /// auto-fixed, since only the user can decide what they meant.
+    Doctor {
+        /// Apply fixes immediately instead of asking for confirmation
+        /// first — still prints what changed, just skips the interactive
+        /// gate (for scripting).
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 /// What shape of payload to expect back, so the CLI doesn't have to guess
@@ -170,12 +185,14 @@ fn main() {
     let defaulted_to_start = cli.command.is_none();
     let command = cli.command.unwrap_or(Commands::Start);
 
-    // None of these three go through the generic send()/print_response
-    // path below: Start/Stop never talk to the socket at all (they manage
-    // the LaunchAgent directly), and Status wants its own wording instead
-    // of the generic "couldn't reach daemon" error (which is a hard
-    // failure for every other command, but an expected, calmly-reported
-    // outcome here).
+    // None of these go through the generic send()/print_response path
+    // below: Start/Stop never talk to the socket at all (they manage the
+    // LaunchAgent directly), Status wants its own wording instead of the
+    // generic "couldn't reach daemon" error (which is a hard failure for
+    // every other command, but an expected, calmly-reported outcome here),
+    // and Doctor talks to the socket only optionally, as one of several
+    // checks, rather than sending a single `Command` and printing its
+    // response.
     match &command {
         Commands::Start => {
             // Only bare `tili` (no subcommand) needs confirming — an
@@ -197,6 +214,10 @@ fn main() {
         }
         Commands::Uninstall => {
             uninstall();
+            return;
+        }
+        Commands::Doctor { fix } => {
+            doctor(*fix);
             return;
         }
         _ => {}
@@ -258,6 +279,7 @@ fn main() {
         Commands::Stop => unreachable!("handled above before the socket connection"),
         Commands::Status => unreachable!("handled above before the socket connection"),
         Commands::Uninstall => unreachable!("handled above before the socket connection"),
+        Commands::Doctor { .. } => unreachable!("handled above before the socket connection"),
     };
 
     match send(command) {
@@ -376,9 +398,13 @@ const LAUNCH_AGENT_LABEL: &str = "com.tili.daemon";
 /// The menu bar badge's own LaunchAgent — installed/removed alongside the
 /// daemon's own by `start_daemon`/`stop_daemon`, so `tili start`/`tili
 /// stop` is the single lifecycle control for "the whole tili experience,"
-/// not just the daemon. Best-effort throughout: a menu bar badge failing
-/// to install/start should never block or fail `tili start` itself, since
-/// the daemon (and hotkeys/CLI) are already fully usable without it.
+/// not just the daemon. Required, not best-effort: the daemon and the
+/// badge are meant to run as a synchronized pair (never one without the
+/// other), so a badge install failure rolls `tili start` back rather than
+/// leaving the daemon running alone — see `start_daemon`. Runtime crashes
+/// are handled separately: `tili-daemon`'s own shutdown paths tear this
+/// LaunchAgent down too, and `tili-menubar` gives up and stops itself if
+/// the daemon goes unreachable for a sustained period.
 const MENUBAR_LAUNCH_AGENT_LABEL: &str = "com.tili.menubar";
 
 fn launch_agent_path(label: &str) -> std::path::PathBuf {
@@ -615,10 +641,9 @@ fn install_launch_agent(label: &str, binary: &std::path::Path, log_name: &str) -
 /// `tili start` — installs tili-daemon's LaunchAgent (see
 /// `install_launch_agent`) so `launchd`, not this short-lived CLI
 /// process, owns it from here on, then does the same for the menu bar
-/// badge. The badge is best-effort: if `tili-menubar` isn't present in
-/// this build (or its LaunchAgent fails to install) the daemon is
-/// already up and fully usable without it, so this doesn't fail `tili
-/// start` overall.
+/// badge. Both are required: the two are meant to run as a synchronized
+/// pair, so a badge install failure stops the daemon back down (via
+/// `stop_daemon`) instead of leaving it running alone.
 fn start_daemon() {
     if install_launch_agent(
         LAUNCH_AGENT_LABEL,
@@ -630,11 +655,17 @@ fn start_daemon() {
         std::process::exit(1);
     }
     wait_for_daemon_ready();
-    let _ = install_launch_agent(
+    if install_launch_agent(
         MENUBAR_LAUNCH_AGENT_LABEL,
         &sibling_binary_path("tili-menubar"),
         "menubar",
-    );
+    )
+    .is_err()
+    {
+        eprintln!("tili: menu bar badge failed to start — stopping tili-daemon too.");
+        stop_daemon();
+        std::process::exit(1);
+    }
 }
 
 /// `tili stop` — `launchctl unload`s and removes both the daemon's and
@@ -743,5 +774,266 @@ fn print_monitors(payload: serde_json::Value) {
             }
         }
         Err(_) => println!("(response payload not recognized)"),
+    }
+}
+
+/// One line of `tili doctor`'s report — `status` is `"ok"`, `"FAIL"`, or
+/// `".."` (not applicable, e.g. "daemon not running yet"), kept to fixed
+/// short strings so the columns line up without a table library.
+fn doctor_line(label: &str, status: &str, detail: &str) {
+    println!("{label:<20} {status:<5} {detail}");
+}
+
+/// `tili doctor` — checks daemon/menu-bar LaunchAgent state, the IPC
+/// socket, and the config file; reports problems; and, for anything safely
+/// automatable, offers to fix it. Deliberately does *not* try to fix a bad
+/// config file or a missing permission grant — those need the user's own
+/// judgment, so they're reported only, same call already made for
+/// `tili-daemon`'s own config-reload/rule-skip warnings (see
+/// `WmState::config_warnings`).
+fn doctor(fix: bool) {
+    println!("tili doctor: checking daemon, menu bar badge, and config...\n");
+
+    let mut problems = 0_u32;
+    let mut fixes: Vec<(String, Box<dyn FnOnce()>)> = Vec::new();
+
+    let config_path = default_config_path();
+    if !config_path.exists() {
+        doctor_line(
+            "config file",
+            "..",
+            &format!(
+                "{} doesn't exist yet (tili start writes a starter)",
+                config_path.display()
+            ),
+        );
+    } else {
+        match tili_config::load(&config_path) {
+            Ok(_) => doctor_line(
+                "config file",
+                "ok",
+                &format!("{} parses", config_path.display()),
+            ),
+            Err(e) => {
+                problems += 1;
+                doctor_line(
+                    "config file",
+                    "FAIL",
+                    &format!("{} failed to parse: {e}", config_path.display()),
+                );
+            }
+        }
+    }
+
+    let daemon_plist = launch_agent_path(LAUNCH_AGENT_LABEL);
+    let menubar_plist = launch_agent_path(MENUBAR_LAUNCH_AGENT_LABEL);
+    let daemon_installed = daemon_plist.exists();
+    let menubar_installed = menubar_plist.exists();
+    let daemon_loaded = daemon_installed && launch_agent_is_loaded(LAUNCH_AGENT_LABEL);
+    let menubar_loaded = menubar_installed && launch_agent_is_loaded(MENUBAR_LAUNCH_AGENT_LABEL);
+
+    doctor_report_launch_agent("daemon LaunchAgent", daemon_installed, daemon_loaded);
+    doctor_report_launch_agent("menubar LaunchAgent", menubar_installed, menubar_loaded);
+
+    // The daemon and the menu bar badge are meant to run as a synchronized
+    // pair (see `MENUBAR_LAUNCH_AGENT_LABEL`'s doc comment) — one installed
+    // without the other means a previous `tili start`/`stop` was
+    // interrupted, or a LaunchAgent was removed by hand.
+    if daemon_installed && !menubar_installed {
+        problems += 1;
+        doctor_line(
+            "daemon/menubar pair",
+            "FAIL",
+            "daemon is installed but the menu bar badge isn't",
+        );
+        fixes.push((
+            "install the missing menu bar badge LaunchAgent".to_string(),
+            Box::new(|| {
+                let _ = install_launch_agent(
+                    MENUBAR_LAUNCH_AGENT_LABEL,
+                    &sibling_binary_path("tili-menubar"),
+                    "menubar",
+                );
+            }),
+        ));
+    } else if menubar_installed && !daemon_installed {
+        problems += 1;
+        doctor_line(
+            "daemon/menubar pair",
+            "FAIL",
+            "the menu bar badge is installed but the daemon isn't",
+        );
+        fixes.push((
+            "install the missing daemon LaunchAgent".to_string(),
+            Box::new(|| {
+                let _ = install_launch_agent(
+                    LAUNCH_AGENT_LABEL,
+                    &sibling_binary_path("tili-daemon"),
+                    "daemon",
+                );
+            }),
+        ));
+    } else if daemon_installed {
+        doctor_line("daemon/menubar pair", "ok", "both installed");
+    }
+
+    if daemon_installed && !daemon_loaded {
+        problems += 1;
+        fixes.push((
+            "reload the daemon's LaunchAgent".to_string(),
+            Box::new(move || {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["load", "-w"])
+                    .arg(&daemon_plist)
+                    .status();
+            }),
+        ));
+    }
+    if menubar_installed && !menubar_loaded {
+        problems += 1;
+        fixes.push((
+            "reload the menu bar badge's LaunchAgent".to_string(),
+            Box::new(move || {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["load", "-w"])
+                    .arg(&menubar_plist)
+                    .status();
+            }),
+        ));
+    }
+
+    let socket_path = tili_ipc::default_socket_path();
+    let reachable = daemon_is_reachable();
+    if socket_path.exists() && !reachable {
+        problems += 1;
+        doctor_line(
+            "IPC socket",
+            "FAIL",
+            &format!(
+                "{} exists but nothing is listening (stale, from an unclean shutdown)",
+                socket_path.display()
+            ),
+        );
+        fixes.push((
+            "remove the stale IPC socket file".to_string(),
+            Box::new(move || {
+                let _ = std::fs::remove_file(&socket_path);
+            }),
+        ));
+    } else if reachable {
+        doctor_line(
+            "IPC socket",
+            "ok",
+            &format!("daemon reachable at {}", socket_path.display()),
+        );
+    } else {
+        doctor_line("IPC socket", "..", "not present (daemon not running)");
+    }
+
+    // Permission grants and the last config load's semantic warnings both
+    // live only in the daemon's own process — see `Command::Doctor`'s doc
+    // comment for why this doesn't duplicate that check here instead.
+    if reachable {
+        match send(Command::Doctor) {
+            Ok(Response::OkWithPayload(payload)) => {
+                match serde_json::from_value::<DoctorReport>(payload) {
+                    Ok(report) => {
+                        if report.accessibility_granted {
+                            doctor_line("accessibility", "ok", "granted");
+                        } else {
+                            problems += 1;
+                            doctor_line(
+                                "accessibility",
+                                "FAIL",
+                                "not granted — grant it in System Settings > Privacy & Security > \
+                             Accessibility",
+                            );
+                        }
+                        if report.input_monitoring_granted {
+                            doctor_line("input monitoring", "ok", "granted");
+                        } else {
+                            problems += 1;
+                            doctor_line(
+                                "input monitoring",
+                                "FAIL",
+                                "not granted — grant it in System Settings > Privacy & Security > \
+                             Input Monitoring",
+                            );
+                        }
+                        if report.config_warnings.is_empty() {
+                            doctor_line("config warnings", "ok", "none from the last load");
+                        } else {
+                            problems += report.config_warnings.len() as u32;
+                            doctor_line(
+                                "config warnings",
+                                "FAIL",
+                                &format!("{} from the last load:", report.config_warnings.len()),
+                            );
+                            for warning in &report.config_warnings {
+                                println!("                            - {warning}");
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        doctor_line("doctor report", "..", "couldn't parse the daemon's reply")
+                    }
+                }
+            }
+            _ => doctor_line(
+                "doctor report",
+                "..",
+                "daemon didn't answer Command::Doctor",
+            ),
+        }
+    } else {
+        doctor_line(
+            "permissions",
+            "..",
+            "can't check without a running daemon — run `tili start`",
+        );
+    }
+
+    println!();
+    if fixes.is_empty() {
+        if problems == 0 {
+            println!("tili doctor: no problems found.");
+        } else {
+            println!("tili doctor: found {problems} problem(s), none auto-fixable — see above.");
+        }
+        return;
+    }
+
+    println!(
+        "tili doctor: found {problems} problem(s), {} auto-fixable:",
+        fixes.len()
+    );
+    for (desc, _) in &fixes {
+        println!("  - {desc}");
+    }
+
+    if !fix {
+        print!("\nPress Enter to apply the fix(es) above (Ctrl-C to cancel): ");
+        let _ = io::stdout().flush();
+        let mut input = String::new();
+        if !matches!(io::stdin().read_line(&mut input), Ok(n) if n > 0) {
+            println!("tili: cancelled — no changes made.");
+            return;
+        }
+    }
+
+    println!();
+    for (desc, apply) in fixes {
+        apply();
+        println!("tili: fixed — {desc}");
+    }
+}
+
+fn doctor_report_launch_agent(label: &str, installed: bool, loaded: bool) {
+    if !installed {
+        doctor_line(label, "..", "not installed");
+    } else if loaded {
+        doctor_line(label, "ok", "installed and loaded");
+    } else {
+        doctor_line(label, "FAIL", "installed but not loaded");
     }
 }

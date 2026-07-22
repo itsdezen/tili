@@ -125,6 +125,12 @@ pub enum Command {
     FocusMonitor,
     ListMonitors,
     ReloadConfig,
+    /// Health check for `tili doctor` — reports the daemon's current
+    /// Accessibility/Input Monitoring permission grants and any warnings
+    /// from its most recent config load (see `DoctorReport`). Read-only,
+    /// so it goes through `dispatch()` like `ListWindows`/`ListWorkspaces`/
+    /// `ListMonitors`, not the `Command::Shutdown` process-lifecycle path.
+    Doctor,
     /// Gracefully stops the daemon: responds `Ok` (so a client waiting on
     /// the reply doesn't hang) before the process exits. Handled directly
     /// in `tili-daemon`'s main loop, not through `dispatch()` — it isn't a
@@ -203,6 +209,20 @@ pub struct WorkspaceInfo {
     /// `None` for a workspace that exists but is parked (not visible on
     /// any connected monitor right now).
     pub monitor: Option<u32>,
+}
+
+/// `Command::Doctor`'s payload. `tili-cli` combines this (when the daemon
+/// is reachable) with its own filesystem/LaunchAgent-level checks, which
+/// don't need a running daemon at all — so a `tili doctor` run while the
+/// daemon is down still reports what it can, just without these fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorReport {
+    pub accessibility_granted: bool,
+    pub input_monitoring_granted: bool,
+    /// Rules skipped by the daemon's most recent config load — an
+    /// undeclared workspace in `workspace-rules`, or an invalid regex in
+    /// `floating-rules`. Empty if the last load had none to skip.
+    pub config_warnings: Vec<String>,
 }
 
 /// A connected display as reported by `Command::ListMonitors` (M9).

@@ -15,7 +15,7 @@ belongs in `tili-daemon` behind a `Command` instead.
 new variant there (not JSON-shape sniffing) when a command gets a new
 payload type.
 
-Two exceptions to "no business logic here," both intercepted in `main()`
+Three exceptions to "no business logic here," all intercepted in `main()`
 before the socket-connecting code path (each `return`s instead of falling
 through to the generic `send()`/`print_response` path):
 
@@ -34,7 +34,35 @@ through to the generic `send()`/`print_response` path):
 - `tili status` *does* talk to the socket (via `Command::Ping`) but gets
   its own wording instead of the generic "couldn't reach daemon" error
   path.
+- `tili doctor` (`fn doctor`) runs a fixed list of checks, prints one
+  aligned line per check via `doctor_line`, then offers to fix whichever
+  ones are safely automatable. Local checks need no daemon: config file
+  existence + `tili_config::load` for a syntax check (the one dependency
+  exception to "thin" — `tili-config` has zero macOS-specific deps, unlike
+  `tili-ax`, so this doesn't compromise `tili-cli` staying buildable without
+  Xcode), both LaunchAgents' presence/loaded state via the existing
+  `launch_agent_path`/`launch_agent_is_loaded` helpers, a daemon/menu-bar
+  pairing mismatch (one installed without the other), and a stale IPC
+  socket file (exists but `daemon_is_reachable()` fails — left behind by an
+  unclean shutdown, since a live daemon always removes it on exit). If the
+  daemon *is* reachable, one `Command::Doctor` round trip adds permission
+  grants and the last config load's warnings — both live only in the
+  daemon's process, so `doctor` asks rather than re-implementing either
+  check client-side (see [tili-daemon.md](tili-daemon.md)). Auto-fixable
+  problems (a stale socket, an unloaded LaunchAgent, a missing half of the
+  daemon/menu-bar pair) collect into a `Vec<(String, Box<dyn FnOnce()>)>`;
+  a bad config file or an ungranted permission is reported only — never
+  guessed at. One confirm gate for every fix at once (reusing
+  `confirm_default_start`'s Enter-to-continue pattern), skippable with
+  `tili doctor --fix` for scripting.
 
 `tili start`/`stop`/`uninstall` manage `tili-menubar`'s LaunchAgent
 alongside the daemon's own (see [tili-menubar.md](tili-menubar.md)), so the
-badge's lifecycle never has to be driven separately.
+badge's lifecycle never has to be driven separately. `start_daemon()`
+requires the badge's install to succeed, not just the daemon's — a badge
+install failure stops the daemon back down via `stop_daemon()` rather than
+leaving it running alone, since the two are meant to run as a synchronized
+pair. Runtime desyncs (one crashing outside `tili stop`) are handled on the
+other two sides instead: `tili-daemon`'s shutdown paths tear the badge's
+LaunchAgent down too, and `tili-menubar` stops itself if the daemon goes
+unreachable for long enough — see [tili-menubar.md](tili-menubar.md).

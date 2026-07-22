@@ -19,6 +19,14 @@ use tray_icon::menu::MenuEvent;
 /// constant only matters during an outage, not steady-state operation.
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 
+/// Consecutive failed reconnect attempts (at `RECONNECT_BACKOFF` apart)
+/// before giving up and stopping this process for good — see `stop_self`.
+/// The daemon and this badge are meant to run as a synchronized pair, not
+/// one without the other, so a daemon that's been gone this long (roughly
+/// a minute) is treated as "stopped on purpose," not a transient blip
+/// (e.g. the brief restart a Homebrew upgrade's `post_install` triggers).
+const MAX_CONSECUTIVE_FAILURES: u32 = 60;
+
 /// How often the main-thread timer drains the change channel and applies
 /// any pending snapshot. This is not a poll interval — the channel is
 /// normally empty and this tick is a cheap no-op; it only has real work
@@ -57,6 +65,7 @@ fn main() {
         // switch a workspace, instead of showing the daemon's actual
         // current state right away.
         let _ = tx.send(menu::poll_daemon());
+        let mut consecutive_failures: u32 = 0;
         loop {
             match ipc::wait_for_change() {
                 // Either something really changed, or the daemon's own
@@ -73,6 +82,7 @@ fn main() {
                 // workspace-switch hotkey landed in that gap often enough
                 // to leave the badge stuck.
                 Ok(_) => {
+                    consecutive_failures = 0;
                     let tx = tx.clone();
                     std::thread::spawn(move || {
                         let _ = tx.send(menu::poll_daemon());
@@ -83,9 +93,19 @@ fn main() {
                 // start`). Report that immediately so the badge hides
                 // (see menu::apply_snapshot), then back off before
                 // retrying rather than hammering `connect()` in a tight
-                // loop.
+                // loop. After enough consecutive failures, stop trying —
+                // see `MAX_CONSECUTIVE_FAILURES`.
                 Err(_) => {
                     let _ = tx.send(None);
+                    consecutive_failures += 1;
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        eprintln!(
+                            "tili-menubar: tili-daemon unreachable for \
+                             {MAX_CONSECUTIVE_FAILURES} consecutive attempts — stopping \
+                             rather than running without it."
+                        );
+                        stop_self();
+                    }
                     std::thread::sleep(RECONNECT_BACKOFF);
                 }
             }
@@ -122,4 +142,29 @@ fn main() {
     }
 
     app.run(); // never returns — parks the main thread in Cocoa's event loop
+}
+
+/// Unloads and removes this badge's own LaunchAgent, called once the daemon
+/// has been unreachable for `MAX_CONSECUTIVE_FAILURES` attempts. A plain
+/// `std::process::exit` alone wouldn't stick — `KeepAlive` in the plist
+/// would just have launchd respawn this process right back into the same
+/// dead end. Mirrors `tili-daemon`'s own `stop_self`
+/// (`crates/tili-daemon/src/main.rs`) and `tili-cli`'s `stop_daemon`
+/// (`crates/tili-cli/src/main.rs`); duplicated rather than shared, same
+/// reasoning as those two — keep the plist path/label in sync with both if
+/// either changes. Best-effort: `launchctl unload` may terminate this very
+/// process before it returns.
+fn stop_self() {
+    let Ok(home) = std::env::var("HOME") else {
+        std::process::exit(0);
+    };
+    let plist_path = std::path::PathBuf::from(home)
+        .join("Library/LaunchAgents")
+        .join("com.tili.menubar.plist");
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w"])
+        .arg(&plist_path)
+        .status();
+    let _ = std::fs::remove_file(&plist_path);
+    std::process::exit(0);
 }
