@@ -517,6 +517,46 @@ fn is_protected_finder_dialog(bundle_id: Option<&str>, title: &str) -> bool {
         && PROTECTED_FINDER_DIALOG_TITLE.is_match(title)
 }
 
+/// Finder's Quick Look preview panel (opened with Space): confirmed via
+/// diagnostic logging to be a `com.apple.finder`-owned `WindowKind::Popup`
+/// window titled exactly `"Quick Look"`, plus one or two borderless,
+/// empty-titled `Popup` windows it leaves behind for well under
+/// `REMOVAL_GRACE_PERIOD` while closing. `Popup` already defaults to
+/// `Ignore` (see `resolve_disposition`), but a bare
+/// `rule app-id="com.apple.finder"` `floating-rules` entry — written for
+/// Finder's real browser windows — has no way to exclude these auxiliary
+/// panels, and an explicit rule always wins over the kind-based default;
+/// same problem as `is_system_settings_suggestion_popup`.
+fn is_finder_quick_look_window(
+    bundle_id: Option<&str>,
+    kind: tili_ax::WindowKind,
+    title: &str,
+) -> bool {
+    bundle_id.is_some_and(|id| id == FINDER_BUNDLE_ID)
+        && kind == tili_ax::WindowKind::Popup
+        && (title == "Quick Look" || title.is_empty())
+}
+
+/// Finder's "Get Info" panel (Cmd+I): confirmed via diagnostic logging to
+/// report `WindowKind::Dialog` (via `classify_window_kind`'s
+/// zoom-but-no-fullscreen heuristic — it has a zoom button but isn't
+/// fullscreenable) with a content-derived title of the form `"<name> Info"`
+/// / `"<n> Items Info"`, so a static title match like
+/// `is_protected_finder_dialog`'s can't catch it. `Dialog`'s kind-based
+/// default is `Float` (see `resolve_disposition`), which centers it —
+/// wrong regardless of whether the user has `com.apple.finder` configured
+/// as a floating app, since the ask is "never touch this window," not
+/// "float it."
+fn is_finder_get_info_window(
+    bundle_id: Option<&str>,
+    kind: tili_ax::WindowKind,
+    title: &str,
+) -> bool {
+    bundle_id.is_some_and(|id| id == FINDER_BUNDLE_ID)
+        && kind == tili_ax::WindowKind::Dialog
+        && title.ends_with(" Info")
+}
+
 /// Transient system overlays like the input-source-switch HUD glyph
 /// (Globe/Ctrl-Space) don't have a fixed owning bundle id the way the
 /// volume/brightness HUD does — confirmed via diagnostic logging that it
@@ -1071,6 +1111,8 @@ impl WmState {
                     || is_protected_finder_dialog(window.bundle_id(), window.title())
                     || is_transient_empty_dialog(kind, window.title(), window.has_zoom_button())
                     || is_system_settings_suggestion_popup(window.bundle_id(), kind, window.title())
+                    || is_finder_quick_look_window(window.bundle_id(), kind, window.title())
+                    || is_finder_get_info_window(window.bundle_id(), kind, window.title())
                 {
                     Some(tili_config::FloatingRuleMode::Ignore)
                 } else {
@@ -3722,6 +3764,69 @@ mod tests {
             "Copy"
         ));
         assert!(!is_protected_finder_dialog(None, "Copy"));
+    }
+
+    #[test]
+    fn is_finder_quick_look_window_matches_the_preview_panel_and_its_closing_overlays() {
+        assert!(is_finder_quick_look_window(
+            Some("com.apple.finder"),
+            tili_ax::WindowKind::Popup,
+            "Quick Look"
+        ));
+        assert!(is_finder_quick_look_window(
+            Some("com.apple.finder"),
+            tili_ax::WindowKind::Popup,
+            ""
+        ));
+        assert!(!is_finder_quick_look_window(
+            Some("com.apple.finder"),
+            tili_ax::WindowKind::Standard,
+            "Documents"
+        ));
+        assert!(!is_finder_quick_look_window(
+            Some("com.apple.TextEdit"),
+            tili_ax::WindowKind::Popup,
+            "Quick Look"
+        ));
+        assert!(!is_finder_quick_look_window(
+            None,
+            tili_ax::WindowKind::Popup,
+            "Quick Look"
+        ));
+    }
+
+    #[test]
+    fn is_finder_get_info_window_matches_only_finder_dialogs_ending_in_info() {
+        assert!(is_finder_get_info_window(
+            Some("com.apple.finder"),
+            tili_ax::WindowKind::Dialog,
+            "Surge XT Info"
+        ));
+        assert!(is_finder_get_info_window(
+            Some("com.apple.finder"),
+            tili_ax::WindowKind::Dialog,
+            "3 Items Info"
+        ));
+        assert!(!is_finder_get_info_window(
+            Some("com.apple.finder"),
+            tili_ax::WindowKind::Standard,
+            "Server Info"
+        ));
+        assert!(!is_finder_get_info_window(
+            Some("com.apple.finder"),
+            tili_ax::WindowKind::Dialog,
+            "Documents"
+        ));
+        assert!(!is_finder_get_info_window(
+            Some("com.apple.TextEdit"),
+            tili_ax::WindowKind::Dialog,
+            "Surge XT Info"
+        ));
+        assert!(!is_finder_get_info_window(
+            None,
+            tili_ax::WindowKind::Dialog,
+            "Surge XT Info"
+        ));
     }
 
     #[test]

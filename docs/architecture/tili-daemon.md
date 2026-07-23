@@ -71,9 +71,10 @@ A brand-new window's disposition (`Tile`/`Float`/`Ignore`, resolved once at
 creation — see `resolve_disposition`/`classify_new_window`) is decided by
 `apply_windows_changed` in priority order: `is_system_ui_bundle` first,
 then `is_protected_finder_dialog`, then `is_transient_empty_dialog`, then
-`is_system_settings_suggestion_popup`, then the user's own `floating-rules`
+`is_system_settings_suggestion_popup`, then `is_finder_quick_look_window`,
+then `is_finder_get_info_window`, then the user's own `floating-rules`
 (`matching_floating_rule`), then finally `tili_ax::WindowKind`'s AX-derived
-fallback. The first four are unconditional overrides — checked *before*
+fallback. The first six are unconditional overrides — checked *before*
 `self.floating_rules` is consulted at all, so no config entry can win
 against them.
 `is_system_ui_bundle` force-`Ignore`s a small denylist of system UI bundle
@@ -130,6 +131,25 @@ bundle id (unlike `is_transient_empty_dialog`'s deliberately app-agnostic
 match), since a `Popup`-shaped, empty-titled window is the common,
 unremarkable shape for tooltips/menus in general — force-`Ignore`ing that
 globally would be too broad.
+
+`is_finder_quick_look_window` and `is_finder_get_info_window` handle two
+more `com.apple.finder` auxiliary windows the user's own
+`floating-rules` entry for Finder can't exclude, same problem as
+`is_system_settings_suggestion_popup` above. Both confirmed via diagnostic
+logging: Quick Look (opened with Space) is a `WindowKind::Popup` titled
+exactly `"Quick Look"`, plus one or two borderless empty-titled `Popup`
+windows it leaves behind for well under `REMOVAL_GRACE_PERIOD` while
+closing — `Popup` already defaults to `Ignore`, but an explicit Finder
+floating rule overrides that default the same way it did for System
+Settings' suggestion popup. Get Info (Cmd+I) is a `WindowKind::Dialog` (via
+`classify_window_kind`'s zoom-but-no-fullscreen heuristic) with a
+content-derived title of the form `"<name> Info"` / `"<n> Items Info"`, so
+it can't be matched by a static title the way `is_protected_finder_dialog`
+matches "Copy"/"Connect to Server" — matched by the `" Info"` suffix
+instead, scoped to `Dialog` kind so an ordinary folder window that happens
+to be named e.g. "Server Info" (`WindowKind::Standard`) isn't caught by
+mistake. `Dialog`'s kind-based default is `Float`, which centers it, wrong
+regardless of the user's `floating-rules` config for `com.apple.finder`.
 
 `workspace_focus` remembers each workspace's last-focused node — tiled or
 floating — so switching back restores where you left off. A new window
