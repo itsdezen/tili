@@ -8,6 +8,23 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-23
+
+### Fixed
+
+- **Finder's Quick Look preview panel (Space) and "Get Info" panel
+  (Cmd+I) were floating and centering instead of being left alone**, even
+  when `com.apple.finder` wasn't configured as a floating app at all.
+  Quick Look is a `WindowKind::Popup`, which already defaults to `Ignore`,
+  but a `floating-rules` entry for `com.apple.finder` (written for its real
+  browser windows) has no way to exclude this one auxiliary panel and an
+  explicit rule always wins over the kind-based default. Get Info reaches
+  `WindowKind::Dialog` via the zoom-but-no-fullscreen heuristic, whose own
+  kind-based default is `Float` — wrong regardless of any rule, since the
+  window should never be touched at all. Both are now force-`Ignore`d
+  unconditionally, the same mechanism already used for Finder's "Copy" and
+  "Connect to Server" dialogs and System Settings' suggestion popup.
+
 ## [0.5.2] - 2026-07-23
 
 ### Fixed
