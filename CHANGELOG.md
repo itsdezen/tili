@@ -8,6 +8,19 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-25
+
+### Added
+
+- **Notch-aware `gap top`.** On a display with a notch, the tiled area's
+  top edge now starts below the notch instead of overlapping it — `Monitor`
+  picks up its display's `NSScreen.safeAreaInsets.top` and the daemon folds
+  that height into the configured `outer` top gap. New `ignore-notch`
+  flag in the `gaps` config block (`#false`/default: notch-aware;
+  `#true`: use the configured top gap as-is, matching pre-existing
+  behavior) — settable globally or per-workspace, same as `inner`/`outer`/
+  `accordion`.
+
 ## [0.5.3] - 2026-07-23
 
 ### Fixed
