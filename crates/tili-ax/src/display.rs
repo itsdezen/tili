@@ -33,9 +33,14 @@ pub struct Monitor {
     /// Usable tiling area: full bounds minus the menu-bar inset if `is_main`.
     pub frame: Rect,
     pub is_main: bool,
-    /// `NSScreen.safeAreaInsets.top` for this display — `0.0` if it has no
-    /// notch (or the id wasn't found among `NSScreen.screens`, e.g. a
-    /// display `CGDisplay` reports that hasn't shown up in `NSScreen` yet).
+    /// How much *additional* top inset (beyond whatever `frame` already
+    /// excludes) is needed to also clear this display's notch — `0.0` if it
+    /// has none, or its `NSScreen.safeAreaInsets.top` doesn't exceed the
+    /// baseline `frame` already subtracts. Deliberately *not* the raw
+    /// `safeAreaInsets.top` — on a notched display that value already
+    /// covers the same top-of-screen zone `MENU_BAR_HEIGHT` accounts for, so
+    /// a caller adding this straight to a configured gap (as
+    /// `tili-daemon`'s `tiled_layout_inputs` does) would double-count it.
     pub notch: f64,
 }
 
@@ -70,7 +75,9 @@ pub fn list_monitors() -> Vec<Monitor> {
             } else {
                 bounds
             };
-            let notch = notches.get(&id).copied().unwrap_or(0.0);
+            let baseline_inset = if is_main { MENU_BAR_HEIGHT } else { 0.0 };
+            let raw_notch = notches.get(&id).copied().unwrap_or(0.0);
+            let notch = extra_notch_inset(raw_notch, baseline_inset);
             Monitor {
                 id,
                 frame,
@@ -81,6 +88,15 @@ pub fn list_monitors() -> Vec<Monitor> {
         .collect();
     monitors.sort_by_key(|m| std::cmp::Reverse(m.is_main));
     monitors
+}
+
+/// How much of `raw_notch` (a display's raw `NSScreen.safeAreaInsets.top`)
+/// is left over once `baseline_inset` (whatever `frame` already excludes
+/// from that same top-of-screen zone) is accounted for. Never negative —
+/// a notch smaller than the baseline (or none at all) needs no additional
+/// inset, not a negative one that would shrink the gap below the baseline.
+fn extra_notch_inset(raw_notch: f64, baseline_inset: f64) -> f64 {
+    (raw_notch - baseline_inset).max(0.0)
 }
 
 /// How long `notch_heights` waits for its main-thread query to answer
@@ -354,6 +370,29 @@ mod tests {
             is_main: id == 1,
             notch: 0.0,
         }
+    }
+
+    #[test]
+    fn extra_notch_inset_is_the_amount_beyond_the_baseline() {
+        assert_eq!(
+            extra_notch_inset(32.0, MENU_BAR_HEIGHT),
+            32.0 - MENU_BAR_HEIGHT
+        );
+    }
+
+    #[test]
+    fn extra_notch_inset_is_zero_when_the_baseline_already_covers_it() {
+        // A non-notched display's raw safe-area inset (if any) never
+        // exceeds MENU_BAR_HEIGHT — this must not go negative.
+        assert_eq!(extra_notch_inset(0.0, MENU_BAR_HEIGHT), 0.0);
+        assert_eq!(extra_notch_inset(MENU_BAR_HEIGHT, MENU_BAR_HEIGHT), 0.0);
+    }
+
+    #[test]
+    fn extra_notch_inset_with_no_baseline_is_the_full_raw_notch() {
+        // A non-`is_main` display's `frame` excludes nothing, so a built-in
+        // notched panel that isn't the main display needs the whole thing.
+        assert_eq!(extra_notch_inset(32.0, 0.0), 32.0);
     }
 
     #[test]

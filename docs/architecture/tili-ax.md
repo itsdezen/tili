@@ -130,11 +130,18 @@ but requires flipping between `NSScreen`'s bottom-left-origin coordinate
 space and AX/`CGDisplay`'s top-left-origin one — judged not worth the risk
 for what M9 needs).
 
-Each `Monitor` also carries `notch: f64` — `NSScreen.safeAreaInsets.top`
-for that display's `CGDirectDisplayID`, `0.0` on a display with no notch —
-populated by `notch_heights()`. Unlike `visibleFrame`, this is a plain
-scalar with no coordinate-flip risk, so it sidesteps the concern above
-entirely. The complication instead is thread-affinity: `NSScreen` is
+Each `Monitor` also carries `notch: f64` — how much *additional* top inset
+(beyond whatever `frame` already excludes) is needed to also clear that
+display's notch, `0.0` if it has none. `list_monitors()` computes this as
+`(safeAreaInsets.top - baseline_inset).max(0.0)`, where `baseline_inset` is
+`MENU_BAR_HEIGHT` on `is_main` and `0.0` otherwise — deliberately *not* the
+raw `safeAreaInsets.top`, since on a notched display that value already
+covers the same top-of-screen zone `MENU_BAR_HEIGHT` accounts for and
+`frame` has already excluded; adding the raw value on top of `frame`
+double-counted that overlap and inflated the effective top gap by a full
+extra `MENU_BAR_HEIGHT` on every notched Mac. Unlike `visibleFrame`, this is
+a plain scalar with no coordinate-flip risk, so it sidesteps the concern
+above entirely. The complication instead is thread-affinity: `NSScreen` is
 `MainThreadOnly`, but `list_monitors()` runs on `tili-daemon`'s background
 Tokio thread (see `main.rs`'s doc comment on why the real `NSApplication`
 lives on the actual process main thread instead). `notch_heights()` hops
@@ -152,8 +159,8 @@ Mapping an `NSScreen` back to its `CGDirectDisplayID` goes through its
 since `objc2-app-kit`'s header-translator doesn't generate a constant for
 it. `tili-daemon`'s `tiled_layout_inputs` is what actually folds this
 height into the effective top gap (gated by the `gaps` config's
-`ignore-notch` flag) — `Monitor.notch` itself is just the raw
-measurement.
+`ignore-notch` flag) — `Monitor.notch` is already the correct amount to
+add there, with no further adjustment needed on the daemon side.
 
 `spawn_display_watcher()` registers a
 `CGDisplayRegisterReconfigurationCallback` on its own dedicated `CFRunLoop`
