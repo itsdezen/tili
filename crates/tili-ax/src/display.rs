@@ -1,9 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 
 use core_graphics::display::{
     CGDirectDisplayID, CGDisplay, CGDisplayRegisterReconfigurationCallback,
 };
+use dispatch2::DispatchQueue;
+use objc2::MainThreadMarker;
+use objc2_app_kit::NSScreen;
+use objc2_foundation::{NSNumber, NSString};
 use tili_tree::Rect;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -29,6 +33,10 @@ pub struct Monitor {
     /// Usable tiling area: full bounds minus the menu-bar inset if `is_main`.
     pub frame: Rect,
     pub is_main: bool,
+    /// `NSScreen.safeAreaInsets.top` for this display — `0.0` if it has no
+    /// notch (or the id wasn't found among `NSScreen.screens`, e.g. a
+    /// display `CGDisplay` reports that hasn't shown up in `NSScreen` yet).
+    pub notch: f64,
 }
 
 fn to_rect(bounds: core_graphics::geometry::CGRect) -> Rect {
@@ -45,6 +53,7 @@ fn to_rect(bounds: core_graphics::geometry::CGRect) -> Rect {
 /// calling this again.
 pub fn list_monitors() -> Vec<Monitor> {
     let main_id = CGDisplay::main().id;
+    let notches = notch_heights();
     let mut monitors: Vec<Monitor> = CGDisplay::active_displays()
         .unwrap_or_default()
         .into_iter()
@@ -61,11 +70,70 @@ pub fn list_monitors() -> Vec<Monitor> {
             } else {
                 bounds
             };
-            Monitor { id, frame, is_main }
+            let notch = notches.get(&id).copied().unwrap_or(0.0);
+            Monitor {
+                id,
+                frame,
+                is_main,
+                notch,
+            }
         })
         .collect();
     monitors.sort_by_key(|m| std::cmp::Reverse(m.is_main));
     monitors
+}
+
+/// How long `notch_heights` waits for its main-thread query to answer
+/// before giving up and returning an empty map (every display then falls
+/// back to `0.0`, same as before notch-awareness existed). Not a
+/// legitimate-main-thread-is-slow allowance — a real `NSApplication` event
+/// loop services its dispatch main queue essentially instantly — but a
+/// deadlock guard: `cargo test` and other bare (non-Cocoa) processes that
+/// link this crate never pump the main dispatch queue at all, and
+/// `DispatchQueue::exec_sync` would otherwise block that caller's thread
+/// forever waiting for a reply nobody will ever send.
+const NOTCH_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Maps each currently connected display's `CGDirectDisplayID` to its
+/// `NSScreen.safeAreaInsets.top` — the notch height, `0.0` on a display
+/// with none. `NSScreen` is main-thread-only, but `list_monitors` (this
+/// function's only caller) runs on `tili-daemon`'s background Tokio thread
+/// (see `main.rs`'s doc comment on why the real `NSApplication`/main thread
+/// lives there instead), so this hops onto the real main thread via
+/// `dispatch2` rather than restructuring every caller — cheap since
+/// `list_monitors` itself is only ever called at startup and on a display
+/// hotplug/reconfigure event, never on a hot path. Dispatched asynchronously
+/// and joined back via a channel with `NOTCH_QUERY_TIMEOUT` rather than
+/// `exec_sync` directly, so a process with no Cocoa run loop pumping the
+/// main queue times out instead of hanging (see that constant's doc
+/// comment). `"NSScreenNumber"` isn't one of the constants
+/// `objc2-app-kit`'s header-translator generated (it's an older key not
+/// declared in the modern header it parses), so it's built as a plain
+/// string here — the standard, Apple-documented way to map an `NSScreen`
+/// back to the `CGDirectDisplayID` its `deviceDescription` belongs to.
+/// `LSMinimumSystemVersion` (`xtask/src/main.rs`) is already 12.0, the OS
+/// version `safeAreaInsets` shipped in, so no availability check is needed
+/// before calling it.
+fn notch_heights() -> HashMap<u32, f64> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    DispatchQueue::main().exec_async(move || {
+        let mut heights = HashMap::new();
+        if let Some(mtm) = MainThreadMarker::new() {
+            let screen_number_key = NSString::from_str("NSScreenNumber");
+            for screen in NSScreen::screens(mtm).to_vec() {
+                let Some(number) = screen
+                    .deviceDescription()
+                    .objectForKey(&screen_number_key)
+                    .and_then(|value| value.downcast::<NSNumber>().ok())
+                else {
+                    continue;
+                };
+                heights.insert(number.unsignedIntValue(), screen.safeAreaInsets().top);
+            }
+        }
+        let _ = tx.send(heights);
+    });
+    rx.recv_timeout(NOTCH_QUERY_TIMEOUT).unwrap_or_default()
 }
 
 /// The main display's usable frame. Kept as a convenience for callers that
@@ -284,6 +352,7 @@ mod tests {
                 height,
             },
             is_main: id == 1,
+            notch: 0.0,
         }
     }
 

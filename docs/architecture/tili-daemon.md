@@ -674,6 +674,19 @@ hot-reloaded `tili_config::Config`, creates any workspace it declares
 (without switching to it, so a reload never yanks focus off whatever's on
 screen), and rebuilds `mode_bindings` (M6: `HashMap<mode name,
 HashMap<KeyCombo, Command>>`) from `config.keybindings`.
+
+`ignore_notch`/`workspace_ignore_notch` mirror `gaps`/`workspace_gaps`'
+global-plus-per-workspace-override shape, populated the same way in
+`apply_config` from each `Gaps.ignore_notch`. They stay a separate pair of
+fields rather than living on `tili_tree::Gaps` itself, since that type has
+no macOS-specific notch concept to hold. `tiled_layout_inputs` — the one
+place `Monitor` geometry and gap config already converge for every tiled-
+layout caller (`relayout_monitor`, `capture_resize_snapshot`/
+`apply_mouse_resize`) — folds the resolved monitor's `notch` height (see
+[tili-ax.md](tili-ax.md)'s `display.rs` section) into the effective top gap
+there, unless the effective `ignore_notch` is `true`. `Tree::layout`/
+`resize_handle_at` never see the notch directly — they only ever get the
+already-adjusted `Gaps.outer`.
 `Command::ModeEnter`/`ModeExit` switch `current_mode`;
 `resolve_hotkey(combo)` looks a press up in the current mode's table, and
 `active_key_combos()` returns just the keys (for syncing the `Mutex` the

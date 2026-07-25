@@ -752,6 +752,13 @@ pub struct WmState {
     frame_setter: Box<dyn WindowFrameSetter>,
     gaps: Gaps,
     workspace_gaps: HashMap<String, Gaps>,
+    /// Whether `tiled_layout_inputs` should skip folding a monitor's notch
+    /// height into its effective top gap — mirrors `gaps`/`workspace_gaps`'
+    /// global-plus-per-workspace-override shape, kept separate from `Gaps`
+    /// itself since `tili_tree::Gaps` has no (and shouldn't gain a) notch
+    /// concept of its own.
+    ignore_notch: bool,
+    workspace_ignore_notch: HashMap<String, bool>,
     current_mode: String,
     /// mode name -> (key combo -> command), built fresh from config's
     /// `keybindings` on every `apply_config`.
@@ -902,6 +909,8 @@ impl Default for WmState {
             frame_setter: Box::new(InstantFrameSetter),
             gaps: Gaps::default(),
             workspace_gaps: HashMap::new(),
+            ignore_notch: false,
+            workspace_ignore_notch: HashMap::new(),
             current_mode: DEFAULT_MODE.to_string(),
             mode_bindings: HashMap::new(),
             auto_exit_modes: HashSet::new(),
@@ -1599,6 +1608,12 @@ impl WmState {
             .workspace_gaps
             .iter()
             .map(|(name, gaps)| (name.clone(), to_tree_gaps(*gaps)))
+            .collect();
+        self.ignore_notch = config.gaps.ignore_notch;
+        self.workspace_ignore_notch = config
+            .workspace_gaps
+            .iter()
+            .map(|(name, gaps)| (name.clone(), gaps.ignore_notch))
             .collect();
 
         for workspace in &config.workspaces {
@@ -3268,11 +3283,24 @@ impl WmState {
     /// shared by `relayout_monitor` and `capture_resize_snapshot`/
     /// `apply_mouse_resize`, which all need the exact same resolution.
     /// `None` if the monitor isn't connected or has no active workspace.
+    ///
+    /// Folds the monitor's notch height (if any) into the effective top
+    /// gap here, not in `Tree::layout` itself — `tili-tree` has no macOS
+    /// concept of a notch, so this is the one place monitor geometry and
+    /// gap config already converge for every tiled-layout caller.
     fn tiled_layout_inputs(&self, monitor_id: u32) -> Option<(String, Rect, Gaps)> {
         let name = self.active_workspace.get(&monitor_id)?.clone();
-        let area = self.monitor_frame(monitor_id)?;
-        let gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
-        Some((name, area, gaps))
+        let monitor = self.monitors.iter().find(|m| m.id == monitor_id)?;
+        let mut gaps = self.workspace_gaps.get(&name).copied().unwrap_or(self.gaps);
+        let ignore_notch = self
+            .workspace_ignore_notch
+            .get(&name)
+            .copied()
+            .unwrap_or(self.ignore_notch);
+        if !ignore_notch {
+            gaps.outer.0 += monitor.notch;
+        }
+        Some((name, monitor.frame, gaps))
     }
 
     /// Advances any in-flight `TweenedFrameSetter` animations by one step —
@@ -4211,6 +4239,7 @@ mod tests {
                 height: 1080.0,
             },
             is_main: true,
+            notch: 0.0,
         }];
         state.active_workspace.clear();
         state
@@ -4446,6 +4475,34 @@ mod tests {
         for (id, rect) in expected {
             assert!(frames_match(drag.frames[&id], rect));
         }
+    }
+
+    #[test]
+    fn tiled_layout_inputs_adds_monitor_notch_to_top_gap_unless_ignored() {
+        let mut state = floating_test_state();
+        state.monitors[0].notch = 30.0;
+        state.gaps.outer.0 = 8.0;
+
+        let (_, _, gaps) = state.tiled_layout_inputs(1).unwrap();
+        assert_eq!(gaps.outer.0, 38.0);
+
+        state.ignore_notch = true;
+        let (_, _, gaps) = state.tiled_layout_inputs(1).unwrap();
+        assert_eq!(gaps.outer.0, 8.0);
+    }
+
+    #[test]
+    fn tiled_layout_inputs_uses_per_workspace_ignore_notch_override() {
+        let mut state = floating_test_state();
+        state.monitors[0].notch = 30.0;
+        state.gaps.outer.0 = 8.0;
+        state.ignore_notch = false;
+        state
+            .workspace_ignore_notch
+            .insert(DEFAULT_WORKSPACE.to_string(), true);
+
+        let (_, _, gaps) = state.tiled_layout_inputs(1).unwrap();
+        assert_eq!(gaps.outer.0, 8.0);
     }
 
     #[test]
@@ -5198,6 +5255,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: true,
+                notch: 0.0,
             },
             Monitor {
                 id: 2,
@@ -5208,6 +5266,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: false,
+                notch: 0.0,
             },
         ];
         state.focused_monitor = 1;
@@ -5245,6 +5304,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: true,
+                notch: 0.0,
             },
             Monitor {
                 id: 2,
@@ -5255,6 +5315,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: false,
+                notch: 0.0,
             },
         ];
         state.workspaces.insert("a".to_string(), Tree::new());
@@ -5288,6 +5349,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: true,
+                notch: 0.0,
             },
             Monitor {
                 id: 2,
@@ -5298,6 +5360,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: false,
+                notch: 0.0,
             },
         ];
         state.workspaces.insert("parked".to_string(), Tree::new());
@@ -5340,6 +5403,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: true,
+                notch: 0.0,
             },
             Monitor {
                 id: 2,
@@ -5350,6 +5414,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: false,
+                notch: 0.0,
             },
         ];
         state.workspaces.insert("a".to_string(), Tree::new());
@@ -5632,6 +5697,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: true,
+                notch: 0.0,
             },
             Monitor {
                 id: 2,
@@ -5642,6 +5708,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: false,
+                notch: 0.0,
             },
         ];
         state.workspaces.insert("a".to_string(), Tree::new());
@@ -5714,6 +5781,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: true,
+                notch: 0.0,
             },
             Monitor {
                 id: 2,
@@ -5724,6 +5792,7 @@ mod tests {
                     height: 1080.0,
                 },
                 is_main: false,
+                notch: 0.0,
             },
         ];
         state.workspaces.insert("a".to_string(), Tree::new());

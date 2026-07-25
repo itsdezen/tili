@@ -18,6 +18,11 @@ pub struct Gaps {
     /// behind the active one, on the side(s) where a sibling exists — `0`
     /// collapses every child to the exact same full frame.
     pub accordion: u32,
+    /// `#false` (default): on a display with a notch, the effective top gap
+    /// starts below the notch instead of overlapping it. `#true`: the
+    /// notch is ignored and `outer`'s top value is used as-is, matching
+    /// pre-notch-awareness behavior.
+    pub ignore_notch: bool,
 }
 
 impl Default for Gaps {
@@ -26,6 +31,7 @@ impl Default for Gaps {
             inner: 0,
             outer: (0, 0, 0, 0),
             accordion: 30,
+            ignore_notch: false,
         }
     }
 }
@@ -401,6 +407,9 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
     {
         gaps.accordion = v;
     }
+    if let Some(v) = children.get_arg("ignore-notch").and_then(|v| v.as_bool()) {
+        gaps.ignore_notch = v;
+    }
     gaps
 }
 
@@ -730,6 +739,28 @@ mod tests {
     fn accordion_gap_defaults_to_thirty_when_unset() {
         let config = parse("").unwrap();
         assert_eq!(config.gaps.accordion, 30);
+    }
+
+    #[test]
+    fn ignore_notch_defaults_to_false_when_unset() {
+        let config = parse("").unwrap();
+        assert!(!config.gaps.ignore_notch);
+    }
+
+    #[test]
+    fn parses_ignore_notch_top_level_and_per_workspace() {
+        let source = r#"
+            gaps {
+                ignore-notch #true
+
+                workspace "random" {
+                    ignore-notch #false
+                }
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert!(config.gaps.ignore_notch);
+        assert!(!config.workspace_gaps["random"].ignore_notch);
     }
 
     #[test]

@@ -125,10 +125,35 @@ hot-plug/unplug just falls out of calling it again; each `Monitor`'s usable
 `frame` is its full `CGDisplay` bounds minus a hardcoded menu-bar inset
 applied only when `is_main` (secondary displays don't carry a menu bar).
 This is a deliberate, documented simplification over real
-`NSScreen.visibleFrame` (which would be more precise about notches/Dock
-placement but requires flipping between `NSScreen`'s bottom-left-origin
-coordinate space and AX/`CGDisplay`'s top-left-origin one — judged not
-worth the risk for what M9 needs).
+`NSScreen.visibleFrame` (which would be more precise about Dock placement
+but requires flipping between `NSScreen`'s bottom-left-origin coordinate
+space and AX/`CGDisplay`'s top-left-origin one — judged not worth the risk
+for what M9 needs).
+
+Each `Monitor` also carries `notch: f64` — `NSScreen.safeAreaInsets.top`
+for that display's `CGDirectDisplayID`, `0.0` on a display with no notch —
+populated by `notch_heights()`. Unlike `visibleFrame`, this is a plain
+scalar with no coordinate-flip risk, so it sidesteps the concern above
+entirely. The complication instead is thread-affinity: `NSScreen` is
+`MainThreadOnly`, but `list_monitors()` runs on `tili-daemon`'s background
+Tokio thread (see `main.rs`'s doc comment on why the real `NSApplication`
+lives on the actual process main thread instead). `notch_heights()` hops
+onto that real main thread via `dispatch2::DispatchQueue::main().exec_async`,
+joined back on the calling thread through a channel with a
+`NOTCH_QUERY_TIMEOUT` (50ms) rather than `exec_sync` directly — a real
+`NSApplication` event loop services its dispatch main queue essentially
+instantly, but a bare (non-Cocoa) process like a `cargo test` binary never
+pumps that queue at all, and `exec_sync` would block the calling thread
+forever waiting for a reply nobody will ever send. The timeout is a
+deadlock guard, not a legitimate-latency allowance — on a timeout every
+display just falls back to `notch: 0.0`, same as before this existed.
+Mapping an `NSScreen` back to its `CGDirectDisplayID` goes through its
+`deviceDescription`'s `"NSScreenNumber"` key — a string built by hand,
+since `objc2-app-kit`'s header-translator doesn't generate a constant for
+it. `tili-daemon`'s `tiled_layout_inputs` is what actually folds this
+height into the effective top gap (gated by the `gaps` config's
+`ignore-notch` flag) — `Monitor.notch` itself is just the raw
+measurement.
 
 `spawn_display_watcher()` registers a
 `CGDisplayRegisterReconfigurationCallback` on its own dedicated `CFRunLoop`

@@ -20,6 +20,8 @@ objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSWorkspace",
     "NSRunningApplication",
+    "NSScreen",
+    "NSGraphics",
     "libc",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
@@ -27,8 +29,13 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSOperation",
     "NSString",
     "NSDictionary",
+    "NSValue",
     "block2",
 ] }
 block2 = "0.6"
+# Only used to hop onto the real main thread from `list_monitors` (a
+# background-thread caller) for the one-off `NSScreen` notch query — see
+# `notch_heights`'s doc comment.
+dispatch2 = "0.3"
 tili-tree = { path = "../tili-tree" }
 tokio = { workspace = true }

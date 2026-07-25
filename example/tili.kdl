@@ -31,6 +31,10 @@ gaps {
     // behind the active one. 0 collapses every child to the same full frame.
     accordion 32
 
+    // On a display with a notch, #false (default) starts the top gap below
+    // the notch instead of overlapping it. #true ignores the notch entirely.
+    ignore-notch #false
+
     // Per-workspace override — put any workspace name declared above here
     // to override `inner`/`outer`/`accordion` just for it; anything not
     // listed here uses this block's own defaults, not whatever's set above.
