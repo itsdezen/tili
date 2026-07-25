@@ -8,6 +8,19 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-25
+
+### Fixed
+
+- **Notch-aware `gap top` (v0.6.0) inflated the effective top gap by a
+  full extra menu-bar height on every notched Mac**, leaving a wide gap
+  above tiled windows even with `outer`'s top value set to `0`.
+  `Monitor.notch` was the raw `NSScreen.safeAreaInsets.top`, which on a
+  notched display already covers the same top-of-screen zone the existing
+  hardcoded menu-bar inset accounts for — adding both double-counted it.
+  `Monitor.notch` is now only the amount by which the notch's safe area
+  *exceeds* that baseline.
+
 ## [0.6.0] - 2026-07-25
 
 ### Added
