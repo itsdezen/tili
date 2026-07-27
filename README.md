@@ -17,6 +17,8 @@ i3-style workflow · public Accessibility API only · Rust · no SIP disable
 
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/itsdezen)
 
+<img src="assets/thumbnail.png" alt="tili" width="100%" />
+
 </div>
 
 ---
