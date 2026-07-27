@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "tili-website",
+  "name": "tili",
   "compatibility_date": "2026-07-27",
   // Fully static — no `main` server entry, Workers' static-assets-only mode
   // serves straight out of the Astro build output.
