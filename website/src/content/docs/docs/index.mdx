@@ -1,0 +1,47 @@
+---
+title: Introduction
+description: Why tili exists and what it does differently from other macOS tiling window managers.
+---
+
+tili is a tiling window manager for macOS, built for speed. It follows an
+i3-style workflow — directional focus/move, named workspaces, keybinding
+modes — while staying entirely on public macOS APIs.
+
+## Why tili
+
+Most tiling window managers on macOS force a trade-off: either they poll the
+screen and burn CPU doing it, or they reach for private, undocumented APIs
+that break every time Apple ships a system update. tili takes neither
+shortcut.
+
+- **Event-driven, not polling.** The daemon subscribes to Accessibility and
+  workspace notifications and reacts to them — it does no work while your
+  windows aren't changing. That's the whole idea behind lower idle CPU/RAM
+  than the alternatives.
+- **Public API only.** Exactly one narrowly-scoped private call is used
+  anywhere in the codebase (to resolve a window's real `CGWindowID`) —
+  everything else is the public Accessibility API. You never disable System
+  Integrity Protection to run tili.
+- **A config format that matches how you think.** [KDL](https://kdl.dev)
+  instead of flat TOML tables — workspaces, keybinding modes, and floating
+  rules nest the way they actually relate to each other.
+- **Animation-ready architecture, not animation-as-an-afterthought.** Every
+  window-frame mutation goes through a single seam (`WindowFrameSetter`).
+  v1 ships instant moves; smooth animated transitions plug into that same
+  seam without a rewrite.
+- **No hotkey daemon required.** tili owns its own global hotkeys. One
+  binary, one daemon, one config file.
+- **Open source, installed via Homebrew.** No App Store, no sandbox
+  restrictions on what a window manager needs to do.
+
+## Status
+
+tili is daily-drivable today: tiling, workspaces, hot-reloaded config,
+built-in hotkeys, floating rules, multi-monitor, mouse/focus-follows-monitor,
+a menu bar workspace badge, and a real signed release pipeline. Pre-1.0
+still means config schema and CLI surface can change between releases —
+check the [Roadmap](/docs/roadmap) for what's planned next, and the
+[CHANGELOG](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md) on
+GitHub when upgrading.
+
+Ready to try it? Head to [Getting Started](/docs/getting-started).

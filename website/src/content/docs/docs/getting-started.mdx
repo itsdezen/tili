@@ -1,0 +1,78 @@
+---
+title: Getting Started
+description: Install tili, run it for the first time, and grant the permissions it needs.
+---
+
+## Install
+
+```sh
+brew install itsdezen/tap/tili
+```
+
+```sh
+tili start
+```
+
+That's it — `tili start` installs a background LaunchAgent (auto-restart,
+auto-start at login) and **waits** for tili-daemon to actually finish
+starting before returning. Ctrl-C stops the wait without affecting the
+daemon, which keeps running independently under launchd.
+
+## First run
+
+- Triggers the **Accessibility permission** prompt, then the **Input
+  Monitoring** one — grant both whenever you get to it; tili waits (up to
+  a minute) and reports "running" the moment you do, no restart needed. If
+  you don't grant Accessibility within that minute (or interrupt the wait
+  yourself), the daemon stops itself cleanly and `tili start` reports
+  that — just run it again once you're ready.
+- Writes a starter config to `~/.config/tili/tili.kdl` if none exists yet
+  — edit it and save, no restart needed, changes hot-reload. See
+  [`example/tili.kdl`](https://github.com/itsdezen/tili/blob/main/example/tili.kdl)
+  on GitHub for the full commented version.
+
+Use the keybindings from your config (or the `tili` CLI directly — see
+[Commands](/docs/commands)) to focus/move/tile windows. Run `tili stop` to
+stop it and remove the LaunchAgent (so it stays stopped until you run
+`tili start` again), `tili status` to check whether it's running, and
+`tili --version`/`tili help` for the installed version and full command
+list.
+
+:::tip
+If a three-finger swipe up (Mission Control) shows tiled windows at tiny or
+wildly mismatched sizes, enable **Group windows by application** under
+**System Settings → Desktop & Dock → Mission Control** — this is a macOS
+Mission Control layout setting, not something tili controls.
+:::
+
+## Troubleshooting
+
+`tili doctor` checks the daemon's and menu bar badge's LaunchAgent state,
+the IPC socket, and the config file, then reports anything wrong. A stale
+socket file, an unloaded LaunchAgent, or one half of the daemon/menu-bar
+pair missing while the other is installed can all be fixed automatically
+(it asks first, unless you pass `--fix`). A broken config file or a
+missing permission grant is reported only, never auto-fixed — only you can
+decide what you meant.
+
+## Other ways to install
+
+`brew install itsdezen/tap/tili` above is the recommended path — it
+installs a real, signed `tili.app` via
+[itsdezen/homebrew-tap](https://github.com/itsdezen/homebrew-tap).
+
+Building from source instead:
+
+```sh
+git clone https://github.com/itsdezen/tili
+cd tili
+cargo build --release --workspace
+```
+
+Or grab a prebuilt `tili.app` directly from a
+[GitHub release](https://github.com/itsdezen/tili/releases) without
+Homebrew. Releases are codesigned but not notarized yet, so Gatekeeper will
+still prompt on first launch — right-click → Open, or
+`xattr -d com.apple.quarantine tili.app`.
+
+Next: set up your [configuration](/docs/configuration).

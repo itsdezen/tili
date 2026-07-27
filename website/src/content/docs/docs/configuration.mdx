@@ -1,0 +1,272 @@
+---
+title: Configuration
+description: Full reference for every section and key tili.kdl accepts, straight from tili-config's schema.
+---
+
+Configuration is [KDL](https://kdl.dev), read from `~/.config/tili/tili.kdl`
+and hot-reloaded on save — no daemon restart needed. Every section below is
+optional; an omitted section (or an omitted key inside one) just uses its
+built-in default. Unrecognized top-level sections and unrecognized keys are
+silently ignored rather than rejected, so a config can carry typos or
+forward-looking sections without breaking anything — the tradeoff is that a
+section silently doing nothing after a reload is worth double-checking for
+a misspelled name.
+
+This page mirrors `crates/tili-config/src/schema.rs` exactly — every node
+name, attribute, type, and default below is what the parser actually
+implements today, not an aspirational schema.
+
+:::caution
+KDL v2 booleans are `#true`/`#false` — bare `true`/`false` is a parse
+error, unlike KDL v1 or most other config languages.
+:::
+
+## `workspaces`
+
+```kdl
+workspaces {
+    workspace "work"
+    workspace "entertain" monitor="main"
+    workspace "random"
+}
+```
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `workspace`'s name (1st positional arg) | string | yes | — | The workspace's name. A `workspace` line with no name is skipped. |
+| `monitor` | string attribute | no | none | Pins the workspace to a specific monitor. Not validated against connected monitors by this crate. |
+
+Switching only ever works for a workspace declared here — workspaces are
+never created on the fly by a `workspace <name>` command or keybinding.
+
+## `default-layout`
+
+```kdl
+default-layout "accordion"
+```
+
+A single top-level node (not a block) taking one string argument.
+
+:::note
+This key is parsed into `Config.default_layout`, but nothing in
+`tili-daemon` currently reads it — setting it has no observable effect
+today. It's part of the schema ahead of the behavior that will consume it.
+:::
+
+## `gaps`
+
+```kdl
+gaps {
+    inner 4
+    outer 8 16 16 16
+    accordion 32
+    ignore-notch #false
+
+    workspace "random" {
+        inner 0
+        outer 0
+    }
+}
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `inner` | integer (points) | `0` | Spacing between sibling tiled windows. |
+| `outer` | 1 or 4 integers (points) | `0 0 0 0` | Padding around the tiled area. One value applies to all 4 sides; four values are CSS-ordered `top right bottom left`. Any other count of values is ignored and `outer` falls back to `0 0 0 0`. |
+| `accordion` | integer (points) | `30` | How many points of a non-visible Accordion sibling peek out from behind the active one. `0` collapses every child to the same full frame. |
+| `ignore-notch` | boolean | `#false` | On a display with a notch, `#false` starts the effective top gap below the notch instead of overlapping it. `#true` ignores the notch and uses `outer`'s top value as-is. |
+
+### Per-workspace overrides
+
+A `workspace "<name>"` block nested inside `gaps` overrides `inner`/
+`outer`/`accordion`/`ignore-notch` just for that workspace. Any of the four
+keys *not* listed inside the override block falls back to **that block's
+own built-in defaults** (`inner 0`, `outer 0 0 0 0`, `accordion 30`,
+`ignore-notch #false`) — not to whatever the top-level `gaps` block above
+it set. An override for a workspace not declared in `workspaces` is parsed
+but never matched against anything.
+
+## `settings`
+
+```kdl
+settings {
+    auto-reload #true
+    default-workspace "entertain"
+    mouse-follows-focus #true
+    focus-follows-monitor #true
+    default-root-orientation "auto"
+    mouse-resize-step 0.1
+    animate #false
+}
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `mouse-follows-focus` | boolean | `#false` | Warps the cursor to the newly-focused window. |
+| `focus-follows-monitor` | boolean | `#false` | Moving the cursor onto a different monitor focuses it, same as the `focus-monitor` command. |
+| `auto-reload` | boolean | `#true` | Whether the daemon hot-reloads this file on save at all. |
+| `default-workspace` | string | none | Which declared workspace is active at daemon startup, on the *first* config load only — a hot reload never changes what's currently on screen. Falls back to the alphabetically-first declared workspace when unset. Not cross-validated against `workspaces` by this crate. |
+| `default-root-orientation` | string | `"auto"` | Orientation a workspace's root container gets when it's created for its second window: `"horizontal"`, `"vertical"`, or `"auto"` (derived from the target monitor's aspect ratio). Any other string is treated as `"auto"` by `tili-daemon`. |
+| `mouse-resize-step` | float (accepts a bare integer too) | `0.1` | Weight-space grid a mouse-drag tile resize snaps its result to, so a released size always matches some whole number of `resize <amount>` keypresses at this same step. |
+| `animate` | `#true` / `#false` / `"medium"` / `"high"` | `#false` (off) | Eases tiled relayout and floating placement into their new frame instead of jumping straight there. `#true` resolves to `"medium"`. Any unrecognized string value falls back to off. See the animation cost note below. |
+
+Every key here is independently optional — an invalid or unrecognized
+value for one key (e.g. `animate "ludicrous"`) falls back to that key's own
+default rather than rejecting the rest of the `settings` block or the file.
+
+:::note
+**`animate` performance tradeoff**: each animation step is a real
+Accessibility API write, not a free interpolation. Going from off to
+`"medium"` (~60fps) is roughly 6x the AX round-trips per relayout (~6
+steps instead of 1); `"high"` (~120fps) is roughly 11x. Mostly unnoticeable
+on native apps; a slow-to-respond app (some Electron/Chromium apps) pays
+that multiplier in extra latency per relayout, more so at `"high"`. Try
+`"medium"` first.
+:::
+
+## `keybindings`
+
+```kdl
+keybindings mode="main" {
+    bind "alt-h" "focus left"
+    bind "alt-shift-semicolon" "mode resize"
+}
+
+keybindings mode="resize" {
+    bind "h" "resize -0.1"
+    bind "escape" "mode main"
+}
+
+keybindings mode="manage" auto-exit=#true {
+    bind "escape" "reload-config"
+    bind "r" "flatten"
+}
+```
+
+You can declare any number of `keybindings` nodes — multiple nodes can
+share the same `mode` value, or use different ones to define separate
+switchable modes.
+
+| Attribute | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `mode` | string attribute on `keybindings` | **yes** | — | The mode name this block's bindings belong to. A `keybindings` node with no `mode` attribute is silently dropped entirely, along with all its bindings. `"main"` is the mode active by default at startup. |
+| `auto-exit` | boolean attribute on `keybindings` | no | `#false` | Whether dispatching any command bound in this mode automatically returns to `"main"` afterward (a one-shot mode), as opposed to a sticky mode that stays active until an explicit `mode main`/`mode exit`. |
+| `bind`'s 1st positional arg | string (key combo) | yes | — | e.g. `"alt-shift-h"`. A `bind` line missing either argument is skipped. |
+| `bind`'s 2nd positional arg | string (command) | yes | — | The command string to run, in the same syntax the daemon's IPC layer parses — see [Commands](/docs/commands) for the full list, including `mode <name>`/`mode exit`/`reload-config`, which are only reachable via a keybinding, not the CLI. |
+
+Key combo strings are `modifier-modifier-key`, e.g. `"alt-shift-h"`;
+modifiers can be listed in any order. Recognized modifiers: `alt`/`option`,
+`cmd`/`command`, `ctrl`/`control`, `shift`. Base key names: letters,
+digits, punctuation (`slash`/`semicolon`/`minus`/`equal`/…), and
+`escape`/`enter`/`space`/`tab`/arrow keys.
+
+## `workspace-rules`
+
+```kdl
+workspace-rules {
+    rule app-id="com.mitchellh.ghostty" workspace="work"
+}
+```
+
+Auto-assigns a matching app's windows to a specific declared workspace on
+creation, regardless of whatever workspace is currently active — and
+independent of whether that app ends up tiled or floating (see
+`floating-rules` below for that separate concern). Matched in document
+order, first match wins. If the target workspace isn't visible on any
+monitor right now, the window is parked until you switch to it.
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `app-id` | string attribute | **yes** | The target app's bundle identifier (find one with `osascript -e 'id of app "Finder"'` or `mdls -name kMDItemCFBundleIdentifier /Applications/Finder.app`). |
+| `workspace` | string attribute | **yes** | Must name a workspace declared in `workspaces`, though this crate doesn't itself validate that — `tili-daemon` does, the same way it resolves `settings.default-workspace`. |
+
+A `rule` missing either attribute is silently skipped.
+
+## `floating-rules`
+
+```kdl
+floating-rules {
+    rule app-id="com.apple.finder" { center #true }
+    rule app-id="com.apple.systempreferences" {
+        width 900
+        height 600
+        center #true
+    }
+    rule app-id="com.example.app" title="^(Preferences|About)$" { center #true }
+    rule app-id="com.example.misclassified-dialog-app" mode="tile"
+    rule app-id="com.example.menu-bar-panel" mode="ignore"
+
+    defaults {
+        center #false
+        width-ratio 0.6
+        height-ratio 0.6
+    }
+}
+```
+
+Windows matching a rule float instead of tiling (unless `mode` says
+otherwise) and are sized/positioned on creation. Matched in document
+order, first match wins.
+
+### `rule` attributes
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `app-id` | string attribute | **yes** | The target app's bundle identifier. A `rule` missing this is skipped entirely. |
+| `title` | string attribute (regex) | no | A regex matched against the window title — compiled by `tili-daemon`, not this crate — for narrowing a rule to specific dialogs of an app that should otherwise tile normally. |
+| `mode` | `"float"` / `"tile"` / `"ignore"` string attribute | no, defaults to `"float"` | Overrides tili's own AX-based guess at whether the window should float, tile, or be left completely untouched. An unrecognized `mode` value falls back to `"float"`. |
+
+### `rule`'s `{ }` body (only meaningful when `mode` is `"float"`, the default)
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `width` | integer (points) | no | Falls back to `defaults.width-ratio` when omitted. |
+| `height` | integer (points) | no | Falls back to `defaults.height-ratio` when omitted. |
+| `center` | boolean | no | Falls back to `defaults.center` when omitted. |
+
+### `defaults` block
+
+Fallback centering/sizing applied to a floating window that matched a rule
+with no explicit `width`/`height`/`center` of its own.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `center` | boolean | `#true` | Whether to center the window on its monitor. |
+| `width-ratio` | float (accepts a bare integer too) | `0.6` | Fraction of the monitor's usable width, e.g. `0.6` = 60%. |
+| `height-ratio` | float (accepts a bare integer too) | `0.6` | Fraction of the monitor's usable height. |
+
+`mode` meanings, in full:
+
+- **`"float"`** (default) — auto-centered/sized per the rule's own
+  `width`/`height`/`center`, falling back to `defaults`. Every rule
+  written before `mode` existed still behaves identically.
+- **`"tile"`** — tiled even if tili's AX heuristic classified the window
+  `Dialog`/`Popup`. Useful for an app that marks an ordinary resizable
+  window with a dialog-like subrole.
+- **`"ignore"`** — left exactly where/however it already is: tracked but
+  never tiled, floated, or parked. Same treatment a `Popup`-kind window
+  with no matching rule already gets.
+
+## Loading and hot-reload
+
+- The config file lives at `~/.config/tili/tili.kdl`.
+- A **missing** file is not an error — it's treated as "no config yet,"
+  and the daemon runs with every default listed above, so a fresh install
+  works before you've written anything.
+- A **malformed** KDL document (bad syntax) *is* a hard error on initial
+  load.
+- Hot-reload watches the config file's *containing directory*, not a
+  handle to the file itself — this survives editors that save via a
+  temp-file-then-rename, and symlinked config paths (e.g. a dotfiles
+  manager) are resolved to their real target first.
+- On save, a parse error is logged to stderr and **the previous,
+  already-loaded config keeps applying** — a syntax typo in a running
+  daemon's config can't take it down or silently misconfigure it.
+- Hot-reload itself is gated by `settings.auto-reload` (default `#true`).
+
+## Full example
+
+See
+[`example/tili.kdl`](https://github.com/itsdezen/tili/blob/main/example/tili.kdl)
+on GitHub for a complete, commented, copy-pasteable config covering every
+section above plus a full set of i3-style default keybindings.

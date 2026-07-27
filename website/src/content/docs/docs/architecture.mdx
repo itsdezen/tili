@@ -1,0 +1,72 @@
+---
+title: Architecture
+description: How tili's Cargo workspace is split, and why the boundaries are strict.
+---
+
+tili is a Cargo workspace split along strict boundaries so the hardest
+parts (the container tree, the layout algorithms) can be tested without a
+Mac at all, and the parts that touch the OS (`AXUIElement`, `NSWorkspace`,
+display reconfiguration) stay isolated in one place.
+
+```
+crates/
+├── tili-tree     pure container-tree + layout algorithms (Tiles/BSP, Accordion)
+├── tili-ax       Accessibility API integration, the WindowFrameSetter seam
+├── tili-config   KDL parsing + validation, hot-reload
+├── tili-ipc      shared daemon/CLI protocol types
+├── tili-daemon   the window manager: event loop, state, hotkeys
+├── tili-cli      the `tili` command-line client
+└── tili-menubar  the menu bar workspace badge
+```
+
+- **`tili-tree`** has no `AXUIElement`, no CoreFoundation, no `unsafe` — it
+  operates on plain rectangles and window IDs, which is what makes it fully
+  unit-testable on any platform.
+- **`tili-ax`** is the only crate allowed to touch the Accessibility API.
+  All real window-frame mutations go through one seam,
+  `WindowFrameSetter` — an instant-move implementation today, with an
+  animated one plugging into the same seam without a rewrite.
+- **`tili-config`** parses and validates KDL, including hot-reload on save.
+- **`tili-ipc`** defines the `Command`/`Response` protocol shared by the
+  daemon and CLI, so there's exactly one definition of what a command
+  means.
+- **`tili-daemon`** is the window manager process. Every command — whether
+  from a global hotkey or the CLI over a Unix socket — flows through the
+  same `dispatch(&mut WmState, Command) -> Response` function. No locks, no
+  drift between what a hotkey does and what the CLI does.
+- **`tili-cli`** is a thin socket client; the binary is named `tili`. New
+  behavior belongs in the daemon behind a `Command`, not here.
+- **`tili-menubar`** is the `NSStatusItem` workspace badge described in
+  [Menu Bar Badge](/docs/menu-bar).
+
+## Workspaces are virtual
+
+macOS exposes no public API to control Spaces, so inactive-workspace
+windows are parked off-screen rather than relying on real Spaces — the same
+technique other public-API-only tools in this space use.
+
+## Design invariants
+
+These are non-negotiable, enforced by the architecture rather than style
+preference:
+
+- **No private Accessibility/window APIs** beyond one documented call (to
+  resolve a window's real `CGWindowID`) — this is what lets tili run
+  without disabling System Integrity Protection.
+- **No polling.** The daemon reacts to AXObserver/NSWorkspace/display
+  notifications. A handful of narrowly-scoped exceptions exist (hotkey
+  permission retry, a watcher-resync backstop, UI debounce, and
+  animation-tick interpolation) — each is documented in the codebase as a
+  deliberate, bounded exception, not a precedent for more.
+- **Accessibility permission gets no in-process wait/poll/restart of any
+  kind** once the daemon is running — it checks once at startup and stops
+  itself if not granted.
+- **All real window-frame mutations go through `WindowFrameSetter`** — the
+  one seam that knows how a window's frame actually gets set.
+- **Hotkey- and socket-triggered commands both go through `dispatch()`** —
+  no parallel command path.
+
+For the full per-crate rationale and hardware-confirmed findings behind
+each of these, see
+[`docs/architecture/`](https://github.com/itsdezen/tili/tree/main/docs/architecture)
+in the repository.

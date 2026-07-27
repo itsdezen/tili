@@ -1,0 +1,47 @@
+---
+title: Menu Bar Badge
+description: tili-menubar, the NSStatusItem workspace badge that ships alongside the daemon.
+---
+
+`tili start` also installs and starts `tili-menubar` alongside the daemon —
+a small `NSStatusItem` badge showing the active workspace on your focused
+monitor.
+
+## What it shows
+
+- The badge title is the focused monitor's active workspace name — the
+  unambiguous "current workspace" for a single badge, since more than one
+  monitor's workspace can independently be "active" at once.
+- The dropdown menu lists every workspace (a `•` prefix marks the current
+  one), then **Open Settings** and **Quit tili**.
+- It hides itself entirely — not a stale badge, nothing — whenever the
+  daemon isn't reachable, including when it's stopped from outside
+  tili-menubar entirely (e.g. `tili stop` from the CLI).
+
+## Menu actions
+
+| Item | Behavior |
+|---|---|
+| A workspace name | Switches the active workspace to it. |
+| **Open Settings** | Opens `~/.config/tili/tili.kdl`, trying `$EDITOR` first (if set), then `open <path>` (Launch Services' registered default for `.kdl`), then `open -a TextEdit <path>` as a last resort that's guaranteed to work. |
+| **Quit tili** | Runs `tili stop` (stopping the daemon too, not just this process) and then exits. |
+
+## Staying in sync
+
+Under the hood it stays in sync via a server-side long-poll
+(`Command::WaitForChange`), not polling — consistent with the rest of
+tili's event-driven design. The background thread blocks on that call
+(zero CPU while idle) and only does real work once it unblocks, either
+because something actually changed or the daemon's own internal wait hit
+its 30s idle timeout — both look the same from the client's side by
+design.
+
+If the daemon becomes unreachable, tili-menubar hides the badge
+immediately and retries once a second. After roughly a minute of
+consecutive failures (60 attempts), it gives up, unloads its own
+LaunchAgent, and stops itself — treating a daemon that's been gone that
+long as "stopped on purpose" (e.g. via `tili stop`) rather than a
+transient blip like the brief restart a Homebrew upgrade can trigger.
+
+It starts/stops/uninstalls automatically with `tili start`/`stop`/
+`uninstall`, so there's nothing extra to run yourself.

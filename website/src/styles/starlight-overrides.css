@@ -1,0 +1,170 @@
+/* Monochrome palette for Starlight's own dark/light toggle (data-theme attribute).
+   Same gray scale as the landing page's tokens.css, remapped onto Starlight's
+   --sl-color-* custom properties instead of the .dark-class scheme used there —
+   these are two separate toggle mechanisms by design (see CLAUDE.md). */
+
+:root,
+::backdrop {
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #f2f2f2;
+  --sl-color-gray-2: #d4d4d4;
+  --sl-color-gray-3: #a3a3a3;
+  --sl-color-gray-4: #737373;
+  --sl-color-gray-5: #525252;
+  --sl-color-gray-6: #262626;
+  --sl-color-black: #0a0a0a;
+
+  --sl-color-orange-low: #262626;
+  --sl-color-orange: #a3a3a3;
+  --sl-color-orange-high: #f2f2f2;
+  --sl-color-green-low: #262626;
+  --sl-color-green: #a3a3a3;
+  --sl-color-green-high: #f2f2f2;
+  --sl-color-blue-low: #262626;
+  --sl-color-blue: #d4d4d4;
+  --sl-color-blue-high: #fafafa;
+  --sl-color-purple-low: #262626;
+  --sl-color-purple: #a3a3a3;
+  --sl-color-purple-high: #f2f2f2;
+  --sl-color-red-low: #262626;
+  --sl-color-red: #a3a3a3;
+  --sl-color-red-high: #f2f2f2;
+
+  --sl-color-accent-low: #262626;
+  --sl-color-accent: #d4d4d4;
+  --sl-color-accent-high: #fafafa;
+
+  --sl-color-text: var(--sl-color-gray-2);
+  --sl-color-text-accent: var(--sl-color-accent-high);
+  --sl-color-text-invert: var(--sl-color-accent-low);
+  --sl-color-bg: var(--sl-color-black);
+  --sl-color-bg-nav: #171717;
+  --sl-color-bg-sidebar: #171717;
+  --sl-color-bg-inline-code: var(--sl-color-gray-6);
+  --sl-color-bg-accent: var(--sl-color-accent-high);
+  --sl-color-hairline-light: #404040;
+  --sl-color-hairline: var(--sl-color-gray-6);
+  --sl-color-hairline-shade: var(--sl-color-black);
+
+  --sl-color-backdrop-overlay: rgba(10, 10, 10, 0.66);
+}
+
+:root[data-theme='light'],
+[data-theme='light'] ::backdrop {
+  --sl-color-white: #171717;
+  --sl-color-gray-1: #262626;
+  --sl-color-gray-2: #404040;
+  --sl-color-gray-3: #525252;
+  --sl-color-gray-4: #737373;
+  --sl-color-gray-5: #d4d4d4;
+  --sl-color-gray-6: #f2f2f2;
+  --sl-color-gray-7: #fafafa;
+  --sl-color-black: #ffffff;
+
+  --sl-color-orange-high: #262626;
+  --sl-color-orange: #525252;
+  --sl-color-orange-low: #f2f2f2;
+  --sl-color-green-high: #262626;
+  --sl-color-green: #525252;
+  --sl-color-green-low: #f2f2f2;
+  --sl-color-blue-high: #171717;
+  --sl-color-blue: #404040;
+  --sl-color-blue-low: #f2f2f2;
+  --sl-color-purple-high: #262626;
+  --sl-color-purple: #525252;
+  --sl-color-purple-low: #f2f2f2;
+  --sl-color-red-high: #262626;
+  --sl-color-red: #525252;
+  --sl-color-red-low: #f2f2f2;
+
+  --sl-color-accent-high: #171717;
+  --sl-color-accent: #404040;
+  --sl-color-accent-low: #f2f2f2;
+
+  --sl-color-text-accent: var(--sl-color-accent-high);
+  --sl-color-text-invert: var(--sl-color-black);
+  --sl-color-bg-nav: #fafafa;
+  --sl-color-bg-sidebar: var(--sl-color-bg);
+  --sl-color-bg-inline-code: var(--sl-color-gray-6);
+  --sl-color-bg-accent: var(--sl-color-accent-high);
+  --sl-color-hairline-light: var(--sl-color-gray-6);
+  --sl-color-hairline-shade: var(--sl-color-gray-6);
+
+  --sl-color-backdrop-overlay: rgba(115, 115, 115, 0.5);
+}
+
+/* Reference tables (Configuration, Commands, ...): Starlight's reset sets
+   `code { overflow-wrap: anywhere }` globally, which lets table-layout:auto
+   starve a short first column (key names in `code` spans) down to widths
+   that break identifiers mid-word once a much wider Description column is
+   in the same row. Give `code` its normal wrapping back inside tables, and
+   the first column a floor width so it sizes off its own content instead. */
+.sl-markdown-content table code {
+  overflow-wrap: normal;
+}
+
+.sl-markdown-content table :is(th, td):first-child {
+  min-width: 11rem;
+}
+
+/* Type scale + spacing: a size down from Starlight's defaults across the
+   board, with block/section spacing scaled *up* rather than down — the
+   goal is a more refined, airier feel (tighter text, more generous gaps
+   between blocks), not a uniformly-compressed layout. Starlight's own
+   >=50em media query re-derives --sl-text-h1..h4 from these same base
+   scale variables, so it automatically picks up the smaller scale too
+   without needing to be redeclared here. */
+:root {
+  --sl-text-2xs: 0.6875rem;
+  --sl-text-xs: 0.75rem;
+  --sl-text-sm: 0.8125rem;
+  --sl-text-base: 0.9375rem;
+  --sl-text-lg: 1.0625rem;
+  --sl-text-xl: 1.125rem;
+  --sl-text-2xl: 1.3125rem;
+  --sl-text-3xl: 1.5rem;
+  --sl-text-4xl: 1.75rem;
+  --sl-text-5xl: 2rem;
+  --sl-text-6xl: 2.75rem;
+
+  --sl-line-height: 1.65;
+  --sl-line-height-headings: 1.25;
+
+  --sl-content-pad-x: 1.25rem;
+  --sl-sidebar-pad-x: 1.25rem;
+  --sl-nav-pad-x: 1.25rem;
+}
+
+@media (min-width: 50em) {
+  :root {
+    --sl-content-pad-x: 1.75rem;
+  }
+}
+
+/* More breathing room between content blocks than Starlight's defaults —
+   same selectors as its own markdown.css rules (unlayered here, so no
+   specificity fight needed to win), just larger margin-top values. */
+.sl-markdown-content
+  :not(a, strong, em, del, span, input, code, br)
+  + :not(a, strong, em, del, span, input, code, br, :where(.not-content *)) {
+  margin-top: 1.5rem;
+}
+
+.sl-markdown-content
+  :not(h1, h2, h3, h4, h5, h6)
+  + :is(h1, h2, h3, h4, h5, h6):not(:where(.not-content *)) {
+  margin-top: 2.75em;
+}
+
+/* Sidebar: font sizes already shrink for free via the scale above (its
+   links/group labels are set from --sl-text-sm/base/lg); this just adds a
+   bit more air between top-level items to match. */
+.top-level > li + li {
+  margin-top: 1.1rem;
+}
+
+@media (min-width: 50rem) {
+  .top-level > li + li {
+    margin-top: 0.85rem;
+  }
+}

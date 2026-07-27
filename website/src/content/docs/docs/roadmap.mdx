@@ -1,0 +1,63 @@
+---
+title: Roadmap
+description: What tili has shipped and what's planned next.
+---
+
+## Shipped
+
+tili's first public release already carries a complete, daily-drivable
+feature set:
+
+- BSP tiling (`Tiles`) and Accordion layouts, with i3-style directional
+  focus/move, join, resize, and balance.
+- Named workspaces, off-screen virtualization, and full multi-monitor
+  support (hot-plug/unplug safe).
+- KDL config with file-watch hot-reload — no daemon restart needed.
+- Built-in global hotkeys, with switchable keybinding modes.
+- Floating rules (auto-center/size on creation, runtime tile/float toggle,
+  per-rule mode override).
+- Workspace rules — auto-assign an app to a specific workspace on creation,
+  independent of whether it tiles or floats.
+- Mouse-follows-focus and focus-follows-monitor.
+- Native and tiled fullscreen, window close, and `summon` (find-and-raise
+  by title/bundle id).
+- A menu bar workspace badge (`tili-menubar`) that stays in sync with the
+  daemon over an event-driven long-poll, not polling.
+- LaunchAgent-managed `start`/`stop`/`uninstall`, the latter leaving
+  nothing behind — config, logs, socket, and the Accessibility grant are
+  all cleaned up automatically.
+- A real, signed release pipeline.
+
+See the
+[CHANGELOG](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md) on
+GitHub for the full itemized list.
+
+## Planned
+
+Nothing here is scheduled — it's the backlog of ideas judged worth doing
+eventually, roughly in the order they'd likely land:
+
+- **Third-party status bar integration** (e.g. SketchyBar) — either a
+  `tili subscribe` push protocol, or a simpler exec-hook
+  (`on-workspace-change`) for tools that don't want to speak tili's
+  protocol directly.
+- **Tabbed/stacked containers** — a third container kind between `Tiles`
+  and `Accordion`.
+- **Sticky windows** — windows that stay visible across workspace switches
+  instead of parking.
+- **Native-tab support** — deferred until macOS's native-tab semantics can
+  be relied on consistently across apps.
+
+## Design principles
+
+- **Public API only.** One documented private call — everything else is
+  public Accessibility API. No SIP disable, ever.
+- **Event-driven, not polling.** Every change to the daemon's event loop is
+  checked against idle CPU usage, not just correctness.
+- **The animation seam stays a seam.** `WindowFrameSetter` is the only
+  thing allowed to know how a window's frame actually gets set.
+
+Full detail lives in
+[ROADMAP.md](https://github.com/itsdezen/tili/blob/main/ROADMAP.md) and
+[docs/BLUEPRINT.md](https://github.com/itsdezen/tili/blob/main/docs/BLUEPRINT.md)
+on GitHub.

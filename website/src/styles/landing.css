@@ -1,0 +1,150 @@
+@import './tokens.css';
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+}
+
+.landing {
+  min-height: 100dvh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding: clamp(0.75rem, 3vh, 1.5rem) clamp(1rem, 4vw, 2.5rem);
+  position: relative;
+}
+
+.landing__toggle {
+  position: absolute;
+  top: clamp(0.75rem, 3vh, 1.5rem);
+  right: clamp(1rem, 4vw, 2.5rem);
+}
+
+.landing__main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(1.1rem, 4vh, 2.25rem);
+  text-align: center;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brand img {
+  height: clamp(3rem, 8.5vw, 5rem);
+  width: auto;
+}
+
+/* Wordmark is transparent-background ink that only reads clearly against
+   one background tone — show the dark-ink file in light mode, swap to the
+   light-ink file in dark mode, same pattern as ThemeToggle's sun/moon. */
+.brand .logo-dark {
+  display: none;
+}
+
+/* No :global() here — unlike ThemeToggle.astro's own <style> block (which
+   Astro's compiler processes and where :global() is meaningful), this is a
+   plain external stylesheet with no scoping to opt out of. `:global(...)`
+   in a file like this is just invalid CSS syntax that browsers silently
+   drop the whole rule for — which is exactly what made the dark-mode swap
+   below never actually apply. */
+.dark .brand .logo-light {
+  display: none;
+}
+
+.dark .brand .logo-dark {
+  display: block;
+}
+
+.tagline {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(1.15rem, 2.9vw, 1.75rem);
+  max-width: 38rem;
+  margin: 0;
+}
+
+.subtitle {
+  color: var(--color-fg-muted);
+  font-size: clamp(0.75rem, 1.7vw, 1rem);
+  margin: 0;
+}
+
+.cta-row {
+  display: flex;
+  gap: clamp(0.6rem, 2vw, 1rem);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.cta-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: clamp(2.5rem, 6vw, 3.25rem);
+  height: clamp(2.5rem, 6vw, 3.25rem);
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  color: var(--color-fg);
+  background: transparent;
+  transition: border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.cta-icon svg {
+  width: 48%;
+  height: 48%;
+}
+
+.cta-icon:hover {
+  opacity: 0.75;
+}
+
+/* Docs stays icon + label (the other two are icon-only) and the visually
+   primary/filled button, same treatment `.cta-icon--primary` used to give
+   it before it grew a label — a circle can't hold text, so this is its own
+   pill shape instead, sized to match the icon buttons' height so the row
+   still lines up. */
+.cta-docs {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: clamp(2.5rem, 6vw, 3.25rem);
+  padding: 0 clamp(1rem, 3vw, 1.4rem);
+  border-radius: 999px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
+  font-size: clamp(0.8rem, 1.8vw, 0.95rem);
+  font-weight: 600;
+  text-decoration: none;
+  transition: opacity 0.15s ease;
+}
+
+.cta-docs svg {
+  width: clamp(1rem, 2.5vw, 1.15rem);
+  height: clamp(1rem, 2.5vw, 1.15rem);
+  flex-shrink: 0;
+}
+
+.cta-docs:hover {
+  opacity: 0.75;
+}

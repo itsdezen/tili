@@ -1,0 +1,80 @@
+---
+title: Commands
+description: The full tili CLI reference, plus the keybinding command-string syntax config binds resolve to.
+---
+
+`tili start`/`stop`/`uninstall`/`status`/`doctor` manage the daemon's
+LaunchAgent and local state directly; everything else below is a client
+command sent over a Unix socket to a daemon that's already running.
+
+:::note
+The CLI (`crates/tili-cli`) and the keybinding command strings your config
+binds (parsed by `crates/tili-ipc`) are two separate parsers that mostly
+agree on spelling — but not always. Where they differ, it's called out
+below; see [Configuration → keybindings](/docs/configuration#keybindings)
+for how `bind` lines resolve.
+:::
+
+## Daemon & local state
+
+| Command | What it does |
+|---|---|
+| `tili` (no subcommand) | Same as `tili start`, after an Enter-key confirmation (Ctrl-C or Ctrl-D cancels) |
+| `tili start` | Install and start tili-daemon as a background LaunchAgent (auto-restart, auto-start at login) |
+| `tili stop` | Stop tili-daemon and remove its LaunchAgent |
+| `tili status` | Report whether the daemon is running and reachable |
+| `tili uninstall` | Full teardown: stops both LaunchAgents, then removes the config file, logs, IPC socket, and the Accessibility permission grant. Doesn't touch a Homebrew install itself — run `brew uninstall tili` separately if that's how tili was installed. |
+| `tili doctor [--fix]` | Checks daemon/menu-bar LaunchAgent state, the IPC socket, and the config file, then reports any problems found. A stale socket file, an installed-but-unloaded LaunchAgent, or one half of the daemon/menu-bar pair missing while the other is installed can all be auto-fixed (with a confirmation prompt, unless `--fix` skips it). A bad config file or a missing permission grant is reported only — never auto-fixed, since only you can decide what you meant. |
+| `tili --version`/`-v` | Print the installed version |
+| `tili help`/`-h` | Print the full command list |
+
+## Window & workspace commands
+
+Sent over the socket to an already-running daemon; the same verbs (mostly)
+resolve from keybindings too.
+
+| Command | What it does |
+|---|---|
+| `tili ping` | Check the daemon is reachable (scripting-friendly; see `status` for the human-readable version) |
+| `tili focus <left\|right\|up\|down>` | Move focus to the window in that direction |
+| `tili move <left\|right\|up\|down>` | Move the focused window one step in that direction, re-parenting it through the tree |
+| `tili join <left\|right\|up\|down>` | Wrap the focused window and its neighbor into a new, perpendicular container |
+| `tili resize <amount>` | Grow (positive) or shrink (negative) the focused window's share of its nearest tiled container |
+| `tili balance [--root]` | Reset child weights of the focused container (or workspace root, with `--root`) evenly |
+| `tili layout <toggle\|tiles\|accordion\|horizontal\|vertical\|toggle-orientation> [--root]` | Toggle or set the focused container's layout/orientation |
+| `tili flatten` | Re-normalize the tree (no-op today — normalization already runs after every mutation) |
+| `tili fullscreen [--native]` | Toggle the focused window fullscreen (tiled, or `--native` for a real separate Space) |
+| `tili close` | Close the focused window (best-effort `AXCloseButton` press) |
+| `tili summon <query>` | Focus (and raise) the first known window whose title or bundle id contains `query` |
+| `tili set-floating <on\|off>` | Toggle the focused window between tiled and floating at runtime |
+| `tili workspace <name>` | Switch the active workspace. Errors if `name` isn't declared in config — workspaces are never created on the fly. |
+| `tili workspace-back` | Switch back to whichever workspace was active before this one |
+| `tili move-to-workspace <name>` | Move the focused window to another workspace without switching focus to it. **Note:** the equivalent keybinding command string is spelled `move-node-to-workspace <name>`, not `move-to-workspace` — the CLI and the keybinding parser chose different verbs for the same underlying command. |
+| `tili move-workspace-to-monitor <target> [--workspace <name>]` | Move a workspace to a different monitor without switching focus; `target` is a monitor id, `"next"`, or `"main"`. Defaults to whatever workspace is currently active on the focused monitor. |
+| `tili list-workspaces` | List workspaces, with active/monitor markers |
+| `tili focus-monitor` | Cycle which connected monitor commands target (no-op with one monitor) |
+| `tili list-monitors` | List connected monitors, marking which one is focused |
+| `tili list-windows` | List known windows (tiled/floating, frame, pid) |
+
+## Keybinding-only command strings
+
+A few command strings are only reachable from a `bind` line in your
+config — they have no dedicated `tili <subcommand>`:
+
+| Command string | What it does |
+|---|---|
+| `mode <name>` | Switch to a named keybindings mode |
+| `mode exit` | Return to the default (`"main"`) mode |
+| `reload-config` | Force a config reload |
+| `shutdown` | Shut the daemon down (used internally; not meant for interactive use) |
+
+## Targeting a specific window or workspace
+
+Any keybinding or CLI command that operates on "the focused window" can
+instead be pointed at a specific one by appending `--window-id <id>` and/or
+`--workspace <name>` — both flags may appear in either order, and a later
+one of the same kind wins if repeated. Anything not recognized as one of
+the commands above (a typo, or a command from a newer config schema this
+daemon build doesn't know yet) is accepted without error and simply
+reported by `dispatch()` as "not implemented" rather than failing the
+whole config load.
