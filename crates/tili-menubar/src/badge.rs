@@ -16,10 +16,16 @@ const PADDING_X: f64 = 7.0;
 /// Fixed badge height — matches the typical menu bar content height so it
 /// sits centered without extra vertical margin.
 const HEIGHT: f64 = 16.0;
-/// The leading dot's own font size — deliberately smaller than the
+/// The "main" mode dot's own font size — deliberately smaller than the
 /// workspace name's (see `text_attributes`), landing between the tiny "•"
 /// bullet glyph and a full-size "●" circle at the name's own font size.
 const DOT_FONT_SIZE: f64 = 7.0;
+/// The `resize` mode glyph's font size — larger than `DOT_FONT_SIZE` so it
+/// reads clearly at menu-bar scale, while staying under the name font's
+/// line height so it doesn't grow the pill past `HEIGHT`. The `manage`
+/// glyph doesn't use this constant — it matches the workspace name's own
+/// font size instead (see `glyph_font_size_for_mode`).
+const MODE_GLYPH_FONT_SIZE: f64 = 10.0;
 
 /// Draws `text` as a solid rounded-rect pill with the text itself
 /// "knocked out" (cut fully transparent) through the fill, so whatever's
@@ -27,8 +33,8 @@ const DOT_FONT_SIZE: f64 = 7.0;
 /// marks the result as a template image, so AppKit tints the opaque pill
 /// area with the correct color for the current light/dark/highlighted
 /// menu bar state automatically, same as any other menu bar icon.
-pub fn image_for(text: &str) -> Retained<NSImage> {
-    let attr_string = badge_attributed_string(text);
+pub fn image_for(text: &str, mode: &str) -> Retained<NSImage> {
+    let attr_string = badge_attributed_string(text, mode);
     let text_size = attr_string.size();
 
     let width = (text_size.width + PADDING_X * 2.0).max(HEIGHT);
@@ -60,24 +66,59 @@ pub fn image_for(text: &str) -> Retained<NSImage> {
     image
 }
 
-/// A leading filled circle at `DOT_FONT_SIZE`, followed by `text` at the
-/// normal badge size — two runs so the dot can be sized independently of
-/// the workspace name instead of both sharing one font size. Both runs
-/// share one baseline by default (`NSAttributedString` always aligns
-/// runs to a common baseline), which visually reads as the *smaller* dot
-/// sitting low/off-center against the taller name text — `dot_baseline_offset`
-/// shifts it up by half the cap-height difference between the two fonts
-/// so the dot's own visual center lines up with the name text's instead.
-fn badge_attributed_string(text: &str) -> Retained<NSAttributedString> {
-    let name_font = NSFont::boldSystemFontOfSize(NSFont::smallSystemFontSize());
-    let dot_font = NSFont::boldSystemFontOfSize(DOT_FONT_SIZE);
-    let dot_baseline_offset = (name_font.capHeight() - dot_font.capHeight()) / 2.0;
+/// The leading glyph for each keybindings mode — `"main"` (the default,
+/// nothing special active) keeps the plain dot; `resize`/`manage` (the
+/// two built-in modes, see `example/tili.kdl`) get a distinct glyph so
+/// the badge visibly reflects which one is active. Any other mode name a
+/// user declares in their own config falls back to the plain dot, same
+/// as `"main"`, rather than guessing at an unrecognized custom mode's
+/// intent.
+fn glyph_for_mode(mode: &str) -> &'static str {
+    match mode {
+        "resize" => "\u{2194} ",
+        "manage" => "\u{2699} ",
+        _ => "\u{25CF} ",
+    }
+}
 
-    let dot = unsafe {
+/// The leading glyph's font size for each mode — `"manage"` matches
+/// `name_font_point_size` exactly (the workspace name's own font size) so
+/// its glyph reads at the same height as the name text; `"resize"` gets
+/// `MODE_GLYPH_FONT_SIZE` so it still reads clearly without growing the
+/// pill past `HEIGHT`; `"main"` and any unrecognized custom mode keep the
+/// plain dot at `DOT_FONT_SIZE`, same fallback behavior as
+/// `glyph_for_mode`.
+fn glyph_font_size_for_mode(mode: &str, name_font_point_size: f64) -> f64 {
+    match mode {
+        "manage" => name_font_point_size,
+        "resize" => MODE_GLYPH_FONT_SIZE,
+        _ => DOT_FONT_SIZE,
+    }
+}
+
+/// A leading filled glyph at the mode's own size (see `glyph_for_mode`
+/// and `glyph_font_size_for_mode`), followed by `text` at the normal
+/// badge size — two runs so the glyph can be sized independently of the
+/// workspace name instead of both sharing one font size. Both runs share
+/// one baseline by default (`NSAttributedString` always aligns runs to a
+/// common baseline), which visually reads as the *smaller* glyph sitting
+/// low/off-center against the taller name text — `glyph_baseline_offset`
+/// shifts it up by half the cap-height difference between the two fonts
+/// so the glyph's own visual center lines up with the name text's
+/// instead. That formula holds regardless of which font size the glyph
+/// run uses, since it's computed from the two fonts' actual cap heights
+/// rather than a fixed constant.
+fn badge_attributed_string(text: &str, mode: &str) -> Retained<NSAttributedString> {
+    let name_font = NSFont::boldSystemFontOfSize(NSFont::smallSystemFontSize());
+    let glyph_font =
+        NSFont::boldSystemFontOfSize(glyph_font_size_for_mode(mode, name_font.pointSize()));
+    let glyph_baseline_offset = (name_font.capHeight() - glyph_font.capHeight()) / 2.0;
+
+    let glyph = unsafe {
         NSAttributedString::initWithString_attributes(
             NSAttributedString::alloc(),
-            &NSString::from_str("● "),
-            Some(&text_attributes(&dot_font, Some(dot_baseline_offset))),
+            &NSString::from_str(glyph_for_mode(mode)),
+            Some(&text_attributes(&glyph_font, Some(glyph_baseline_offset))),
         )
     };
     let name = unsafe {
@@ -88,7 +129,7 @@ fn badge_attributed_string(text: &str) -> Retained<NSAttributedString> {
         )
     };
     let full = NSMutableAttributedString::new();
-    full.appendAttributedString(&dot);
+    full.appendAttributedString(&glyph);
     full.appendAttributedString(&name);
     Retained::into_super(full)
 }

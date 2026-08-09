@@ -42,6 +42,9 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
             state.exit_mode();
             Response::Ok
         }
+        Command::CurrentMode => {
+            Response::OkWithPayload(serde_json::Value::String(state.current_mode().to_string()))
+        }
         Command::LayoutToggle(root) => result_response(state.toggle_layout(root)),
         Command::LayoutSet(kind, root) => result_response(state.set_layout(kind, root)),
         Command::FocusMonitor => {
@@ -282,6 +285,33 @@ mod tests {
         let exit_resize = tili_ax::parse_key_combo("escape").unwrap();
         assert!(state.active_key_combos().contains(&exit_resize));
         assert!(!state.active_key_combos().contains(&enter_resize));
+    }
+
+    #[test]
+    fn current_mode_reports_active_mode() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::CurrentMode);
+        assert!(matches!(
+            response,
+            Response::OkWithPayload(serde_json::Value::String(ref s)) if s == "main"
+        ));
+
+        let config = tili_config::parse(
+            r#"
+            keybindings mode="manage" auto-exit=#true {
+                bind "escape" "mode main"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+        dispatch(&mut state, Command::ModeEnter("manage".to_string()));
+
+        let response = dispatch(&mut state, Command::CurrentMode);
+        assert!(matches!(
+            response,
+            Response::OkWithPayload(serde_json::Value::String(ref s)) if s == "manage"
+        ));
     }
 
     #[test]

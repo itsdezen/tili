@@ -14,6 +14,10 @@ pub struct Snapshot {
     /// which can be true on more than one entry across monitors.
     pub current: Option<String>,
     pub workspaces: Vec<tili_ipc::WorkspaceInfo>,
+    /// The daemon's active keybindings mode (`"main"`/`"resize"`/
+    /// `"manage"`/a custom name) — drives which glyph `badge::image_for`
+    /// draws.
+    pub mode: String,
 }
 
 /// Builds the status item with a menu containing only the static "Open
@@ -27,14 +31,15 @@ pub fn build_initial(mtm: MainThreadMarker) -> TrayIcon {
         .with_menu(Box::new(build_menu(None, &[])))
         .build()
         .expect("build NSStatusItem");
-    set_badge(&tray, mtm, "tili");
+    set_badge(&tray, mtm, "tili", "main");
     set_visible(&tray, mtm, false);
     tray
 }
 
 /// Polls `Command::ListMonitors` (for the focused monitor's current
-/// workspace) and `Command::ListWorkspaces` (the full switchable list) —
-/// best-effort, `None` on any transport/decode failure.
+/// workspace), `Command::ListWorkspaces` (the full switchable list), and
+/// `Command::CurrentMode` (for the badge glyph) — best-effort, `None` on
+/// any transport/decode failure.
 pub fn poll_daemon() -> Option<Snapshot> {
     let monitors = match crate::ipc::send(tili_ipc::Command::ListMonitors).ok()? {
         tili_ipc::Response::OkWithPayload(v) => {
@@ -48,6 +53,10 @@ pub fn poll_daemon() -> Option<Snapshot> {
         }
         _ => return None,
     };
+    let mode = match crate::ipc::send(tili_ipc::Command::CurrentMode).ok()? {
+        tili_ipc::Response::OkWithPayload(v) => serde_json::from_value::<String>(v).ok()?,
+        _ => return None,
+    };
     let current = monitors
         .into_iter()
         .find(|m| m.focused)
@@ -55,19 +64,22 @@ pub fn poll_daemon() -> Option<Snapshot> {
     Some(Snapshot {
         current,
         workspaces,
+        mode,
     })
 }
 
-/// `(current, sorted workspace names)` — enough to detect "did anything
-/// the menu displays actually change" without needing `WorkspaceInfo` to
-/// implement `PartialEq` itself (`window_count`/`monitor` churn on every
-/// tick and aren't shown in the menu, so they're deliberately excluded).
-pub type MenuKey = (Option<String>, Vec<String>);
+/// `(current, sorted workspace names, mode)` — enough to detect "did
+/// anything the menu displays actually change" without needing
+/// `WorkspaceInfo` to implement `PartialEq` itself (`window_count`/
+/// `monitor` churn on every tick and aren't shown in the menu, so they're
+/// deliberately excluded).
+pub type MenuKey = (Option<String>, Vec<String>, String);
 
 pub fn menu_key(snapshot: &Snapshot) -> MenuKey {
     (
         snapshot.current.clone(),
         snapshot.workspaces.iter().map(|w| w.name.clone()).collect(),
+        snapshot.mode.clone(),
     )
 }
 
@@ -110,7 +122,7 @@ pub fn apply_snapshot(
     }
 
     let title = snapshot.current.as_deref().unwrap_or("tili");
-    set_badge(tray, mtm, title);
+    set_badge(tray, mtm, title, &snapshot.mode);
 
     let key = menu_key(snapshot);
     if state.key.as_ref() == Some(&key) {
@@ -163,12 +175,12 @@ fn build_menu(current: Option<&str>, workspaces: &[tili_ipc::WorkspaceInfo]) -> 
 /// `set_title` only renders on macOS when an icon is also set, and a
 /// plain title string couldn't do the knockout-pill look anyway, so this
 /// goes through the raw `NSStatusItem` directly.
-fn set_badge(tray: &TrayIcon, mtm: MainThreadMarker, text: &str) {
+fn set_badge(tray: &TrayIcon, mtm: MainThreadMarker, text: &str, mode: &str) {
     let Some(status_item) = tray.ns_status_item() else {
         return;
     };
     if let Some(button) = status_item.button(mtm) {
-        button.setImage(Some(&badge::image_for(text)));
+        button.setImage(Some(&badge::image_for(text, mode)));
     }
 }
 

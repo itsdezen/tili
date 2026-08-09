@@ -323,14 +323,7 @@ async fn async_daemon_main(
                         // caller would care about — see this loop's
                         // top-of-body comment for why that distinction
                         // matters now (it didn't always).
-                        let mutates = !matches!(
-                            command,
-                            Command::Ping
-                                | Command::ListWindows
-                                | Command::ListWorkspaces
-                                | Command::ListMonitors
-                                | Command::Doctor
-                        );
+                        let mutates = !command_is_read_only(&command);
                         let pids_changed = drain_pending_windows(&mut state, &mut pending_pids);
                         let response = dispatch(&mut state, command);
                         if let Err(e) = socket::write_response(&mut stream, &response).await {
@@ -597,6 +590,25 @@ async fn handle_wait_for_change(
 /// `dispatch()` so a window created just before a command fires (e.g. a
 /// hotkey pressed right after opening a new floating window) is already
 /// placed and focus-synced, instead of only catching up on the next tick.
+/// Commands that never mutate `WmState` — excluded from the socket loop's
+/// `changed` check (see its top-of-`loop` comment for why this exclusion
+/// exists: `tili-menubar`'s own steady-state polling calls exactly these,
+/// and counting them as "changed" once turned this long-poll design back
+/// into a self-sustaining wake loop). A separate named function, rather
+/// than an inline `matches!`, purely so this list has unit-test coverage
+/// — the failure mode it guards against has no other way to get one.
+fn command_is_read_only(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Ping
+            | Command::ListWindows
+            | Command::ListWorkspaces
+            | Command::ListMonitors
+            | Command::Doctor
+            | Command::CurrentMode
+    )
+}
+
 fn drain_pending_windows(state: &mut WmState, pending_pids: &mut HashSet<i32>) -> bool {
     let pids_changed = !pending_pids.is_empty();
     for pid in pending_pids.drain() {
@@ -732,4 +744,30 @@ fn spawn_config_reload_bridge() -> tokio::sync::mpsc::UnboundedReceiver<tili_con
         }
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_commands_never_report_mutating() {
+        assert!(command_is_read_only(&Command::Ping));
+        assert!(command_is_read_only(&Command::ListWindows));
+        assert!(command_is_read_only(&Command::ListWorkspaces));
+        assert!(command_is_read_only(&Command::ListMonitors));
+        assert!(command_is_read_only(&Command::Doctor));
+        assert!(command_is_read_only(&Command::CurrentMode));
+    }
+
+    #[test]
+    fn mutating_commands_are_not_read_only() {
+        assert!(!command_is_read_only(&Command::ModeEnter(
+            "manage".to_string()
+        )));
+        assert!(!command_is_read_only(&Command::ModeExit));
+        assert!(!command_is_read_only(&Command::Focus(
+            tili_ipc::Direction::Left
+        )));
+    }
 }

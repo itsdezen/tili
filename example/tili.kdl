@@ -199,7 +199,7 @@ keybindings mode="main" {
 
     // One-shot mode: fires a single bound command, then returns to "main"
     // automatically (see the "manage" mode below).
-    bind "alt-shift-s" "mode manage"
+    bind "alt-shift-m" "mode manage"
 }
 
 keybindings mode="resize" {

@@ -160,6 +160,25 @@ modifiers can be listed in any order. Recognized modifiers: `alt`/`option`,
 digits, punctuation (`slash`/`semicolon`/`minus`/`equal`/…), and
 `escape`/`enter`/`space`/`tab`/arrow keys.
 
+### Built-in default modes
+
+`example/tili.kdl` ships two modes beyond `"main"`:
+
+| Mode | Entry bind | Sticky? | What it's for |
+|---|---|---|---|
+| `resize` | `alt-shift-semicolon` | Yes — stays active until you press `escape` or `enter` | Repeated `h`/`l` presses each apply one `resize -0.1`/`resize 0.1` step, for fine-tuning a window's share of its container without re-pressing the entry combo each time. |
+| `manage` | `alt-shift-m` | No — `auto-exit=#true`, so firing any bound command returns to `"main"` immediately | Less-frequent, "do one thing" operations: `escape` → `reload-config`, `r` → `flatten`, and `alt-shift-h`/`j`/`k`/`l` → `join left`/`down`/`up`/`right`. |
+
+:::note
+`"main"` also has its own `alt-shift-g` → `join left` bind, independent of
+`manage` mode's join binds above. It's a standalone shortcut for the one
+most common direction, for when you just want that without leaving
+`"main"` — it dispatches the exact same `join left` command `manage`
+mode's `alt-shift-h` does (see [Commands](/docs/commands)), just wired
+directly at the top level. Reach for `manage` mode instead when you need
+`down`/`up`/`right`, since those three have no top-level equivalent.
+:::
+
 ## `workspace-rules`
 
 ```kdl

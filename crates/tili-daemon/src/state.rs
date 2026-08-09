@@ -1772,6 +1772,12 @@ impl WmState {
         self.current_mode = DEFAULT_MODE.to_string();
     }
 
+    /// The active mode's name — `"main"` unless a mode was entered and
+    /// hasn't auto-exited/been exited yet.
+    pub fn current_mode(&self) -> &str {
+        &self.current_mode
+    }
+
     /// Whether `current_mode` is a one-shot mode — see `auto_exit_modes`.
     pub fn current_mode_auto_exits(&self) -> bool {
         self.auto_exit_modes.contains(&self.current_mode)
@@ -5105,7 +5111,7 @@ mod tests {
         let config = tili_config::parse(
             r#"
             keybindings mode="main" {
-                bind "alt-shift-s" "mode manage"
+                bind "alt-shift-m" "mode manage"
             }
             keybindings mode="manage" auto-exit=#true {
                 bind "escape" "mode main"
@@ -5122,6 +5128,28 @@ mod tests {
 
         state.exit_mode();
         assert!(!state.current_mode_auto_exits());
+    }
+
+    #[test]
+    fn current_mode_reflects_enter_and_exit() {
+        let mut state = WmState::default();
+        assert_eq!(state.current_mode(), "main");
+
+        let config = tili_config::parse(
+            r#"
+            keybindings mode="manage" auto-exit=#true {
+                bind "escape" "mode main"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        state.enter_mode("manage").unwrap();
+        assert_eq!(state.current_mode(), "manage");
+
+        state.exit_mode();
+        assert_eq!(state.current_mode(), "main");
     }
 
     #[test]

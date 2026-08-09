@@ -81,6 +81,11 @@ pub enum Command {
     },
     ModeEnter(String),
     ModeExit,
+    /// The active keybindings mode's name (`"main"` unless a mode was
+    /// entered and hasn't auto-exited/been exited yet) — read-only, so
+    /// it's excluded from `main.rs`'s `WaitForChange` change-detection the
+    /// same way `Ping`/`ListWindows`/etc. are.
+    CurrentMode,
     ListWindows,
     ListWorkspaces,
     /// Resets every child weight of the focused window's parent container
