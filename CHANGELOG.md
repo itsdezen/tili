@@ -8,6 +8,23 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-09
+
+### Added
+
+- **Menu bar badge now shows a distinct icon while `resize`/`manage`
+  keybinding modes are active** — ↔ for `resize`, ⚙ for `manage` (sized to
+  match the workspace name's own text height), instead of always showing
+  the plain workspace dot. Updates in lockstep with the daemon over the
+  existing event-driven `WaitForChange` channel — no polling, no visible
+  delay entering or exiting a mode.
+
+### Changed
+
+- **`manage` mode's default entry bind changed from `alt-shift-s` to
+  `alt-shift-m`**, for a clearer mnemonic ("**m**anage"). Update your own
+  config if you copied this bind from `example/tili.kdl`.
+
 ## [0.6.1] - 2026-07-25
 
 ### Fixed
