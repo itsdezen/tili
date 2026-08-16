@@ -4,7 +4,7 @@ The full technical rationale behind tili's design — per-crate detail,
 hardware-confirmed findings, and the history behind each invariant — lives
 in one file per crate under [architecture/](architecture/). Read the
 relevant file before changing the area it covers; for the compact
-rules-only summary, see [CLAUDE.md](../CLAUDE.md); for what's shipped vs.
+rules-only summary, see [AGENTS.md](../AGENTS.md); for what's shipped vs.
 planned, see [ROADMAP.md](../ROADMAP.md).
 
 tili is a Cargo workspace, not a single crate. The split is deliberate and

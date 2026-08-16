@@ -1,7 +1,7 @@
 # Design invariants — full rationale
 
 Part of the [architecture notes](../ARCHITECTURE.md). The rules themselves
-are listed in CLAUDE.md; this file holds the rationale and the
+are listed in AGENTS.md; this file holds the rationale and the
 real-hardware evidence behind each.
 
 ## No private APIs
