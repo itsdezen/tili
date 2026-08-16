@@ -22,36 +22,33 @@ cargo test --workspace
 ```
 
 If `cargo fmt --check` fails, run `cargo fmt` and re-stage. Clippy warnings
-are hard errors (`-D warnings`); don't `#[allow]` one without a one-line
-comment explaining why (see the `#[allow(dead_code)]` on `Tree` in
-`tili-tree` for the pattern).
+are hard errors (`-D warnings`); don't `#[allow]` one without a comment
+explaining why (see `Tree`'s `#[allow(dead_code)]` in `tili-tree` for the
+pattern).
 
 `tili-ax` (and anything depending on it) only builds on macOS — it links
-against `AXUIElement`/Core Graphics/Core Foundation, and needs full Xcode
-(not just CLT; see CONTRIBUTING.md). `tili-tree` has zero macOS
-dependencies by design; prefer adding logic there over `tili-ax` when
-possible so it stays testable without a Mac.
+against `AXUIElement`/Core Graphics/Core Foundation, and needs full Xcode,
+not just CLT (see CONTRIBUTING.md). `tili-tree` has zero macOS
+dependencies by design; prefer adding logic there over `tili-ax` so it
+stays testable without a Mac.
 
 ## Comments
 
 A comment stays scoped to the function/logic it sits next to: why *this*
-code is written the way it is, not the history of how it got there. Don't
-reference other bugs, session narrative ("this was reverted because...",
-"an earlier attempt tried..."), other tools/projects, or issue-tracker-style
-context — that belongs in a commit message or PR description, not in the
-source. If a comment needs a sentence about a rejected alternative, phrase
-it as a property of *this* code ("not X, because Y" is fine; "we used to do
-X but changed it after Z happened" is not).
+code is written this way, not its history. No session narrative, bug
+references, or issue-tracker context — that belongs in the commit message.
+Rejected alternatives are phrased as a property of the code ("not X,
+because Y"), never as history ("we used to do X until Z").
 
 ## Architecture
 
 This is a Cargo workspace; the crate split and one-way dependency
-direction are hard boundaries. **The full per-crate design notes — with
-the hardware-confirmed findings and history behind every rule below —
-live in one file per crate under
-[docs/architecture/](docs/ARCHITECTURE.md). Read the relevant crate's
-file there before changing event flow, window classification, parking,
-focus sync, polling/timing, multi-monitor handling, or release signing.**
+direction are hard boundaries. **Full per-crate design notes — the
+hardware-confirmed findings and history behind every rule below — live
+in one file per crate under [docs/architecture/](docs/ARCHITECTURE.md).
+Read the relevant file before changing event flow, window classification,
+parking, focus sync, polling/timing, multi-monitor handling, or release
+signing.**
 
 - **`tili-tree`** — the container tree and layout algorithms (Tiles/BSP,
   Accordion). No `AXUIElement`, no CoreFoundation, no `unsafe`; operates
@@ -59,11 +56,10 @@ focus sync, polling/timing, multi-monitor handling, or release signing.**
   Callers use `focus_in_direction` (Accordion-aware), not plain `navigate`.
 - **`tili-ax`** — the only crate allowed to touch the Accessibility API;
   depends on `tili-tree` only for geometry types. `src/window.rs` owns the
-  single private API call in the codebase (`_AXUIElementGetWindow`) plus
-  window classification (`WindowKind`); `src/frame_setter.rs` defines
-  `WindowFrameSetter` — the seam every real frame write goes through, with
-  `InstantFrameSetter` and `TweenedFrameSetter` (`Settings::animate`) as
-  its two implementations.
+  codebase's single private API call (`_AXUIElementGetWindow`) plus window
+  classification (`WindowKind`); `src/frame_setter.rs` defines
+  `WindowFrameSetter` — the seam every real frame write goes through, via
+  `InstantFrameSetter` or `TweenedFrameSetter` (`Settings::animate`).
   `workspace.rs::register_on_main` registers `NSWorkspace` notifications on
   the real process main thread (no thread of its own — `tili-daemon`'s
   `NSApplication.run()` is what pumps delivery); `display.rs`/`hotkey.rs`/
@@ -95,28 +91,28 @@ focus sync, polling/timing, multi-monitor handling, or release signing.**
   focus from real macOS frontmost state synchronously before every
   command — deliberately not a reactive background sync (race-prone;
   see docs/architecture/tili-daemon.md). `main.rs`'s real `fn main()` sets
-  up a real `NSApplication` on the actual process main thread and hands the
-  whole daemon body to `async_daemon_main` on a background thread with its
-  own Tokio runtime — that function is the one `tokio::select!` loop; no
-  locks around `WmState`, only one branch touches it at a time.
+  up a real `NSApplication` on the process main thread and hands the whole
+  daemon body to `async_daemon_main` on a background thread with its own
+  Tokio runtime — that function is the one `tokio::select!` loop; no locks
+  around `WmState`, only one branch touches it at a time.
 - **`tili-cli`** — thin socket client; the binary is named `tili`. No
   business logic here — new behavior belongs in `tili-daemon` behind a
   `Command`. Three documented exceptions: `tili start`/`stop` (LaunchAgent
   management, filesystem-only), `tili status`'s custom wording, and `tili
   doctor` (filesystem/LaunchAgent/socket checks locally, `Command::Doctor`
   for anything only the daemon knows — permission grants, the last config
-  load's warnings — never re-implementing that daemon-side logic here). The
-  one dependency exception to "thin": `tili-config` (zero macOS-specific
-  deps, unlike `tili-ax`) for `doctor`'s local config-syntax check, which
-  needs to work even when the daemon isn't running.
+  load's warnings — never re-implemented here). The one dependency
+  exception to "thin": `tili-config` (zero macOS-specific deps, unlike
+  `tili-ax`) for `doctor`'s local config-syntax check, which must work
+  even when the daemon isn't running.
 - **`tili-menubar`** — `NSStatusItem` workspace badge; stays in sync via a
   server-side long-poll (`Command::WaitForChange`), not polling. Its
   LaunchAgent is managed by `tili start`/`stop`/`uninstall` alongside the
-  daemon's, and required (not best-effort) by `tili start` — the two run as
-  a synchronized pair, never one without the other: `tili-daemon`'s own
-  shutdown paths (`Command::Shutdown`, `stop_self`) tear this LaunchAgent
-  down too, and `tili-menubar` gives up and stops itself if the daemon goes
-  unreachable for a sustained run of reconnect attempts.
+  daemon's, and required (not best-effort) by `tili start` — the two run
+  as a synchronized pair: `tili-daemon`'s own shutdown paths
+  (`Command::Shutdown`, `stop_self`) tear this LaunchAgent down too, and
+  `tili-menubar` stops itself if the daemon goes unreachable for a
+  sustained run of reconnect attempts.
 - **`xtask`** — release/signing tooling: `bundle`/`codesign`/`package`
   build a signed `tili.app`. `xtask/entitlements.plist` must stay free of
   XML comments (`codesign`'s parser rejects them). Certificate generation
@@ -141,7 +137,7 @@ rationale (and real-hardware evidence) behind each is in
   `_AXUIElementGetWindow` call in `tili-ax/src/window.rs` — this is what
   lets tili run without disabling SIP.
 - **No polling** — the daemon reacts to AXObserver/NSWorkspace/display
-  notifications. Exactly four sanctioned, narrowly-scoped exceptions:
+  notifications. Four sanctioned, narrowly-scoped exceptions:
   `hotkey.rs`'s event-tap install retry (Input Monitoring can be granted
   at any time, with no notification); `watch.rs`'s `WATCHER_RESYNC_INTERVAL`
   (2s) watcher-resync backstop + capped full resync (both notification
@@ -151,13 +147,12 @@ rationale (and real-hardware evidence) behind each is in
   8ms, per `Settings::animate`'s `medium`/`high`) driving
   `TweenedFrameSetter` steps, gated by `if
   state.is_animating_anything()` on its `select!` branch so it's never
-  even polled while nothing is animating — sanctioned because
-  interpolating over wall-clock time has no event-driven alternative at
-  all, not because a notification is unreliable. Don't add a fifth
-  without a similarly hard constraint. (`display.rs`'s
-  `spawn_display_watcher` still bounds its
-  `CFRunLoopRun` into 1s chunks — that's to avoid a run-loop spin-forever
-  bug, not to poll anything; real hardware confirmed
+  polled while nothing is animating — sanctioned because interpolating
+  over wall-clock time has no event-driven alternative, not because a
+  notification is unreliable. Don't add a fifth without a similarly hard
+  constraint. (`display.rs`'s `spawn_display_watcher` still bounds its
+  `CFRunLoopRun` into 1s chunks to avoid a run-loop spin-forever bug, not
+  to poll anything; real hardware confirmed
   `CGDisplayRegisterReconfigurationCallback` now reliably fires for every
   display change, including resolution-only ones, once `tili-daemon` had a
   real `NSApplication`.)
@@ -168,7 +163,7 @@ rationale (and real-hardware evidence) behind each is in
   evidence.
 - **All real window-frame mutations go through `WindowFrameSetter`**,
   never a direct AX call from daemon/tree code — the animation seam
-  (`TweenedFrameSetter`, behind `Settings::animate`). The documented
+  (`TweenedFrameSetter`, behind `Settings::animate`). Documented
   exceptions that bypass it (`park`, `place_floating_window`'s centered
   branch's size-discovery step only — its actual placement still goes
   through the seam, `unpark_all`) must call `frame_setter.finish()` first
@@ -185,7 +180,7 @@ Every change that alters behavior described in this file,
 `docs/architecture/*.md`, `docs/BLUEPRINT.md`, `ROADMAP.md`, or a code
 comment pointing at them must update that doc **in the same change** —
 these files are trusted as accurate over reading the code, so a stale
-sentence is worse than a missing one. When you ship a planned feature,
+sentence is worse than a missing one. When shipping a planned feature,
 move its entry from ROADMAP.md's planned list (and prune the covered
 design from docs/BLUEPRINT.md) into the relevant
 `docs/architecture/<crate>.md`.
