@@ -8,6 +8,8 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-19
+
 ### Fixed
 
 - **Dismissing a notification (or Spotlight with Esc) over an empty
