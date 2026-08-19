@@ -8,6 +8,15 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dismissing a notification (or Spotlight with Esc) over an empty
+  workspace could jump the display to whatever workspace the previously
+  frontmost app lives on, and stick there.** Notification Center/Spotlight
+  transiently holding AX-frontmost status on themselves while animating a
+  dismiss was corrupting internal frontmost-tracking state, which the
+  following handback then misread as a genuine app switch to follow.
+
 ## [0.7.0] - 2026-08-09
 
 ### Added

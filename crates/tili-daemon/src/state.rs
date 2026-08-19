@@ -465,15 +465,17 @@ fn restore_for(kind: &PlacementKind) -> Restore {
 ///   saw it as "another centered window" and cascaded around it). Extend
 ///   only when a *specific* reported system surface is observed getting
 ///   moved/resized, not preemptively.
-/// - `reveal_frontmost` uses it to recognize a pid as a transient
-///   activation source rather than an app the user is actually switching
-///   to/from (see that function's doc comment). Spotlight and Notification
-///   Center are here for this reason specifically — dismissing either
-///   (Esc, or a notification banner's close button) was confirmed to
-///   otherwise misread as a real app switch and jump/settle-back through
-///   whatever workspace the momentarily-reactivated app lives on, the same
-///   failure mode `SYSTEM_UI_BUNDLE_IDS`'s `Ignore` forcing prevents for
-///   the first use above.
+/// - `reveal_frontmost` uses it at the very top of the function to bail out
+///   whenever the *current* pid being resolved is one of these — before
+///   `last_frontmost_pid` is ever written — rather than trying to recognize
+///   one after the fact via `previous_pid` (see that function's doc
+///   comment). Spotlight and Notification Center are here for this reason
+///   specifically — dismissing either (Esc, or a notification banner's
+///   close button) was confirmed to otherwise corrupt `last_frontmost_pid`
+///   and misread the *next* real pid transition as a genuine app switch,
+///   jumping to whatever workspace the momentarily-reactivated app lives
+///   on, the same failure mode `SYSTEM_UI_BUNDLE_IDS`'s `Ignore` forcing
+///   prevents for the first use above.
 const SYSTEM_UI_BUNDLE_IDS: &[&str] = &[
     "com.apple.dock",
     "com.apple.screencaptureui",
@@ -2323,26 +2325,36 @@ impl WmState {
     /// all, this change is almost certainly that OS reactivation rather
     /// than a user gesture, so the workspace jump is skipped.
     ///
-    /// A second, similarly-shaped case is deliberately *not* suppressed the
-    /// same way: Spotlight, the Dock, and Notification Center
-    /// (`SYSTEM_UI_BUNDLE_IDS`) only ever own `Popup`-classified windows, so
-    /// the "owns zero live windows" check above is *always* true for them —
-    /// suppressing on every transition away from one regardless of whether
-    /// the user picked a result/icon (should follow) or dismissed it with
-    /// Esc/a banner's close button (arguably shouldn't). This process has
-    /// no signal to tell those apart — both look identical at the AX/pid
-    /// level (a system-UI pid frontmost, then some real pid frontmost
-    /// again, target workspace not visible) whenever whatever workspace was
-    /// active in between never actually changed the OS-level frontmost app
-    /// (e.g. it had nothing to focus). Picking "suppress on a match" over
-    /// "always follow" would make that ambiguity resolve toward a pid that
-    /// was merely the *last one this process happened to observe*, which
-    /// goes stale across exactly that kind of no-op workspace switch and
-    /// then permanently suppresses every later reactivation of the same
-    /// app — a worse, stuck failure than the one-frame flicker suppressing
-    /// would avoid. So a system-UI previous pid always means "follow,"
-    /// full stop; only a *normal app's* last window disappearing (below)
-    /// still suppresses.
+    /// A second, similarly-shaped case is handled at the very top of this
+    /// function instead, before even the windowless guard: Spotlight, the
+    /// Dock, and Notification Center (`SYSTEM_UI_BUNDLE_IDS`) only ever own
+    /// `Popup`-classified windows, not none at all — so when *one of them*
+    /// is transiently the pid being resolved, it sails past the windowless
+    /// guard above and would otherwise corrupt `last_frontmost_pid` with a
+    /// pid unrelated to any real app transition, the exact failure the
+    /// windowless guard exists to prevent, just via a process that happens
+    /// to own a window instead of none. Confirmed on real hardware:
+    /// dismissing a notification banner's close button (or Spotlight with
+    /// Esc) routinely holds AX-frontmost status on the system-UI process
+    /// itself for close to or over `REVEAL_DEBOUNCE`, so the transient
+    /// activation settles as its own call rather than coalescing with the
+    /// handback — letting the corruption stick and dragging the *next*
+    /// call (for whatever real app macOS reactivates) into treating a
+    /// passive dismissal as a genuine pid transition to follow. Bailing out
+    /// unconditionally whenever the *current* pid is system UI — before
+    /// `last_frontmost_pid` is ever written — means `previous_pid` can
+    /// never be system-UI on a later call either, so there's no "system-UI
+    /// previous pid" case left for this function's `suppress` logic to
+    /// special-case at all; a deliberate pick (a Spotlight result, a
+    /// notification's body) is unaffected, since the app that gets
+    /// activated as a *result* of that pick is itself a distinct, later,
+    /// non-system-UI pid that reaches the normal `suppress` check below on
+    /// its own call. This avoids both prior failure modes: it isn't the
+    /// windowless-only guard's blind spot (Popup windows do exist here),
+    /// and it isn't a separate stale-prone "last real pid" history (no new
+    /// field — `last_frontmost_pid` itself is simply never written by a
+    /// transient system-UI read, so it can't go stale the way a
+    /// last-observed-pid tracker did).
     ///
     /// None of the above fires at all for a Dock icon click, though:
     /// unlike Spotlight, `Dock.app` never becomes the AX/`NSWorkspace`
@@ -2401,6 +2413,14 @@ impl WmState {
     /// see `last_frontmost_pid`'s update point below for the other half of
     /// this fix).
     pub fn reveal_frontmost(&mut self, pid: i32, allow_unchanged_pid: bool) {
+        // Bail out before touching any state at all when `pid` is itself
+        // transient system-UI chrome (Spotlight, Notification Center, ...)
+        // — unlike a windowless process, these *do* own a real (`Popup`)
+        // window, so the guard below alone can't catch them; see this
+        // function's doc comment and `SYSTEM_UI_BUNDLE_IDS`'s.
+        if is_system_ui_bundle(tili_ax::bundle_id_for_pid(pid).as_deref()) {
+            return;
+        }
         // Deliberately updated only once `pid` is confirmed to own a real
         // focused window, not unconditionally at the top of the function —
         // a windowless system process (WindowServer, Dock) transiently and
@@ -2447,9 +2467,6 @@ impl WmState {
                 }
             }
             None => {
-                let previous_is_system_ui = previous_pid.is_some_and(|prev| {
-                    is_system_ui_bundle(tili_ax::bundle_id_for_pid(prev).as_deref())
-                });
                 // `None` previous_pid (no prior event this run) never
                 // suppresses — only a *confirmed* "that pid has zero live
                 // windows left" does. Excludes `pending_removal` too, not
@@ -2467,20 +2484,21 @@ impl WmState {
                 // `Minimized`/`NativeFullscreen`/`HiddenApplication`, which
                 // stay in `self.windows` too but represent a genuinely
                 // still-open window in a special display state, so those
-                // three are deliberately *not* excluded here. Skipped
-                // entirely when the previous pid was system UI — see this
-                // function's doc comment.
-                let suppress = !previous_is_system_ui
-                    && previous_pid.is_some_and(|prev| {
-                        !self.windows.iter().any(|(wid, w)| {
-                            w.pid() == prev
-                                && !self.pending_removal.contains_key(wid)
-                                && !matches!(
-                                    self.placements.get(wid).map(|p| &p.kind),
-                                    Some(PlacementKind::Popup)
-                                )
-                        })
-                    });
+                // three are deliberately *not* excluded here. `previous_pid`
+                // itself can never be system UI by this point — the guard
+                // at the top of this function stops `last_frontmost_pid`
+                // from ever being set to one — so there's no separate
+                // system-UI carve-out needed here anymore.
+                let suppress = previous_pid.is_some_and(|prev| {
+                    !self.windows.iter().any(|(wid, w)| {
+                        w.pid() == prev
+                            && !self.pending_removal.contains_key(wid)
+                            && !matches!(
+                                self.placements.get(wid).map(|p| &p.kind),
+                                Some(PlacementKind::Popup)
+                            )
+                    })
+                });
                 // `pending_launch_pids` non-empty means some pid launched
                 // moments ago but doesn't have a window yet — `pid` here
                 // could be a stale/transient read (the real target hasn't
@@ -5067,6 +5085,16 @@ mod tests {
         // proof the stale-pid AX query never ran.
         assert_eq!(state.last_frontmost_pid, None);
         assert_eq!(state.relayout_calls.get(), 0);
+    }
+
+    #[test]
+    fn is_system_ui_bundle_recognizes_every_listed_entry() {
+        for id in SYSTEM_UI_BUNDLE_IDS {
+            assert!(is_system_ui_bundle(Some(id)), "expected {id} to match");
+        }
+        assert!(!is_system_ui_bundle(Some("com.apple.finder")));
+        assert!(!is_system_ui_bundle(Some("com.example.SomeApp")));
+        assert!(!is_system_ui_bundle(None));
     }
 
     #[test]

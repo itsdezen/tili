@@ -680,10 +680,9 @@ fn handle_event(
             // *real* AX transitions (unlike a stale click-time read), but
             // dismissing Spotlight right after launching a cold app
             // produces a real, transient transition back to whatever was
-            // frontmost before Spotlight, and following that unconditionally
-            // (`reveal_frontmost` always follows a system-UI previous pid —
-            // see its doc comment) raced the same way a stale click read
-            // did.
+            // frontmost before Spotlight — trusting that read immediately
+            // would race the still-launching app's `pending_launch_pids`
+            // entry the same way a stale click read did.
             *pending_reveal_deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
             *pending_reveal_epoch = state.switch_epoch();
             // Unlike a real click, a notification-detected edge alone never

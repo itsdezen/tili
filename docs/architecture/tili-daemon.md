@@ -491,6 +491,42 @@ suppression on a routine, repeated action. The original
 previous pid was a normal app (the actual 0.1.8 "closed its last window"
 scenario, unrelated to any of this).
 
+That "one-frame flicker, then settles back" turned out to understate the
+symptom: `REVEAL_DEBOUNCE` (100ms) doesn't reliably coalesce a system-UI
+process's own transient activation with the handback that follows it.
+Notification Center (and Spotlight) genuinely holds AX-frontmost status on
+itself for close to or over that window while animating a dismiss, so the
+transient activation settles as its own, separate `reveal_frontmost` call
+before the handback arrives as a second one — and because `pid` (the
+process being resolved, not just `previous_pid`) is itself
+`SYSTEM_UI_BUNDLE_IDS`, it still sails past the windowless-only guard
+covering `last_frontmost_pid`'s update (Notification Center's banner and
+Spotlight's search panel are real, `Popup`-classified windows, not
+nothing), corrupting it with the system-UI pid. The following handback
+call then reads `previous_pid` as system UI and — per the "always follow"
+rule above — unconditionally jumps the display to wherever the
+reactivated app actually lives, which sticks rather than settling back
+whenever the now-current workspace has nothing on it to trigger a further
+correction. The fix extends the *windowless* guard's own accepted
+rationale (already used just above it, for the `park()`/WindowServer
+case) to this case too: `reveal_frontmost` now bails out unconditionally,
+before any state is touched, whenever the pid it's asked to resolve is
+itself system UI — not just when deciding whether to follow a
+`previous_pid` that was. Since `last_frontmost_pid` can then never be set
+to a system-UI pid at all, `previous_pid` can never read as system UI on
+a later call either, so the "always follow" carve-out above no longer has
+anything to fire on and was removed as dead code rather than left in
+place. This differs from both reverted attempts: it isn't the v0.1.9
+Popup exclusion (doesn't touch the "still owns a live window" `suppress`
+check at all), and it isn't the pid-history attempt's separate "last real
+pid" tracking field (no new field — `last_frontmost_pid` is simply never
+written by a transient system-UI read in the first place, so there's
+nothing left to go stale). A deliberate pick — a Spotlight result, a
+notification's body opening its app — is unaffected: the app that
+becomes frontmost as a *result* of that pick is a distinct, later,
+non-system-UI pid, resolved on its own subsequent call through the
+ordinary (unaffected) `suppress` logic.
+
 None of the above ever runs at all for a Dock icon click, confirmed on
 real hardware by grepping a diagnostic build's log for the whole
 interaction: unlike Spotlight, `Dock.app` never becomes the AX/`NSWorkspace`
