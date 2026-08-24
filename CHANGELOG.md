@@ -8,6 +8,8 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-24
+
 ### Fixed
 
 - **Wake-grace used one fixed 90s timer for every wake, instead of tracking
