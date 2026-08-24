@@ -19,7 +19,7 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   moments later and treated as brand-new — re-triggering a matching
   `workspace-rules` entry and silently jumping the active workspace (e.g.
   entertainment → work). `note_system_wake` now starts a capped debounce
-  instead of a flat timer: the grace window extends by 10s (proposed,
+  instead of a flat timer: the grace window extends by 3s (proposed,
   `WAKE_GRACE_DEBOUNCE`) each time a window visibly vanishes or reconnects
   during `apply_windows_changed`, capped at 180s from the wake instant
   (proposed, `WAKE_GRACE_MAX`) — mirroring the existing

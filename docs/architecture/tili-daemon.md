@@ -886,7 +886,7 @@ the way 90s was) and records `wake_started_at`, then
 `apply_windows_changed` calls a private `note_wake_activity` from its two
 `pending_removal`-membership-changing call sites (a window newly going
 missing, or one reappearing) to pull `wake_grace_until` back to `now +
-WAKE_GRACE_DEBOUNCE` (10s, also proposed) whenever that's sooner than the
+WAKE_GRACE_DEBOUNCE` (3s, also proposed) whenever that's sooner than the
 existing deadline — clamped so it can never exceed `wake_started_at +
 WAKE_GRACE_MAX`. This mirrors `tili-ax/src/watch.rs`'s
 `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` shape. `note_wake_activity`

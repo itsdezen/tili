@@ -74,7 +74,7 @@ const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 /// history validated the previous flat timer's value (8s, then 90s) only
 /// after several rounds of real sleep/wake testing; these two haven't had
 /// that yet.
-const WAKE_GRACE_DEBOUNCE: Duration = Duration::from_secs(10);
+const WAKE_GRACE_DEBOUNCE: Duration = Duration::from_secs(3);
 const WAKE_GRACE_MAX: Duration = Duration::from_secs(180);
 
 /// How long a pid stays in `WmState::pending_launch_pids` after
@@ -5028,7 +5028,7 @@ mod tests {
     #[test]
     fn note_wake_activity_extends_wake_grace_until_but_never_past_the_max() {
         let now = Instant::now();
-        let original_deadline = now + Duration::from_secs(5);
+        let original_deadline = now + Duration::from_secs(1);
         let mut state = WmState {
             wake_started_at: Some(now),
             wake_grace_until: Some(original_deadline),
@@ -5051,7 +5051,7 @@ mod tests {
     fn note_wake_activity_clamps_to_the_max_once_the_debounce_would_overshoot_it() {
         let now = Instant::now();
         // Started long enough ago that `WAKE_GRACE_MAX` is only 1s away —
-        // closer than a full `WAKE_GRACE_DEBOUNCE` (10s) push would reach.
+        // closer than a full `WAKE_GRACE_DEBOUNCE` (3s) push would reach.
         let started_at = now - (WAKE_GRACE_MAX - Duration::from_secs(1));
         let mut state = WmState {
             wake_started_at: Some(started_at),
