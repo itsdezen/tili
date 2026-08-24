@@ -840,13 +840,13 @@ polling-exceptions section for why it exists and what it costs.
 via `tili_ax::register_on_main` — see [tili-ax.md](tili-ax.md), confirmed on
 real hardware across several repeated sleep/wake cycles to be reliably
 delivered now that `tili-daemon` has a real `NSApplication`) calls
-`WmState::note_system_wake`, which for the following `WAKE_REMOVAL_GRACE`
-(90s) does two things:
+`WmState::note_system_wake`, which starts a wake-grace *episode*: while it's
+active (`WmState::wake_grace_active`), the daemon does two things:
 
 - Boosts `finalize_expired_removals`'s effective grace period from
-  `REMOVAL_GRACE_PERIOD` (100ms) to `WAKE_REMOVAL_GRACE`. Without this, a
-  still-open window whose owning app simply hasn't reconnected to the
-  WindowServer/AX yet after wake (observed to take several seconds, far
+  `REMOVAL_GRACE_PERIOD` (100ms) to the episode's boosted grace. Without
+  this, a still-open window whose owning app simply hasn't reconnected to
+  the WindowServer/AX yet after wake (observed to take several seconds, far
   longer than 100ms — apps don't all reconnect at once) missed a scan, got
   `finalize_expired_removals`'d as closed, then reappeared on the next scan
   and was treated as a brand-new window — re-triggering any matching
@@ -865,14 +865,40 @@ workspace silently jumping away sometime after waking — just through
 different call paths, so both are gated on the same `wake_grace_until`
 window rather than two separate timers. `REMOVAL_GRACE_PERIOD` itself stays
 at 100ms for the ordinary case (a genuinely-closed window should disappear
-promptly, not linger up to 90s); both boosts only apply in the bounded
-window right after a real wake, so a genuine post-wake app switch or window
-close isn't permanently ignored. `WAKE_REMOVAL_GRACE` was raised from an
-initial 8s to 90s after real-hardware confirmation that 8s was still too
-short — `NSWorkspaceDidWakeNotification` fires at the hardware wake itself,
-which can precede the user finishing unlock (password/Touch ID) by close to
-a minute, and apps don't meaningfully resume reconnecting to the
-WindowServer/AX until after that, not from the wake instant.
+promptly, not linger indefinitely); both boosts only apply during an active
+episode, so a genuine post-wake app switch or window close isn't
+permanently ignored.
+
+**The episode's length is a debounce with a cap, not a single flat timer.**
+An earlier version used one fixed duration (`WAKE_REMOVAL_GRACE`, raised
+from an initial 8s to 90s after real-hardware confirmation that 8s was
+still too short — `NSWorkspaceDidWakeNotification` fires at the hardware
+wake itself, which can precede the user finishing unlock by close to a
+minute, and apps don't meaningfully resume reconnecting until after that).
+But a flat timer has an unavoidable trade-off: sized long enough to survive
+a slow reconnect, it makes a fast machine wait needlessly long after every
+wake even when nothing is actually still reconnecting; sized shorter to fix
+that, it lapses early on a genuinely slow reconnect and lets the exact bug
+back in through the timing gap. `note_system_wake` now sets
+`wake_grace_until` to `now + WAKE_GRACE_MAX` (the episode's outer bound,
+180s — a proposed value, not yet independently validated on real hardware
+the way 90s was) and records `wake_started_at`, then
+`apply_windows_changed` calls a private `note_wake_activity` from its two
+`pending_removal`-membership-changing call sites (a window newly going
+missing, or one reappearing) to pull `wake_grace_until` back to `now +
+WAKE_GRACE_DEBOUNCE` (10s, also proposed) whenever that's sooner than the
+existing deadline — clamped so it can never exceed `wake_started_at +
+WAKE_GRACE_MAX`. This mirrors `tili-ax/src/watch.rs`'s
+`FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` shape. `note_wake_activity`
+is a deliberate no-op once an episode has already lapsed — ordinary later
+window churn shouldn't resurrect a grace period that's over — and treats
+disappearance and reappearance symmetrically, since either one means the
+post-wake reconnect burst may still be ongoing for some other app even if
+this particular window is done. The result: a fast machine's episode
+naturally ends within `WAKE_GRACE_DEBOUNCE` of the last reconnect signal
+instead of always running the full duration, while a slow machine's episode
+keeps extending — up to `WAKE_GRACE_MAX` — for as long as windows keep
+visibly reconnecting.
 
 `note_system_wake`, `finalize_expired_removals` (when it actually finalizes
 something), and both `switch_workspace` auto-trigger call sites

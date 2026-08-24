@@ -8,6 +8,28 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Wake-grace used one fixed 90s timer for every wake, instead of tracking
+  how long reconnection was actually still happening** — two symptoms, same
+  root cause. On a fast machine, everything after wake waited out the full
+  90s even once every app had long since reconnected. On a machine slower to
+  reconnect, an app that took longer than 90s to reconnect still got its
+  window wrongly `finalize_expired_removals`'d as closed, then rediscovered
+  moments later and treated as brand-new — re-triggering a matching
+  `workspace-rules` entry and silently jumping the active workspace (e.g.
+  entertainment → work). `note_system_wake` now starts a capped debounce
+  instead of a flat timer: the grace window extends by 10s (proposed,
+  `WAKE_GRACE_DEBOUNCE`) each time a window visibly vanishes or reconnects
+  during `apply_windows_changed`, capped at 180s from the wake instant
+  (proposed, `WAKE_GRACE_MAX`) — mirroring the existing
+  `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` shape in
+  `tili-ax/src/watch.rs`. `place_new_window`'s and `reveal_frontmost`'s
+  auto-switch guards are unchanged in behavior, just now keyed off the same
+  debounced deadline. Both new values are proposals pending real-hardware
+  validation, the same way 90s itself was only confirmed correct after
+  several rounds of real sleep/wake testing.
+
 ## [0.7.1] - 2026-08-19
 
 ### Fixed

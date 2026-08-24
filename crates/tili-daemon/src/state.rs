@@ -57,27 +57,25 @@ const ANIMATION_TICK_PERIOD_HIGH: Duration = Duration::from_millis(8);
 /// instead of sleeping for real.
 const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
-/// How long `removal_grace` is boosted to, and how long `reveal_frontmost`
-/// distrusts a `frontmost_app_pid()` read, after `WmEvent::SystemDidWake`
-/// fires — real hardware has shown an app's AX/WindowServer connection can
-/// take far longer to come back after wake than `REMOVAL_GRACE_PERIOD`
-/// tolerates. An earlier, shorter value (8s) was confirmed on real hardware
-/// to still be too short: `NSWorkspaceDidWakeNotification` fires at the
-/// hardware wake itself, which can precede the user actually finishing
-/// unlock (password/Touch ID) by up to roughly a minute — apps effectively
-/// don't resume reconnecting to the WindowServer/AX until after that, not
-/// from the wake instant. `frontmost_app_pid()` itself can also transiently
-/// misread which app is frontmost during that same window. Without the
-/// removal-grace boost, a still-open window that simply hasn't reconnected
-/// yet gets `finalize_expired_removals`'d as "closed," then reappears on the
-/// next scan and gets treated as brand new — re-triggering any
-/// `workspace-rules` match. Without the `reveal_frontmost` distrust, a
-/// misread pid can look like a genuine app switch and force one instead.
-/// Both yank the active workspace out from under whatever the user was
-/// looking at before sleep. Bounded (not indefinite) so a window that's
-/// genuinely closed during this window is still eventually cleaned up, and
-/// so a real post-wake app switch isn't permanently ignored.
-const WAKE_REMOVAL_GRACE: Duration = Duration::from_secs(90);
+/// How long each individual sign of post-wake reconnect activity (a window
+/// vanishing into `pending_removal`, or one reappearing out of it — see
+/// `note_wake_activity`) extends `wake_grace_until` by, and the bound
+/// (`WAKE_GRACE_MAX`) on how far past the wake instant that extension can
+/// ever reach. Mirrors `tili-ax/src/watch.rs`'s `FULL_RESYNC_DEBOUNCE`/
+/// `FULL_RESYNC_MAX_INTERVAL` shape: a fixed flat timer either makes fast
+/// machines wait needlessly long after wake, or — sized down to avoid
+/// that — lapses before a genuinely slow-to-reconnect app gets back, at
+/// which point its window gets wrongly finalized as closed and then
+/// re-discovered as "new," re-triggering any matching `workspace-rules`
+/// entry (an unwanted workspace jump). Debouncing off real reconnect
+/// signals instead means the grace period naturally tracks how long
+/// reconnection is actually still happening, on that specific wake. Both
+/// values are proposals pending real-hardware validation — this repo's own
+/// history validated the previous flat timer's value (8s, then 90s) only
+/// after several rounds of real sleep/wake testing; these two haven't had
+/// that yet.
+const WAKE_GRACE_DEBOUNCE: Duration = Duration::from_secs(10);
+const WAKE_GRACE_MAX: Duration = Duration::from_secs(180);
 
 /// How long a pid stays in `WmState::pending_launch_pids` after
 /// `AppLaunched` before being dropped even without ever getting a window —
@@ -871,11 +869,23 @@ pub struct WmState {
     /// doesn't know whether anything else is still open. Cleared in
     /// `remove_placement` alongside `floating_placed`.
     floating_centered: HashSet<WindowId>,
-    /// Set by `note_system_wake` to `now + WAKE_REMOVAL_GRACE` — while
-    /// `Instant::now()` is still before this, `finalize_expired_removals`
-    /// uses `WAKE_REMOVAL_GRACE` instead of `removal_grace`. `None` the rest
-    /// of the time.
+    /// The end of the current post-wake grace episode — while
+    /// `Instant::now()` is still before this (`wake_grace_active`),
+    /// `finalize_expired_removals` uses `WAKE_GRACE_MAX` instead of
+    /// `removal_grace`, and `place_new_window`/`reveal_frontmost` suppress
+    /// their auto-switch. Set by `note_system_wake` to `now +
+    /// WAKE_GRACE_MAX`, then pulled *earlier* by `note_wake_activity` as
+    /// reconnect activity is observed (capped at that same `WAKE_GRACE_MAX`
+    /// ceiling) — see that method's doc comment. `None` the rest of the
+    /// time.
     wake_grace_until: Option<Instant>,
+    /// The instant the current post-wake grace episode began — the anchor
+    /// `note_wake_activity` measures `WAKE_GRACE_MAX` from, since
+    /// `wake_grace_until` itself keeps moving. Set alongside
+    /// `wake_grace_until` by `note_system_wake`; not reset when
+    /// `note_wake_activity` extends the deadline, only when a fresh wake
+    /// starts a new episode.
+    wake_started_at: Option<Instant>,
     /// Rules `apply_config` skipped on its *most recent* call (not a
     /// lifetime accumulation — cleared and rebuilt on every call), mirroring
     /// the `eprintln!` already logged at each skip site. Exists so
@@ -935,6 +945,7 @@ impl Default for WmState {
             floating_placed: HashSet::new(),
             floating_centered: HashSet::new(),
             wake_grace_until: None,
+            wake_started_at: None,
             config_warnings: Vec::new(),
         }
     }
@@ -965,7 +976,7 @@ impl WmState {
                 eprintln!(
                     "tili-daemon: finalizing window {id} as closed after {:?} pending (grace={grace:?}, wake_grace_active={})",
                     now.duration_since(since),
-                    self.wake_grace_until.is_some_and(|until| now < until)
+                    self.wake_grace_active(now)
                 );
             }
         }
@@ -991,25 +1002,62 @@ impl WmState {
     }
 
     /// Records that the system just woke from sleep
-    /// (`WmEvent::SystemDidWake`) — boosts `finalize_expired_removals`'s
-    /// effective grace period to `WAKE_REMOVAL_GRACE` for the next
-    /// `WAKE_REMOVAL_GRACE` seconds, so a window whose owning app hasn't
+    /// (`WmEvent::SystemDidWake`) — starts a new wake-grace episode capped
+    /// at `WAKE_GRACE_MAX` from this instant. While the episode is active
+    /// (`wake_grace_active`), `finalize_expired_removals` uses that boosted
+    /// grace instead of `removal_grace`, so a window whose owning app hasn't
     /// reconnected to the WindowServer/AX yet doesn't get finalized as
-    /// closed and then re-placed as brand new, and makes `reveal_frontmost`
-    /// distrust `frontmost_app_pid()` reads for that same window (see
-    /// `WAKE_REMOVAL_GRACE`'s doc comment).
+    /// closed and then re-placed as brand new, and `reveal_frontmost`
+    /// distrusts `frontmost_app_pid()` reads for that same window. Actual
+    /// reconnect activity (see `note_wake_activity`) can pull the episode's
+    /// end earlier than the full `WAKE_GRACE_MAX`, or extend it back out —
+    /// but never past this call's `WAKE_GRACE_MAX` ceiling.
     pub fn note_system_wake(&mut self) {
-        eprintln!("tili-daemon: system woke, granting {WAKE_REMOVAL_GRACE:?} wake grace");
-        self.wake_grace_until = Some(Instant::now() + WAKE_REMOVAL_GRACE);
+        eprintln!("tili-daemon: system woke, granting up to {WAKE_GRACE_MAX:?} wake grace");
+        let now = Instant::now();
+        self.wake_started_at = Some(now);
+        self.wake_grace_until = Some(now + WAKE_GRACE_MAX);
     }
 
-    /// `removal_grace`, unless a recent `note_system_wake` call's boosted
-    /// window (`wake_grace_until`) is still in effect, in which case the
-    /// larger `WAKE_REMOVAL_GRACE` applies instead.
+    /// Whether a `note_system_wake` episode is still active at `now` — the
+    /// single check `effective_removal_grace`, `place_new_window`, and
+    /// `reveal_frontmost` all gate their wake-specific behavior on.
+    fn wake_grace_active(&self, now: Instant) -> bool {
+        self.wake_grace_until.is_some_and(|until| now < until)
+    }
+
+    /// Called from `apply_windows_changed` on each sign that post-wake
+    /// reconnection is still ongoing — a window newly entering
+    /// `pending_removal`, or one leaving it via rediscovery. No-ops if
+    /// there's no active episode (`wake_started_at` unset, or the episode
+    /// already lapsed — ordinary later churn shouldn't resurrect an episode
+    /// that's over). Otherwise pushes `wake_grace_until` out by
+    /// `WAKE_GRACE_DEBOUNCE`, capped so it never passes `wake_started_at +
+    /// WAKE_GRACE_MAX` — matching `tili-ax/src/watch.rs`'s
+    /// `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` debounce-with-cap
+    /// shape. Deliberately symmetric between the insertion and removal
+    /// sides: a window vanishing right after wake extends protection just
+    /// as much as one reconnecting does, since the reconnect burst may
+    /// still be ongoing for other apps either way.
+    fn note_wake_activity(&mut self) {
+        let now = Instant::now();
+        if !self.wake_grace_active(now) {
+            return;
+        }
+        let Some(started_at) = self.wake_started_at else {
+            return;
+        };
+        self.wake_grace_until = Some((now + WAKE_GRACE_DEBOUNCE).min(started_at + WAKE_GRACE_MAX));
+    }
+
+    /// `removal_grace`, unless a recent `note_system_wake` episode
+    /// (`wake_grace_active`) is still in effect, in which case the boosted
+    /// `WAKE_GRACE_MAX` applies instead.
     fn effective_removal_grace(&self, now: Instant) -> Duration {
-        match self.wake_grace_until {
-            Some(until) if now < until => self.removal_grace.max(WAKE_REMOVAL_GRACE),
-            _ => self.removal_grace,
+        if self.wake_grace_active(now) {
+            self.removal_grace.max(WAKE_GRACE_MAX)
+        } else {
+            self.removal_grace
         }
     }
 
@@ -1066,7 +1114,11 @@ impl WmState {
             .map(|(&id, _)| id)
             .collect();
         for id in stale_ids {
-            self.pending_removal.entry(id).or_insert_with(Instant::now);
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.pending_removal.entry(id)
+            {
+                entry.insert(Instant::now());
+                self.note_wake_activity();
+            }
         }
 
         let active_workspace = self.active_workspace_name();
@@ -1079,7 +1131,9 @@ impl WmState {
             let id = window.id();
             // Present in this scan after all — un-pend it, whether or not
             // it was ever actually pending.
-            self.pending_removal.remove(&id);
+            if self.pending_removal.remove(&id).is_some() {
+                self.note_wake_activity();
+            }
             let is_new = !self.placements.contains_key(&id);
             let kind = window.kind();
             let minimized = window.minimized();
@@ -1194,11 +1248,11 @@ impl WmState {
     /// monitor, the focused monitor switches to it immediately (via
     /// `switch_workspace`, same as `move_focused_to_workspace`) so a window
     /// auto-placed by a `workspace-rules` match is never left off-screen —
-    /// unless `wake_grace_until` is still active, in which case the window
+    /// unless `wake_grace_active` is still true, in which case the window
     /// still gets placed into `target_workspace` (parked, not shown) but the
     /// switch itself is skipped. Confirmed on real hardware: a window whose
     /// app hasn't reconnected to the WindowServer/AX yet after a real wake
-    /// can get wrongly finalized as closed (see `WAKE_REMOVAL_GRACE`) and
+    /// can get wrongly finalized as closed (see `WAKE_GRACE_MAX`) and
     /// then rediscovered moments later — `is_new` from this function's
     /// caller's perspective, but not from the user's — matching its
     /// `workspace-rules` entry and switching away from whatever workspace
@@ -1259,9 +1313,7 @@ impl WmState {
         }
 
         if inactive {
-            let in_wake_grace = self
-                .wake_grace_until
-                .is_some_and(|until| Instant::now() < until);
+            let in_wake_grace = self.wake_grace_active(Instant::now());
             eprintln!(
                 "tili-daemon: {} workspace '{target_workspace}' for new window {id} (wake_grace_active={in_wake_grace})",
                 if in_wake_grace {
@@ -2382,12 +2434,12 @@ impl WmState {
     /// comment and `pending_launch_pids`'s doc comment on `WmState` for the
     /// full mechanism.
     ///
-    /// Same branch also distrusts `pid` while `wake_grace_until` (see
-    /// `note_system_wake`) is still in effect — `frontmost_app_pid()` is a
+    /// Same branch also distrusts `pid` while `wake_grace_active` (see
+    /// `note_system_wake`) is still true — `frontmost_app_pid()` is a
     /// synchronous `AXFocusedApplication` query, and right after a real wake
     /// it can transiently report a different app than the one genuinely
     /// frontmost while everyone's AX/WindowServer connection is still
-    /// reconnecting (the same underlying instability `WAKE_REMOVAL_GRACE`
+    /// reconnecting (the same underlying instability `WAKE_GRACE_MAX`
     /// exists for). Without this, that misread pid still owns live windows
     /// (so `suppress` above doesn't catch it either) and can force-switch
     /// the active workspace a few seconds after wake — the exact symptom
@@ -2512,9 +2564,7 @@ impl WmState {
                 // chasing means nothing really changed since the last
                 // resolved-to-a-real-window pid, so there's nothing to
                 // reveal.
-                let in_wake_grace = self
-                    .wake_grace_until
-                    .is_some_and(|until| Instant::now() < until);
+                let in_wake_grace = self.wake_grace_active(Instant::now());
                 if (pid_unchanged && !allow_unchanged_pid)
                     || suppress
                     || !self.pending_launch_pids.is_empty()
@@ -4973,6 +5023,112 @@ mod tests {
 
         assert!(state.placements.contains_key(&id));
         assert!(state.pending_removal.contains_key(&id));
+    }
+
+    #[test]
+    fn note_wake_activity_extends_wake_grace_until_but_never_past_the_max() {
+        let now = Instant::now();
+        let original_deadline = now + Duration::from_secs(5);
+        let mut state = WmState {
+            wake_started_at: Some(now),
+            wake_grace_until: Some(original_deadline),
+            ..WmState::default()
+        };
+
+        state.note_wake_activity();
+        let extended = state.wake_grace_until.unwrap();
+        assert!(
+            extended > original_deadline,
+            "activity should push the deadline forward"
+        );
+        assert!(
+            extended <= now + WAKE_GRACE_MAX,
+            "activity should never push the deadline past wake_started_at + WAKE_GRACE_MAX"
+        );
+    }
+
+    #[test]
+    fn note_wake_activity_clamps_to_the_max_once_the_debounce_would_overshoot_it() {
+        let now = Instant::now();
+        // Started long enough ago that `WAKE_GRACE_MAX` is only 1s away —
+        // closer than a full `WAKE_GRACE_DEBOUNCE` (10s) push would reach.
+        let started_at = now - (WAKE_GRACE_MAX - Duration::from_secs(1));
+        let mut state = WmState {
+            wake_started_at: Some(started_at),
+            wake_grace_until: Some(now + Duration::from_millis(500)),
+            ..WmState::default()
+        };
+
+        state.note_wake_activity();
+
+        assert_eq!(state.wake_grace_until, Some(started_at + WAKE_GRACE_MAX));
+    }
+
+    #[test]
+    fn note_wake_activity_is_a_no_op_once_the_episode_has_lapsed() {
+        let now = Instant::now();
+        let mut state = WmState {
+            wake_started_at: Some(now - Duration::from_secs(200)),
+            wake_grace_until: Some(now - Duration::from_secs(1)),
+            ..WmState::default()
+        };
+
+        state.note_wake_activity();
+
+        assert_eq!(state.wake_grace_until, Some(now - Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn note_wake_activity_is_a_no_op_with_no_active_episode() {
+        let mut state = WmState::default();
+        assert!(state.wake_grace_until.is_none());
+
+        state.note_wake_activity();
+
+        assert!(state.wake_grace_until.is_none());
+    }
+
+    // `apply_windows_changed`'s own two `note_wake_activity` call sites
+    // (pending_removal insertion and rediscovery) aren't covered by a
+    // dedicated test here: unlike `place_new_window` below, that function
+    // takes real `AxWindow`s, which wrap a live `AXUIElement` with no
+    // test-constructible form (see `place_new_window`'s own doc comment on
+    // why it, not `apply_windows_changed`, is the unit-testable seam) —
+    // the same pre-existing limitation that keeps `reveal_frontmost`
+    // untestable at this level. `note_wake_activity`'s own behavior is
+    // covered directly above instead.
+
+    #[test]
+    fn place_new_window_skips_auto_switch_while_wake_grace_is_active_and_fires_once_it_lapses() {
+        let mut state = floating_test_state();
+        state.workspaces.insert("side".to_string(), Tree::new());
+        state.wake_grace_until = Some(Instant::now() + Duration::from_secs(60));
+
+        state.place_new_window(1, &PlacementKind::Tiled, "side");
+
+        assert!(
+            state
+                .workspaces
+                .get("side")
+                .unwrap()
+                .window_ids()
+                .contains(&1),
+            "the window is still placed into its target workspace, just parked"
+        );
+        assert_eq!(
+            state.active_workspace_name(),
+            DEFAULT_WORKSPACE,
+            "auto-switch is skipped while wake grace is active"
+        );
+
+        state.wake_grace_until = Some(Instant::now() - Duration::from_secs(1));
+        state.place_new_window(2, &PlacementKind::Tiled, "side");
+
+        assert_eq!(
+            state.active_workspace_name(),
+            "side",
+            "auto-switch fires normally once wake grace has lapsed"
+        );
     }
 
     #[test]
