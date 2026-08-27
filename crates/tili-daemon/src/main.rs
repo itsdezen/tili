@@ -354,7 +354,8 @@ async fn async_daemon_main(
                             &mut pending_reveal_epoch,
                             &mut pending_reveal_allow_unchanged,
                             event,
-                        );
+                        )
+                        .await;
                     }
                     None => eprintln!("tili-daemon: event watcher channel closed unexpectedly"),
                 }
@@ -597,7 +598,11 @@ async fn handle_wait_for_change(
 /// into a self-sustaining wake loop). A separate named function, rather
 /// than an inline `matches!`, purely so this list has unit-test coverage
 /// — the failure mode it guards against has no other way to get one.
-fn command_is_read_only(command: &Command) -> bool {
+/// `pub(crate)` so `dispatch::dispatch` can reuse the exact same list for
+/// `WmState::clear_wake_lock` — see that function's doc comment for why it
+/// needs this same "is this really user activity" distinction rather than
+/// its own separate one.
+pub(crate) fn command_is_read_only(command: &Command) -> bool {
     matches!(
         command,
         Command::Ping
@@ -618,7 +623,7 @@ fn drain_pending_windows(state: &mut WmState, pending_pids: &mut HashSet<i32>) -
     pids_changed
 }
 
-fn handle_event(
+async fn handle_event(
     state: &mut WmState,
     pending_pids: &mut HashSet<i32>,
     pending_reveal_deadline: &mut Option<tokio::time::Instant>,
@@ -653,7 +658,15 @@ fn handle_event(
         }
         WmEvent::SystemDidWake => {
             eprintln!("tili-daemon: NSWorkspace SystemDidWake received");
-            state.note_system_wake();
+            state.note_system_wake().await;
+        }
+        WmEvent::ScreenLocked => {
+            eprintln!("tili-daemon: screen locked");
+            state.note_screen_locked();
+        }
+        WmEvent::ScreenUnlocked => {
+            eprintln!("tili-daemon: screen unlocked");
+            state.note_screen_unlocked().await;
         }
         WmEvent::WindowFocused { .. } => {
             // No-op: `WmState`'s own focus tracking is instead resolved

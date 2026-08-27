@@ -43,11 +43,22 @@ M4), `set_size` only resizes (used by `tili-daemon`'s floating-window
 centering to discover an app's real, possibly-clamped size *before* writing
 a position, so centering a fixed-one-axis app like System Settings only
 ever needs one position write instead of one wrong-then-corrected pair),
-and all three writes are best-effort (`let _ =` on the AX result; a window
-that refuses a write is left alone, matching every other AX-based WM). All
-three also update the cached `frame` field to match what was just written,
-so `WmState::list_windows` reflects reality without a wasted AX read-back —
-this is why `WindowFrameSetter::set_frame` takes `&mut AxWindow`.
+and all three writes are best-effort (a window that refuses a write is left
+alone, matching every other AX-based WM). All three inspect the AX
+`Result` and only advance the cached `frame` field on `Ok` — never
+optimistically, so `WmState::list_windows` reflects reality without a
+wasted AX read-back on the success path, and this is why
+`WindowFrameSetter::set_frame` takes `&mut AxWindow`. A write that fails
+(logged via `log_write_failure`, except `InvalidUIElement` — the window
+having simply closed, which the normal destroy-notification path already
+handles) leaves the cache exactly where it was, so the next call's
+no-op-if-unchanged guard sees a real mismatch and retries the write
+automatically; hardware-confirmed root cause of a bug where a workspace's
+window stayed parked off-screen after unlock until switching workspaces
+twice — the AX write briefly failed right after unlock (app still
+reconnecting to AX/WindowServer) but the cache advanced anyway, so every
+subsequent switch's no-op guard wrongly believed the window was already
+where it needed to be and silently skipped writing it.
 
 ## frame_setter.rs — the animation seam
 
@@ -217,6 +228,32 @@ arbitrary background thread with a bare `CFRunLoopRun()` and `queue: nil`
 notifications specifically) isn't sufficient for these two `NSWorkspace`
 notifications.
 
+The same function also registers `com.apple.screenIsLocked`/
+`screenIsUnlocked` (`AppEvent::ScreenLocked`/`ScreenUnlocked` →
+`WmEvent::ScreenLocked`/`ScreenUnlocked` → `WmState::note_screen_locked`/
+`note_screen_unlocked` — see [tili-daemon.md](tili-daemon.md)) — but through
+`NSDistributedNotificationCenter::defaultCenter()`, not `NSWorkspace`'s own
+`notificationCenter()`. These two are undocumented, system-wide
+notifications posted by `loginwindow` when the screen lock engages/
+disengages, not `NSWorkspace`, so they don't exist on `NSWorkspace`'s
+center at all. Confirmed via real `daemon.err.log` output that this
+project's own day-to-day "sleep" gesture — lock the screen, wait for the
+display to blank — never produces an `NSWorkspace SystemDidWake received`
+line at all, since the machine itself never actually suspends; that these
+two distributed notifications are what *does* fire for a screen lock/
+unlock is the long-standing, community-documented behavior of
+`loginwindow`, not something this project independently re-verified with
+its own logging yet. Registration
+still uses the same block/`queue: .main` shape as the `NSWorkspace`
+observers above, for consistency: `NSDistributedNotificationCenter` is a
+subclass of `NSNotificationCenter`, so
+`addObserverForName:object:queue:usingBlock:` is inherited unchanged.
+Whether main-thread/`NSApplication`-pumping is as load-bearing for a
+*distributed* notification as it is for `DidWakeNotification` hasn't been
+separately hardware-tested — registering it the same way `DidWakeNotification`
+needed to be registered was the conservative default, not an independently
+confirmed requirement.
+
 `watch.rs::spawn_event_watcher` takes the `Receiver<AppEvent>` this
 function returns as a parameter now, rather than spawning its own
 registration — registration must happen on the main thread before the
@@ -306,6 +343,46 @@ there, just through a path neither one touched). `watched.retain` now only
 sends `AppTerminated` on a confirmed-dead pid; one that's merely off
 `current` this tick just loses its AXNotificationStream subscription
 (silently re-attached once it reappears), never triggering `remove_app`.
+
+`spawn_event_watcher`'s own thread tracks `screen_locked`, set/cleared by
+`AppEvent::ScreenLocked`/`ScreenUnlocked` (see `workspace.rs`'s section
+above), and skips the `WATCHER_RESYNC_INTERVAL` resync (both its
+watcher-attach/detach pass and any `WindowsChanged` sweep) entirely while
+it's set. Real `daemon.err.log` output showed two genuinely still-open
+windows finalized as closed ~93s after a lock/unlock cycle — the periodic
+resync's live re-enumeration of an already-tracked window's process was
+running unmodified throughout the whole lock, and AX enumeration for other
+apps can silently come back empty while the session is on loginwindow (the
+same reconnect instability `note_screen_locked`/`note_system_wake` guard
+against, but that guard only blocks `finalize_expired_removals`, not the
+enumeration that feeds `pending_removal` in the first place — see
+[tili-daemon.md](tili-daemon.md)'s lock/unlock section for the rest of the
+fix). `AppEvent::ScreenUnlocked` itself still always forwards (never
+suppressed, so `WmState` always learns lock state changes), and
+additionally forces one real full resync immediately — rather than
+skipping the tick and waiting for the next 2s/20s cadence — resetting
+`last_full_resync`/`debounce_deadline` as if that resync had happened
+through the normal timer.
+
+`Ok(AppEvent::SystemDidWake)` and the `Err(RecvTimeoutError::Timeout)`
+suspected-sleep branch both do the same forced-immediate-full-resync as
+`AppEvent::ScreenUnlocked` above, for the same reason applied to a real
+sleep instead of a lock: a long sleep advances `Instant` just as much as a
+lock sitting frozen does, so a window already in `pending_removal` before
+the machine suspended needs the same fast re-verification a lock/unlock
+cycle does — see [tili-daemon.md](tili-daemon.md)'s sleep/wake section for
+the daemon-side half (`WmState::note_system_wake` restarting
+`pending_removal`'s clocks). Both send sites force their own resync rather
+than relying on one to cover the other: real hardware shows the
+`Err(Timeout)` branch routinely detects a real sleep first (the real
+notification has an extra hop to cross), but a real sleep shorter than
+`SUSPECTED_SLEEP_GAP` never trips that branch's detection at all and only
+ever reaches `Ok(AppEvent::SystemDidWake)`, so skipping either one would
+leave a real gap, not just redundant work on the common path. Unlike
+lock/unlock, there's no `screen_locked`-style suppression on the sleep side
+of this — this codebase doesn't listen for `NSWorkspaceWillSleepNotification`,
+so there's no "before" event to gate a resync-skipping window against, only
+the wake-side forced resync mirrored from `ScreenUnlocked`.
 
 ## hotkey.rs — global hotkey capture (M6)
 

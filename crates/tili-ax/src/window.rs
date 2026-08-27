@@ -1,3 +1,4 @@
+use axuielement::AXError;
 use axuielement::AXUIElement;
 use axuielement::ax_attribute::roles::AX_WINDOW_ROLE;
 use axuielement::ax_attribute::subroles::{
@@ -97,6 +98,16 @@ pub(crate) fn frame_matches(a: Rect, b: Rect) -> bool {
         && (a.y - b.y).abs() < FRAME_EPSILON
         && (a.width - b.width).abs() < FRAME_EPSILON
         && (a.height - b.height).abs() < FRAME_EPSILON
+}
+
+/// Logs an AX write failure, except `InvalidUIElement` — that's just the
+/// window having closed out from under the write (the normal
+/// destroy-notification path reconciles it separately), not something
+/// worth noise for.
+fn log_write_failure(what: &str, title: &str, err: AXError) {
+    if err != AXError::InvalidUIElement {
+        eprintln!("tili-ax: {what} write failed for {title:?}: {err}");
+    }
 }
 
 /// Reads a window's current position/size straight from AX — `None` if
@@ -328,6 +339,18 @@ impl AxWindow {
         self.frame
     }
 
+    /// A `Send`, cheaply-cloneable (a CFType retain) handle for probing
+    /// this window's AX responsiveness from another thread — see
+    /// `WindowProbeHandle`. Exists because `AxWindow` itself borrows into
+    /// `WmState`'s `self.windows` and isn't meant to cross threads, but a
+    /// post-wake probe needs to fire concurrently from
+    /// `tokio::task::spawn_blocking`.
+    pub fn probe_handle(&self) -> WindowProbeHandle {
+        WindowProbeHandle {
+            element: self.element.clone(),
+        }
+    }
+
     /// Reads the window's position/size fresh from AX, bypassing the
     /// cached `frame()` — used right after a `set_frame` write to check
     /// whether the app actually honored the requested size, since some
@@ -379,7 +402,13 @@ impl AxWindow {
     /// (e.g. `WmState::list_windows`) see the new position immediately
     /// rather than a stale pre-write value — this matters for M4's parked
     /// windows, which are never re-scanned via AX just to confirm where
-    /// they ended up.
+    /// they ended up. The cache is only advanced for a write that actually
+    /// succeeded: an app that's temporarily unresponsive (e.g. right after
+    /// screen unlock) can fail an AX write outright, and if the cache
+    /// optimistically moved to `target` anyway, the no-op guard below would
+    /// wrongly believe a *later* call already matches reality and skip the
+    /// write forever — the window stays stuck wherever it last really was
+    /// until something else (a full resync) happens to fix the cache.
     ///
     /// Position is set before size: some apps clamp/reflow size based on
     /// their current position (e.g. keeping a fixed distance from a screen
@@ -401,36 +430,54 @@ impl AxWindow {
         if frame_matches(self.frame, target) {
             return;
         }
-        let _ = self.element.set_point_attribute(
+        match self.element.set_point_attribute(
             kAXPositionAttribute,
             AXPoint {
                 x: target.x,
                 y: target.y,
             },
-        );
-        let _ = self.element.set_size_attribute(
+        ) {
+            Ok(()) => {
+                self.frame.x = target.x;
+                self.frame.y = target.y;
+            }
+            Err(e) => log_write_failure("set_frame position", &self.title, e),
+        }
+        match self.element.set_size_attribute(
             kAXSizeAttribute,
             AXSize {
                 width: target.width,
                 height: target.height,
             },
-        );
-        self.frame = target;
+        ) {
+            Ok(()) => {
+                self.frame.width = target.width;
+                self.frame.height = target.height;
+            }
+            Err(e) => log_write_failure("set_frame size", &self.title, e),
+        }
     }
 
     /// Moves the window without touching its size — used to park a window
     /// off-screen (M4), where resizing would be pointless and needlessly
     /// invasive to apps that dislike being resized. Same no-op-if-unchanged
-    /// guard as `set_frame`, and for the same feedback-loop reason.
+    /// guard as `set_frame`, and for the same feedback-loop reason. Same
+    /// cache-only-advances-on-success rule as `set_frame`, and for the same
+    /// stuck-forever reason.
     pub fn set_position(&mut self, x: f64, y: f64) {
         if (self.frame.x - x).abs() < FRAME_EPSILON && (self.frame.y - y).abs() < FRAME_EPSILON {
             return;
         }
-        let _ = self
+        match self
             .element
-            .set_point_attribute(kAXPositionAttribute, AXPoint { x, y });
-        self.frame.x = x;
-        self.frame.y = y;
+            .set_point_attribute(kAXPositionAttribute, AXPoint { x, y })
+        {
+            Ok(()) => {
+                self.frame.x = x;
+                self.frame.y = y;
+            }
+            Err(e) => log_write_failure("set_position", &self.title, e),
+        }
     }
 
     /// Resizes the window without touching its position — used by
@@ -441,18 +488,25 @@ impl AxWindow {
     /// requested size) and again to the right one (computed against the
     /// real, clamped size) — a visible double-move on every placement of a
     /// fixed-one-axis app like System Settings. Same no-op-if-unchanged
-    /// guard as `set_frame`, and for the same feedback-loop reason.
+    /// guard as `set_frame`, and for the same feedback-loop reason. Same
+    /// cache-only-advances-on-success rule as `set_frame`, and for the same
+    /// stuck-forever reason.
     pub fn set_size(&mut self, width: f64, height: f64) {
         if (self.frame.width - width).abs() < FRAME_EPSILON
             && (self.frame.height - height).abs() < FRAME_EPSILON
         {
             return;
         }
-        let _ = self
+        match self
             .element
-            .set_size_attribute(kAXSizeAttribute, AXSize { width, height });
-        self.frame.width = width;
-        self.frame.height = height;
+            .set_size_attribute(kAXSizeAttribute, AXSize { width, height })
+        {
+            Ok(()) => {
+                self.frame.width = width;
+                self.frame.height = height;
+            }
+            Err(e) => log_write_failure("set_size", &self.title, e),
+        }
     }
 
     /// Raises and focuses this window — used when tiling changes which
@@ -488,6 +542,32 @@ impl AxWindow {
             .element
             .set_bool_attribute(AX_FULL_SCREEN_ATTRIBUTE, fullscreen);
         self.fullscreen = fullscreen;
+    }
+}
+
+/// An owned handle for probing one window's AX responsiveness from a
+/// background thread — see `AxWindow::probe_handle`. Deliberately doesn't
+/// expose the underlying `AXUIElement` type at all, so `tili-daemon` never
+/// needs to name it directly (this crate stays the only one that touches
+/// the Accessibility API).
+#[derive(Clone)]
+pub struct WindowProbeHandle {
+    element: AXUIElement,
+}
+
+impl WindowProbeHandle {
+    /// Cheap AX round-trip confirming the window's owning process has
+    /// reconnected to AX/WindowServer after a system wake — reads
+    /// `kAXPositionAttribute` and discards the value, since only whether
+    /// the read succeeds at all matters here. A synchronous IPC round-trip
+    /// to the owning process, so callers should run this off the async
+    /// runtime thread (`tokio::task::spawn_blocking`), one per window,
+    /// fired concurrently right after wake rather than waiting for the
+    /// next ordinary AX event for that window to arrive.
+    pub fn is_responsive(&self) -> bool {
+        self.element
+            .point_attribute(kAXPositionAttribute)
+            .is_ok_and(|v| v.is_some())
     }
 }
 

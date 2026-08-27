@@ -839,70 +839,285 @@ polling-exceptions section for why it exists and what it costs.
 `WmEvent::SystemDidWake` (from `NSWorkspaceDidWakeNotification`, registered
 via `tili_ax::register_on_main` — see [tili-ax.md](tili-ax.md), confirmed on
 real hardware across several repeated sleep/wake cycles to be reliably
-delivered now that `tili-daemon` has a real `NSApplication`) calls
-`WmState::note_system_wake`, which starts a wake-grace *episode*: while it's
-active (`WmState::wake_grace_active`), the daemon does two things:
+delivered now that `tili-daemon` has a real `NSApplication`) is `.await`-ed
+straight through `handle_event` to `WmState::note_system_wake`, which fires a
+cheap AX probe (`tili_ax::WindowProbeHandle::is_responsive`, a
+`kAXPositionAttribute` read whose value is discarded) at every
+currently-tracked window's owning pid, concurrently
+(`tokio::task::spawn_blocking`, one task per window) — not gated behind
+`apply_windows_changed` happening to run again for that pid. Each pid that
+responds is confirmed immediately; the rest are added to (or, if this is a
+later wake, remain in) `WmState::unconfirmed_pids: HashSet<i32>`, per-pid
+rather than one global flag. Two call sites gate on this per pid instead of
+one global episode:
 
-- Boosts `finalize_expired_removals`'s effective grace period from
-  `REMOVAL_GRACE_PERIOD` (100ms) to the episode's boosted grace. Without
-  this, a still-open window whose owning app simply hasn't reconnected to
-  the WindowServer/AX yet after wake (observed to take several seconds, far
-  longer than 100ms — apps don't all reconnect at once) missed a scan, got
-  `finalize_expired_removals`'d as closed, then reappeared on the next scan
-  and was treated as a brand-new window — re-triggering any matching
-  `workspace-rules` entry and yanking the active workspace out from under
-  whatever the user was looking at right before sleep.
-- Makes `reveal_frontmost` distrust the `frontmost_app_pid()` read it's
-  given — that function is a synchronous `AXFocusedApplication` query, and
-  it too can transiently misread which app is frontmost while AX/WindowServer
-  is still reconnecting post-wake. A misread pid still owns live windows (so
-  `reveal_frontmost`'s "previous app has zero windows left" suppression
-  doesn't catch it), so left unguarded it looks exactly like a genuine
-  Cmd-Tab and force-switches the active workspace to that pid's workspace.
+- `finalize_expired_removals` won't finalize a `pending_removal` window
+  whose pid is still `unconfirmed_pids`, however long it's been pending.
+  Without this, a still-open window whose owning app simply hasn't
+  reconnected to the WindowServer/AX yet after wake (observed to take
+  several seconds) missed a scan, got finalized as closed, then reappeared
+  on the next scan and was treated as a brand-new window — re-triggering
+  any matching `workspace-rules` entry and yanking the active workspace out
+  from under whatever the user was looking at right before sleep.
+- `place_new_window`/`reveal_frontmost` don't gate on `unconfirmed_pids` at
+  all — see `WmState::wake_lock_active` below for why per-pid confirmation
+  isn't a strong enough guard for those two specifically.
 
-Both failure modes produce the same user-visible symptom — the active
-workspace silently jumping away sometime after waking — just through
-different call paths, so both are gated on the same `wake_grace_until`
-window rather than two separate timers. `REMOVAL_GRACE_PERIOD` itself stays
-at 100ms for the ordinary case (a genuinely-closed window should disappear
-promptly, not linger indefinitely); both boosts only apply during an active
-episode, so a genuine post-wake app switch or window close isn't
-permanently ignored.
+`REMOVAL_GRACE_PERIOD` itself is untouched by any of this: it still applies
+as soon as a pid is confirmed (or was never unconfirmed at all), so a
+genuinely-closed window still disappears promptly.
 
-**The episode's length is a debounce with a cap, not a single flat timer.**
-An earlier version used one fixed duration (`WAKE_REMOVAL_GRACE`, raised
-from an initial 8s to 90s after real-hardware confirmation that 8s was
-still too short — `NSWorkspaceDidWakeNotification` fires at the hardware
-wake itself, which can precede the user finishing unlock by close to a
-minute, and apps don't meaningfully resume reconnecting until after that).
-But a flat timer has an unavoidable trade-off: sized long enough to survive
-a slow reconnect, it makes a fast machine wait needlessly long after every
-wake even when nothing is actually still reconnecting; sized shorter to fix
-that, it lapses early on a genuinely slow reconnect and lets the exact bug
-back in through the timing gap. `note_system_wake` now sets
-`wake_grace_until` to `now + WAKE_GRACE_MAX` (the episode's outer bound,
-180s — a proposed value, not yet independently validated on real hardware
-the way 90s was) and records `wake_started_at`, then
-`apply_windows_changed` calls a private `note_wake_activity` from its two
-`pending_removal`-membership-changing call sites (a window newly going
-missing, or one reappearing) to pull `wake_grace_until` back to `now +
-WAKE_GRACE_DEBOUNCE` (3s, also proposed) whenever that's sooner than the
-existing deadline — clamped so it can never exceed `wake_started_at +
-WAKE_GRACE_MAX`. This mirrors `tili-ax/src/watch.rs`'s
-`FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` shape. `note_wake_activity`
-is a deliberate no-op once an episode has already lapsed — ordinary later
-window churn shouldn't resurrect a grace period that's over — and treats
-disappearance and reappearance symmetrically, since either one means the
-post-wake reconnect burst may still be ongoing for some other app even if
-this particular window is done. The result: a fast machine's episode
-naturally ends within `WAKE_GRACE_DEBOUNCE` of the last reconnect signal
-instead of always running the full duration, while a slow machine's episode
-keeps extending — up to `WAKE_GRACE_MAX` — for as long as windows keep
-visibly reconnecting.
+**`note_system_wake` racing `resync_watchers` after a real sleep.**
+`WmEvent::SystemDidWake` reaching `note_system_wake` isn't actually
+guaranteed to be the first thing the daemon observes after a real wake.
+`tili-ax/src/watch.rs`'s background watcher thread also runs a
+`WATCHER_RESYNC_INTERVAL`-driven backstop (`resync_watchers`) that fires
+`WmEvent::WindowsChanged` for on-screen pids straight off its own
+`recv_timeout` timeout — and that timeout is expected to reliably elapse
+*before* `AppEvent::SystemDidWake` even reaches this thread on any real
+sleep, by construction: the
+real notification has an extra hop (main thread → `register_on_main`'s
+channel → this thread's next `app_rx.recv`) that the already-blocked
+`recv_timeout` doesn't wait on, since actual sleep duration always exceeds
+the 2s interval. Left alone, that means `resync_watchers` can do a live AX
+scan for every tracked pid — and produce empty/stale results, since nothing
+has reconnected yet — before `note_system_wake` has populated
+`unconfirmed_pids` or armed `wake_lock_active` for any of them, defeating
+both mechanisms above for whichever windows lose that race. The fix is in
+`spawn_event_watcher` itself, not `WmState`: each loop iteration records
+`tick_started_at` right before `recv_timeout`, and if the wait actually took
+more than `SUSPECTED_SLEEP_GAP` (5s — comfortably above ordinary scheduling
+jitter around the 2s interval, comfortably below any real sleep), a
+synthetic `WmEvent::SystemDidWake` is sent *before* calling
+`resync_watchers` — both land in the same `event_tx` channel in send order,
+and the daemon's single-consumer `select!` loop only ever processes one
+event to completion before the next, so `note_system_wake` is guaranteed to
+run (and finish awaiting its own probes) before any `WindowsChanged` that
+sweep produces gets processed. The real notification still arrives moments
+later and is harmless to react to twice — `note_system_wake` is idempotent.
+Reasoned from the code (the extra-hop delivery path, `Instant` correctly
+advancing across suspend on macOS, and the single-consumer processing
+model), not yet independently reproduced with diagnostic logging the way
+the rest of this section's history was.
 
-`note_system_wake`, `finalize_expired_removals` (when it actually finalizes
-something), and both `switch_workspace` auto-trigger call sites
+**`WmState::wake_lock_active` — a hard, non-decaying lock, not a per-pid
+one.** `place_new_window`'s workspace-rules auto-switch and every action
+`reveal_frontmost` takes (workspace switch, focused-monitor change,
+refocus/raise) are gated on this single `bool` instead of
+`unconfirmed_pids`. `note_system_wake` sets it synchronously, before any
+probing — closing the same race the previous paragraph fixes, this time
+against `place_new_window`/`reveal_frontmost` rather than
+`finalize_expired_removals`. It's cleared exactly once, from
+`dispatch::dispatch`, for any command that isn't one of the read-only
+queries `command_is_read_only` lists (`tili-menubar`'s own long-poll-driven
+refresh issues exactly those) — never from a reactive NSWorkspace/AX
+notification path like `reveal_current_frontmost`. Per-pid confirmation
+alone isn't strong enough for these two: an app that answers its own
+reconnect probe quickly is "confirmed" almost immediately, but
+`frontmost_app_pid()` can still transiently report a *different*,
+already-confirmed app while the rest of the system's AX/WindowServer
+connections are still settling from the same wake burst — there's no
+per-pid signal that catches that, since the misread pid itself did nothing
+wrong. Not decaying on any timer or per-pid signal is the explicit design
+goal here (not an oversight): the workspace and focused window active at
+the moment of sleep should stay exactly as they were — no auto-switch, no
+auto-refocus — until the user's very next real hotkey press or CLI/socket
+command, however long that takes.
+
+**This replaces an earlier flat/debounced timer entirely, not just retunes
+it.** Two prior designs both gated the same two call sites behind one
+global `wake_grace_until: Option<Instant>` deadline instead of real,
+per-window confirmation: first a single fixed duration (`WAKE_REMOVAL_GRACE`,
+raised from an initial 8s to 90s after real-hardware confirmation that 8s
+was too short), then a debounce-with-cap (`WAKE_GRACE_DEBOUNCE`/
+`WAKE_GRACE_MAX`, pulling the deadline back out on each sign of reconnect
+activity, capped at 180s from the wake instant). Both share the same
+unavoidable trade-off a flat or debounced *timer* has here: sized to
+tolerate a slow reconnect, a fast machine waits needlessly long after every
+wake even once nothing is actually still reconnecting — sized down to fix
+that, a genuinely slow reconnect can still lapse the deadline early and let
+the exact bug back in. Neither problem exists once "ready" means "answered
+a real AX read" instead of "a clock ran out": a fast machine's wait
+shrinks to whatever that read's round-trip actually takes (typically tens
+of milliseconds, not a guessed multi-second constant), and a window whose
+app is still genuinely reconnecting stays blocked for as long as that
+takes, with no upper bound to lapse early against. A pid that never
+responds to the wake-time probe isn't left unconfirmed forever in
+practice, either: `apply_windows_changed` confirms a pid itself the moment
+a scan for it actually returns windows (a real AX event succeeding is
+equally good proof of reconnection as the dedicated probe), so a pid the
+initial probe missed still gets unblocked by its own next
+`WindowsChanged`/resync pass.
+
+`note_system_wake` and both `switch_workspace` auto-trigger call sites
 (`place_new_window`, `reveal_frontmost`) each log a line via `eprintln!` —
 this class of bug has recurred across several releases and only reproduces
 on real hardware after a real sleep/wake cycle, so a log trail of which path
 fired and when is worth more than trying to reason about it statically.
+
+**Screen lock/unlock is a separate event from sleep/wake, and had no
+handling at all until this was diagnosed on real hardware.** Everything
+above is gated on `WmEvent::SystemDidWake`/`NSWorkspaceDidWakeNotification`,
+which macOS only sends when the machine actually suspends. Confirmed with
+real logs that this project's own day-to-day "put the machine to sleep"
+gesture — locking the screen (Control+Cmd+Q / the menu-bar lock icon / an
+idle timeout) and waiting for the display to blank, *not* `pmset sleepnow`,
+lid-close, or Apple-menu Sleep — never triggers that notification at all:
+after performing exactly that gesture, `~/Library/Logs/tili/daemon.err.log`
+had no new `NSWorkspace SystemDidWake received` line. Every fix described
+above was therefore correctly implemented but never actually exercised for
+this specific, most-common trigger — the observed symptom (workspace/focus
+drifting after the screen comes back) was never really about wake-grace
+timing at all; it was about a whole event this daemon didn't listen for.
+
+The fix reuses the same `unconfirmed_pids`/`wake_lock_active` machinery
+rather than inventing a parallel one, via two new events and two new
+`WmState` methods:
+
+- `WmEvent::ScreenLocked` (`com.apple.screenIsLocked`) →
+  `WmState::note_screen_locked` — synchronous, mirroring
+  `note_system_wake`'s synchronous `wake_lock_active = true` half: arms the
+  lock and seeds `unconfirmed_pids` with every currently-tracked window's
+  pid immediately, before anything else. It deliberately does **not** fire
+  the AX probe itself: locking switches the session to `loginwindow`, and
+  other apps' AX connections are expected to stop answering reliably while
+  that's active (the same class of reconnect instability `note_system_wake`
+  already handles for a real sleep, reasoned by analogy — not yet
+  independently confirmed on real hardware the way the sleep/wake gap
+  itself was) — probing here would either read stale data or block for the
+  lock's entire duration, neither of which proves anything about
+  post-unlock readiness.
+- `WmEvent::ScreenUnlocked` (`com.apple.screenIsUnlocked`) →
+  `WmState::note_screen_unlocked` — runs the confirmation probe
+  `note_screen_locked` deferred, now that the user's session (and its AX
+  connections) are expected to genuinely be back. It does **not** touch
+  `wake_lock_active` either way: unlocking isn't itself a hotkey or
+  CLI/socket action, so — same as after a real sleep/wake — the lock only
+  ever clears from `dispatch::dispatch`'s `clear_wake_lock` call, on the
+  user's next real command.
+
+Both new methods share `note_system_wake`'s probe loop directly via a
+private `probe_tracked_windows` helper (fire `WindowProbeHandle::is_responsive`
+concurrently per tracked window, confirm whichever pids respond) — the only
+difference between the three call sites is *when* `wake_lock_active` gets
+armed and *when* the probe runs, not the underlying mechanism.
+`tili_ax::workspace::register_on_main` registers these two via
+`NSDistributedNotificationCenter::defaultCenter()`, not `NSWorkspace`'s own
+notification center — see [tili-ax.md](tili-ax.md) for why a *distributed*
+notification is needed for an undocumented, system-wide, `loginwindow`-posted
+notification like this one, unlike every other event `register_on_main`
+handles.
+
+**The lock/unlock fix above still let two genuinely still-open windows get
+finalized as closed, discovered via real `daemon.err.log` output**:
+`unconfirmed_pids`/`wake_lock_active` block *downstream* reactions
+(`finalize_expired_removals`, `place_new_window`/`reveal_frontmost`'s
+auto-switch) but do nothing about `tili_ax::watch.rs::spawn_event_watcher`'s
+own periodic resync (`WATCHER_RESYNC_INTERVAL`), which kept re-enumerating
+every on-screen pid's windows for the entire lock duration, unmodified. AX
+enumeration for *other* apps can silently come back empty while the session
+is on `loginwindow` — the exact `note_screen_locked` reasoned about, just
+never connected to this resync loop — so a still-genuinely-open window's
+process got scanned mid-lock, came back with zero windows, and
+`WmState::apply_windows_changed` (which has no way to distinguish "really
+closed" from "AX read came back empty right now") put it in
+`pending_removal` right then, ~93s before the observed unlock in the log
+that triggered `finalize_expired_removals`.
+
+The fix has three parts, all in the lock/unlock path already described
+above:
+
+- `spawn_event_watcher`'s own thread now tracks `screen_locked` and skips
+  its periodic resync (both the watcher-attach/detach pass and any
+  `WindowsChanged` sweep) entirely while it's set — see
+  [tili-ax.md](tili-ax.md)'s watch.rs section. This is the actual fix for
+  the false-empty-scan itself: rather than trying to make the downstream
+  gates catch every way a bad scan could reach `WmState`, no AX window
+  enumeration for another app happens at all while locked, so there's
+  nothing to misread.
+- `AppEvent::ScreenUnlocked` forces one real full resync immediately, in
+  the same watcher thread, rather than waiting for the next
+  `WATCHER_RESYNC_INTERVAL`/`FULL_RESYNC_MAX_INTERVAL` tick — this is what
+  actually re-verifies a window `WmState` still has in `pending_removal`
+  from before (or during, in the narrow race this whole fix closes) the
+  lock: `apply_windows_changed` un-pends any window still found in a fresh
+  scan.
+- `WmState::note_screen_unlocked` now also restarts the grace-period clock
+  (the `Instant` in `pending_removal`) on every already-pending entry.
+  This closes a race the first two parts alone don't: the daemon's single
+  `select!` loop (`main.rs`) picks among simultaneously-ready branches at
+  random, so `maintenance_tick`'s unconditional `finalize_expired_removals`
+  call can win against the forced resync's own `WindowsChanged` still
+  sitting undrained in the event channel. Without the reset, an entry that
+  survived the whole lock frozen (well past `removal_grace`) would be
+  finalizable the instant this same function's probe confirms its pid —
+  which says nothing about whether the *window* itself has actually been
+  re-verified yet, only that the *process* answered an AX read. Resetting
+  the clock means `finalize_expired_removals` can't act on it until a real
+  `removal_grace` window has elapsed *after* unlock, giving the forced
+  resync's own re-scan a real chance to un-pend it first.
+
+**The lock/unlock finalize-as-closed fix applies symmetrically to a real
+sleep/wake, not just a lock.** Nothing about the bug above is actually
+specific to `loginwindow`/screen lock — a long real sleep advances `Instant`
+exactly as much as a lock sitting frozen does (macOS keeps it running across
+suspend), so any window already in `pending_removal` when the machine
+suspends would have a clock read as far past `removal_grace` as an
+hours-long sleep lasted, the moment `note_system_wake`'s probe confirms its
+pid. `WmEvent::SystemDidWake` gets both of the same two layers
+`ScreenUnlocked` above does:
+
+- `spawn_event_watcher` forces one real full resync immediately at *both*
+  places it can observe a wake — the real `AppEvent::SystemDidWake` branch
+  and its own `recv_timeout`-based suspected-sleep detection (see
+  [tili-ax.md](tili-ax.md)'s watch.rs section) — rather than only one of
+  them. Unlike lock/unlock, sleep/wake has no "before" event this codebase
+  listens for to gate a resync-skipping window against (nothing here reacts
+  to `NSWorkspaceWillSleepNotification`), so there's no `screen_locked`-style
+  suppression to add on the sleep side — only the wake-side forced resync,
+  mirroring `ScreenUnlocked`'s half of the fix. The real notification and
+  the synthetic timeout-based one are two independent send sites, and real
+  hardware shows either can be the first to actually fire for a given wake
+  (the timeout-based one routinely wins for an ordinary sleep, since the
+  real notification has to cross an extra hop — but a real sleep short
+  enough to stay under `SUSPECTED_SLEEP_GAP` only ever reaches the real
+  notification's branch), so both force their own resync rather than
+  relying on either one alone.
+- `WmState::note_system_wake` now also restarts the grace-period clock on
+  every already-pending `pending_removal` entry, via the same private
+  `restart_pending_removal_clocks` helper `note_screen_unlocked` uses —
+  identical reasoning, just for a real sleep instead of a lock.
+
+## `switch_workspace`'s concurrent AX writes
+
+`switch_workspace` parks/relays-out/repositions potentially many windows on
+every call — one AX round-trip per window if done one at a time, which is
+real, user-visible deadtime between the hotkey firing and the screen
+actually finishing its update, especially on a workspace with several
+windows. Its own `park`/`relayout_monitor`/`reposition_floating_for_monitor`
+calls are replaced with `switch_workspace`-only concurrent variants
+(`park_concurrently`/`relayout_monitor_concurrently`/
+`reposition_floating_for_monitor_concurrently`), which share one helper,
+`write_windows_concurrently`: any bookkeeping that touches shared `WmState`
+fields (settling a stale tween, capturing manual floating geometry,
+resolving a parking origin, the cascade-offset math a first-time floating
+placement needs) still runs sequentially first, since none of that is safe
+from multiple threads at once — only the final, per-window AX write (a
+`set_position`/`set_frame` call to a specific window's `AXUIElement`) fires
+on its own `std::thread::spawn`, all joined before `write_windows_concurrently`
+returns. AX calls to different processes are independent mach IPC
+round-trips (confirmed safe to fire concurrently — the same precedent
+AeroSpace's own per-app-thread model relies on), so the total time to reach
+"every window has its new frame" drops from summing every window's
+round-trip to just the slowest one. Plain OS threads rather than
+`tokio::task::spawn_blocking`: every caller here runs synchronously inside
+`dispatch()` (called directly from the `select!` loop, not `.await`-ed), so
+there's no async boundary already in place to join a spawned task through.
+Nothing outlives `write_windows_concurrently`'s own return — every thread is
+joined before the function hands back its windows — so there's no
+fire-and-forget job lifecycle to manage, unlike a decoupled-return design
+would need. The relative *ordering* `switch_workspace` already had (bring
+the incoming workspace's windows on screen before parking the outgoing
+ones, so there's never a moment with nothing shown but the desktop) is
+unchanged — only the AX writes *within* each of those steps became
+concurrent, not the steps themselves.

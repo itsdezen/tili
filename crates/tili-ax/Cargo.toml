@@ -31,6 +31,12 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSDictionary",
     "NSValue",
     "block2",
+    # NSDistributedNotificationCenter: screen lock/unlock
+    # (`com.apple.screenIsLocked`/`screenIsUnlocked`) is a distributed, not
+    # NSWorkspace, notification — see `workspace::register_on_main`'s doc
+    # comment.
+    "NSDistributedNotificationCenter",
+    "bitflags",
 ] }
 block2 = "0.6"
 # Only used to hop onto the real main thread from `list_monitors` (a

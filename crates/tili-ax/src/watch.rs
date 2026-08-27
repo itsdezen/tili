@@ -82,6 +82,17 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
 /// list and rationale are documented in `docs/architecture/invariants.md`.
 const WATCHER_RESYNC_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How much longer than `WATCHER_RESYNC_INTERVAL` a single `recv_timeout`
+/// wait has to take before it's treated as proof the process was actually
+/// suspended (a real sleep), not just an ordinary idle tick — see the
+/// `Err(RecvTimeoutError::Timeout)` branch below. Comfortably above any
+/// normal scheduling jitter on a live thread (which never overshoots a 2s
+/// deadline by more than a few ms), and comfortably below the shortest sleep
+/// a user would actually trigger (lid-close/`pmset sleepnow`/Apple menu
+/// Sleep all suspend for well over this), so it can't false-positive on
+/// ordinary load and won't miss a real one.
+const SUSPECTED_SLEEP_GAP: Duration = Duration::from_secs(5);
+
 /// How much a genuine `AppEvent` (app launch/terminate) pushes back the next
 /// expensive full-window resync (see `FULL_RESYNC_MAX_INTERVAL`) — real
 /// activity means the cheap tick and push notifications are already
@@ -139,16 +150,39 @@ pub enum WmEvent {
     FrontmostAppChanged {
         pid: i32,
     },
-    /// The system just woke from sleep (`NSWorkspaceDidWakeNotification`,
-    /// registered via `workspace::register_on_main` — see that function's
-    /// doc comment for why main-thread/`queue: .main` registration was
-    /// needed for this to be delivered reliably at all). Every AX-observing
+    /// The system just woke from sleep — usually
+    /// `NSWorkspaceDidWakeNotification` (registered via
+    /// `workspace::register_on_main` — see that function's doc comment for
+    /// why main-thread/`queue: .main` registration was needed for this to be
+    /// delivered reliably at all), but also sent synthetically by this
+    /// module's own `spawn_event_watcher` loop the instant it detects its
+    /// `recv_timeout` wait ran suspiciously long (see `SUSPECTED_SLEEP_GAP`)
+    /// — that path can land *before* the real notification does, closing a
+    /// real ordering race against `resync_watchers`. Every AX-observing
     /// process can take several seconds to reconnect to the WindowServer
     /// after wake, so a still-open window can easily miss one
     /// `apply_windows_changed` scan right after this fires — see
     /// `WmState::note_system_wake`'s doc comment for what reacting to this
-    /// actually does about it.
+    /// actually does about it. Both send sites in `spawn_event_watcher` also
+    /// force a real full resync immediately, mirroring `ScreenUnlocked`
+    /// below — see each send site's own comment. Harmless to receive more
+    /// than once for the same real wake (`note_system_wake` is idempotent).
     SystemDidWake,
+    /// The screen just locked (`com.apple.screenIsLocked`, forwarded from
+    /// `AppEvent::ScreenLocked` — registered via
+    /// `workspace::register_on_main`'s `NSDistributedNotificationCenter`
+    /// setup, *not* the same notification center `SystemDidWake` above
+    /// uses). Confirmed on real hardware to be the event that actually
+    /// fires for how this project's own testing showed the user "puts the
+    /// machine to sleep" day to day — locking and waiting for the display
+    /// to blank, which never triggers a real `NSWorkspaceDidWakeNotification`
+    /// pair at all. See `WmState::note_screen_locked`'s doc comment for
+    /// what reacting to this does.
+    ScreenLocked,
+    /// The screen just unlocked (`com.apple.screenIsUnlocked`, forwarded
+    /// from `AppEvent::ScreenUnlocked`) — see `ScreenLocked` and
+    /// `WmState::note_screen_unlocked`.
+    ScreenUnlocked,
 }
 
 /// Starts watching for window/app lifecycle events and returns a channel
@@ -208,7 +242,20 @@ pub fn spawn_event_watcher(
         // polled `AXFocusedApplication` query this replaced, which needed
         // this same dedup to survive its own read-timing quirks.
         let mut last_frontmost_pid: Option<i32> = None;
+        // True from `AppEvent::ScreenLocked` until the matching
+        // `AppEvent::ScreenUnlocked` — confirmed on real hardware (see
+        // `docs/architecture/tili-daemon.md`'s lock/unlock section) that AX
+        // enumeration for *other* apps can silently come back empty while
+        // the session is switched to loginwindow, which made this thread's
+        // own periodic resync (below) misread a still-open window as closed
+        // and hand `WmState` a false `WindowsChanged` for it — indistinguishable
+        // downstream from a real close. Gating the resync itself here, not
+        // just its downstream effects, means a locked screen produces no AX
+        // window reads for other apps at all, so there's nothing left to
+        // misread.
+        let mut screen_locked = false;
         loop {
+            let tick_started_at = Instant::now();
             let recv_result = app_rx.recv_timeout(WATCHER_RESYNC_INTERVAL);
             match recv_result {
                 Ok(AppEvent::Launched { pid, bundle_id }) => {
@@ -243,24 +290,120 @@ pub fn spawn_event_watcher(
                 }
                 Ok(AppEvent::SystemDidWake) => {
                     let _ = event_tx.send(WmEvent::SystemDidWake);
+                    // Mirrors `AppEvent::ScreenUnlocked` below: force one
+                    // real full resync immediately rather than waiting for
+                    // the next periodic tick, so a still-open window isn't
+                    // misread as closed for up to `WATCHER_RESYNC_INTERVAL`
+                    // longer than necessary — see `WmState::note_system_wake`'s
+                    // doc comment for the other half of closing that race
+                    // (resetting each `pending_removal` entry's grace-period
+                    // clock). Usually redundant with the `Err(Timeout)`
+                    // branch below, which real hardware shows is routinely
+                    // first to detect a real sleep — but not guaranteed:
+                    // this is the only branch that fires at all for a real
+                    // sleep too short for `SUSPECTED_SLEEP_GAP` to catch.
+                    // Skipped while the screen is locked, same reasoning as
+                    // `screen_locked`'s doc comment above: this wake may
+                    // have landed while still sitting at the lock screen,
+                    // where AX reads for other apps can't be trusted either.
+                    if !screen_locked {
+                        last_full_resync = Instant::now();
+                        debounce_deadline = None;
+                        resync_watchers(&rt, &event_tx, &mut watched, &mut unwatchable, true);
+                    }
+                }
+                Ok(AppEvent::ScreenLocked) => {
+                    screen_locked = true;
+                    let _ = event_tx.send(WmEvent::ScreenLocked);
+                }
+                Ok(AppEvent::ScreenUnlocked) => {
+                    screen_locked = false;
+                    let _ = event_tx.send(WmEvent::ScreenUnlocked);
+                    // The AX server is expected to be genuinely back by now
+                    // (same assumption `WmState::note_screen_unlocked`
+                    // documents) — run one real full resync immediately,
+                    // rather than waiting for the next periodic tick, so
+                    // `WmState` gets actual ground truth (a real
+                    // `list_windows_for_pid` scan, not just a per-pid AX
+                    // probe) as soon as possible after unlock. This is what
+                    // lets `apply_windows_changed` un-pend any
+                    // `pending_removal` entry that predates the lock (see
+                    // its "present in this scan after all" removal) before
+                    // `finalize_expired_removals` gets a chance to act on
+                    // it — see `WmState::note_screen_unlocked`'s doc comment
+                    // for the other half of closing that race (resetting
+                    // each entry's grace-period clock).
+                    last_full_resync = Instant::now();
+                    debounce_deadline = None;
+                    resync_watchers(&rt, &event_tx, &mut watched, &mut unwatchable, true);
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let now = Instant::now();
-                    let debounce_ready = debounce_deadline.is_some_and(|due| now >= due);
-                    let cap_exceeded =
-                        now.duration_since(last_full_resync) >= FULL_RESYNC_MAX_INTERVAL;
-                    let full_window_resync = debounce_ready || cap_exceeded;
-                    if full_window_resync {
-                        last_full_resync = now;
-                        debounce_deadline = None;
+                    // A `recv_timeout` wait that took meaningfully longer
+                    // than the `WATCHER_RESYNC_INTERVAL` it was given means
+                    // this thread (and the whole process) was suspended for
+                    // a real system sleep, not just idling — `Instant`
+                    // keeps advancing across suspend on macOS, so resuming
+                    // lands here with the deadline already long expired.
+                    // Confirmed on real hardware that this branch — not
+                    // `AppEvent::SystemDidWake` below — is routinely the
+                    // *first* thing this thread observes after a real wake:
+                    // `AppEvent::SystemDidWake` has to cross an extra hop
+                    // (main thread -> `register_on_main`'s channel -> this
+                    // thread's next `app_rx.recv`) that `resync_watchers`
+                    // below doesn't wait for, so it can easily still be
+                    // sitting unread in `app_rx` at this exact moment.
+                    // `resync_watchers` is about to do a live AX read for
+                    // every watched pid, and immediately after a real wake
+                    // those reads can come back empty simply because the
+                    // app hasn't reconnected to the WindowServer/AX yet —
+                    // exactly what `WmState::note_system_wake` exists to
+                    // protect against, but only once it's actually run.
+                    // Sending the synthetic wake here, before
+                    // `resync_watchers`, guarantees `note_system_wake` has
+                    // already marked every currently-tracked window
+                    // unconfirmed by the time any `WindowsChanged` this
+                    // sweep produces gets processed — both land in the same
+                    // `event_tx` channel, in send order, and the daemon's
+                    // single-consumer select loop only ever processes one
+                    // to completion before the next. The real notification
+                    // still arrives moments later and is harmless to react
+                    // to twice (`note_system_wake`'s probe is idempotent).
+                    let suspected_sleep = tick_started_at.elapsed() > SUSPECTED_SLEEP_GAP;
+                    if suspected_sleep {
+                        let _ = event_tx.send(WmEvent::SystemDidWake);
                     }
-                    resync_watchers(
-                        &rt,
-                        &event_tx,
-                        &mut watched,
-                        &mut unwatchable,
-                        full_window_resync,
-                    );
+                    // Skip the resync entirely while the screen is locked —
+                    // see `screen_locked`'s doc comment above for why any AX
+                    // window read here can't be trusted right now. Leaves
+                    // `last_full_resync`/`debounce_deadline` untouched;
+                    // `AppEvent::ScreenUnlocked` above resets both itself
+                    // once it runs its own forced resync, so the normal
+                    // cadence just picks back up from there.
+                    if !screen_locked {
+                        let now = Instant::now();
+                        let debounce_ready = debounce_deadline.is_some_and(|due| now >= due);
+                        let cap_exceeded =
+                            now.duration_since(last_full_resync) >= FULL_RESYNC_MAX_INTERVAL;
+                        // A suspected real sleep forces a full resync right
+                        // now too, same as the synthetic wake just sent
+                        // above — mirrors `AppEvent::ScreenUnlocked`'s forced
+                        // resync rather than leaving this to the ordinary
+                        // debounce/cap cadence, which could otherwise still
+                        // defer up to `FULL_RESYNC_DEBOUNCE` longer before
+                        // actually re-reading anything post-wake.
+                        let full_window_resync = debounce_ready || cap_exceeded || suspected_sleep;
+                        if full_window_resync {
+                            last_full_resync = now;
+                            debounce_deadline = None;
+                        }
+                        resync_watchers(
+                            &rt,
+                            &event_tx,
+                            &mut watched,
+                            &mut unwatchable,
+                            full_window_resync,
+                        );
+                    }
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             }

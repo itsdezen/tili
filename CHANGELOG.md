@@ -8,6 +8,95 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Post-wake readiness and the workspace-jump bug were both symptoms of the
+  same guessed timer** — `WAKE_GRACE_MAX`/`WAKE_GRACE_DEBOUNCE` replaced
+  entirely with a real per-window AX probe fired the instant wake is
+  observed, confirming each pid individually (`WmState::unconfirmed_pids`)
+  instead of gating everything behind one global deadline. A fast machine's
+  "wait for ready" now shrinks to the probe's actual round-trip instead of a
+  worst-case constant; a workspace can no longer auto-switch on behalf of a
+  pid that hasn't proven it's reconnected, however long that takes, instead
+  of being freed the moment an arbitrary clock ran out.
+- **Still-open windows without a matching `workspace-rules` entry got
+  relaid-out into the wrong spot after wake, and the active workspace/focus
+  could still drift away from what was showing right before sleep.** Two
+  fixes: the background watcher's own resync backstop
+  (`tili-ax`'s `resync_watchers`) could reliably win a race against the real
+  wake notification and rescan every window before `note_system_wake` had a
+  chance to protect any of them — it now self-detects a real sleep (its
+  `recv_timeout` wait running far longer than requested) and forwards a
+  synthetic wake signal first, closing the gap. And `place_new_window`/
+  `reveal_frontmost`'s auto-switch is no longer gated per-app-pid at all —
+  a hard `WmState::wake_lock_active` lock now blocks every auto-switch and
+  auto-refocus unconditionally from the moment wake is observed until the
+  next real hotkey- or socket-triggered command, since a per-pid probe
+  responding quickly doesn't mean the rest of the system's AX/WindowServer
+  state has actually settled.
+- **Switching workspaces had visible deadtime between the hotkey and the
+  screen actually updating** on workspaces with several windows —
+  `switch_workspace`'s park/relayout/reposition AX writes ran one window at
+  a time. They now fire concurrently (one thread per window, joined before
+  the switch returns), so the wait drops from the sum of every window's
+  round-trip to roughly the slowest one.
+- **All three fixes above never actually ran for this project's own
+  day-to-day "sleep," because that gesture isn't a real sleep.** Every one
+  of them is gated on `NSWorkspaceDidWakeNotification`, which macOS only
+  sends when the machine genuinely suspends — confirmed via real
+  `daemon.err.log` output that locking the screen and waiting for the
+  display to blank (this project's actual daily trigger, as opposed to
+  `pmset sleepnow`/lid-close/Apple-menu Sleep) never produces that
+  notification at all. Added `WmEvent::ScreenLocked`/`ScreenUnlocked`
+  (`com.apple.screenIsLocked`/`screenIsUnlocked`, via a new
+  `NSDistributedNotificationCenter` registration — a screen lock isn't an
+  `NSWorkspace` event) reusing the exact same `unconfirmed_pids`/
+  `wake_lock_active` machinery above rather than a parallel mechanism:
+  locking arms the freeze and marks every tracked window unconfirmed
+  immediately (no AX probe yet — the session is switched to `loginwindow`
+  while locked, where AX reads can't be trusted), and unlocking runs the
+  deferred probe once the session — and its AX connections — are actually
+  back.
+- **A window could stay parked off-screen indefinitely after unlock, only
+  reappearing after switching workspaces back and forth several times** —
+  `AxWindow::set_frame`/`set_position`/`set_size` discarded the AX write's
+  `Result` (`let _ =`) and advanced the cached frame to the target
+  unconditionally, even when the write itself had failed. A write briefly
+  failing right after unlock (the app still reconnecting to AX/WindowServer)
+  left the cache lying about the window's real position; every later call's
+  no-op-if-unchanged guard then compared against that lying cache, saw a
+  false match, and silently skipped writing the window back on-screen. All
+  three now only advance the cache on a successful write, so a failed write
+  leaves the cache honest and the very next call retries it for real.
+- **Two genuinely still-open windows got finalized as closed shortly after
+  unlocking the screen** — confirmed via real `daemon.err.log` output
+  showing them finalized ~93s "pending," essentially the entire lock
+  duration. The screen-lock freeze above blocks `finalize_expired_removals`
+  and the auto-switch paths, but did nothing about the background watcher's
+  own periodic resync (`tili-ax`'s `resync_watchers`), which kept
+  re-enumerating every on-screen app's windows throughout the lock — AX
+  reads for *other* apps can silently come back empty while the session is
+  on `loginwindow`, and a scan that comes back empty was indistinguishable
+  from a real close, landing the window in `pending_removal` mid-lock. The
+  watcher thread now tracks lock state and skips this resync entirely while
+  locked, forces one real full resync the instant unlock is observed
+  (rather than waiting for the next tick), and unlocking also restarts the
+  grace-period clock on any already-pending window — closing a race where
+  the daemon's single event loop could otherwise finalize an old pending
+  entry before that forced resync had actually re-verified it.
+- **The same finalize-as-closed bug above can also happen on a genuine
+  sleep, not just a screen lock** — a long real sleep advances `Instant`
+  just as much as a lock sitting frozen does, so any window already in
+  `pending_removal` before the machine suspended would have a clock read as
+  far past `removal_grace` the moment it wakes, regardless of the lock/wake
+  distinction. Both of the lock/unlock fix's layers now apply symmetrically
+  to `WmEvent::SystemDidWake`: the watcher thread forces one real full
+  resync immediately on wake (at both places it can observe one — the real
+  `NSWorkspaceDidWakeNotification` and its own `recv_timeout`-based sleep
+  detection — rather than only one of them), and `WmState::note_system_wake`
+  now also restarts the grace-period clock on every already-pending window,
+  same as `note_screen_unlocked`.
+
 ## [0.7.2] - 2026-08-24
 
 ### Fixed

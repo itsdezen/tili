@@ -9,29 +9,57 @@ use objc2_app_kit::{
     NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication,
     NSWorkspace,
 };
-use objc2_foundation::{NSNotification, NSOperationQueue};
+use objc2_foundation::{
+    NSDistributedNotificationCenter, NSNotification, NSOperationQueue, NSString,
+};
 
 /// A process launching, quitting, or becoming the system-wide frontmost
-/// application, or the system waking from sleep, as reported by
-/// `NSWorkspace`.
+/// application, the system waking from sleep, or the screen
+/// locking/unlocking — the first four as reported by `NSWorkspace`,
+/// `ScreenLocked`/`ScreenUnlocked` as reported by
+/// `NSDistributedNotificationCenter` instead (see `register_on_main`'s doc
+/// comment on why that's a distinct notification center, not
+/// `NSWorkspace`'s).
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    Launched { pid: i32, bundle_id: Option<String> },
-    Terminated { pid: i32 },
-    Activated { pid: i32 },
+    Launched {
+        pid: i32,
+        bundle_id: Option<String>,
+    },
+    Terminated {
+        pid: i32,
+    },
+    Activated {
+        pid: i32,
+    },
     SystemDidWake,
+    /// `com.apple.screenIsLocked`. Confirmed on real hardware that this is
+    /// *not* the same event as `SystemDidWake`/`NSWorkspaceDidWakeNotification`
+    /// — locking the screen (Control+Cmd+Q, the menu-bar lock icon, or an
+    /// idle timeout) and waiting for the display to blank, which is how
+    /// this project's own testing showed the user actually "puts the
+    /// machine to sleep" day to day, never fires the `NSWorkspace` wake
+    /// notification at all, since the machine itself never actually
+    /// suspends. See `tili-daemon`'s `WmState::note_screen_locked` for what
+    /// reacting to this does.
+    ScreenLocked,
+    /// `com.apple.screenIsUnlocked` — see `ScreenLocked`'s doc comment and
+    /// `WmState::note_screen_unlocked`.
+    ScreenUnlocked,
 }
 
 /// Registers `NSWorkspaceDidLaunchApplicationNotification`/
 /// `DidTerminateApplication`/`DidActivateApplication`/`DidWakeNotification`
-/// on the real process main thread, with `queue: .main` delivery, and
-/// returns immediately (no thread spawned, no `CFRunLoop` pumped here) —
-/// `NSApplication::run()`, called by the caller afterward, is what pumps
-/// the main run loop that delivers these blocks. Must be called after a
-/// real `NSApplication` instance exists and before `run()` starts, on the
-/// real main thread (the `MainThreadMarker` parameter documents that
-/// requirement; the `objc2-app-kit` calls themselves aren't gated behind
-/// it).
+/// (via `NSWorkspace`'s own notification center) and
+/// `com.apple.screenIsLocked`/`screenIsUnlocked` (via
+/// `NSDistributedNotificationCenter`) on the real process main thread, with
+/// `queue: .main` delivery, and returns immediately (no thread spawned, no
+/// `CFRunLoop` pumped here) — `NSApplication::run()`, called by the caller
+/// afterward, is what pumps the main run loop that delivers these blocks.
+/// Must be called after a real `NSApplication` instance exists and before
+/// `run()` starts, on the real main thread (the `MainThreadMarker`
+/// parameter documents that requirement; the `objc2-app-kit`/
+/// `objc2-foundation` calls themselves aren't gated behind it).
 ///
 /// Main-thread registration with `queue: .main` is load-bearing, not
 /// incidental: confirmed on real hardware that `DidLaunchApplication`/
@@ -44,6 +72,21 @@ pub enum AppEvent {
 /// separately confirmed reliably delivered on real hardware, replacing
 /// `tili-ax/src/watch.rs`'s periodic poll of `frontmost_app_pid()`
 /// for `WmEvent::FrontmostAppChanged` — see that event's doc comment.
+///
+/// The screen-lock pair uses `NSDistributedNotificationCenter::defaultCenter()`
+/// instead of `NSWorkspace`'s center — `com.apple.screenIsLocked`/
+/// `screenIsUnlocked` are undocumented, system-wide distributed
+/// notifications (posted by `loginwindow`, not `NSWorkspace`), the
+/// long-standing community-known way to observe the screen lock/unlock the
+/// user actually triggers day to day (Control+Cmd+Q, the menu-bar lock
+/// icon, or an idle timeout) — confirmed on real hardware that this is a
+/// *materially different* event from `NSWorkspaceDidWakeNotification`:
+/// locking and waiting for the display to blank never fires the
+/// `NSWorkspace` sleep/wake pair at all, since the machine itself never
+/// actually suspends. `NSDistributedNotificationCenter` is a subclass of
+/// `NSNotificationCenter` (its own `addObserverForName:object:queue:usingBlock:`
+/// is inherited, not reimplemented), so the same block/`queue: .main`
+/// registration shape applies unchanged.
 pub fn register_on_main(_mtm: MainThreadMarker) -> Receiver<AppEvent> {
     let (tx, rx) = std::sync::mpsc::channel();
     // SAFETY: `sharedWorkspace`/`notificationCenter` are safe to call from
@@ -103,6 +146,31 @@ pub fn register_on_main(_mtm: MainThreadMarker) -> Receiver<AppEvent> {
             None,
             Some(&main_queue),
             &wake_block,
+        );
+
+        let distributed_center = NSDistributedNotificationCenter::defaultCenter();
+        let screen_locked_name = NSString::from_str("com.apple.screenIsLocked");
+        let locked_tx = tx.clone();
+        let locked_block = RcBlock::new(move |_note: NonNull<NSNotification>| {
+            let _ = locked_tx.send(AppEvent::ScreenLocked);
+        });
+        distributed_center.addObserverForName_object_queue_usingBlock(
+            Some(&screen_locked_name),
+            None,
+            Some(&main_queue),
+            &locked_block,
+        );
+
+        let screen_unlocked_name = NSString::from_str("com.apple.screenIsUnlocked");
+        let unlocked_tx = tx.clone();
+        let unlocked_block = RcBlock::new(move |_note: NonNull<NSNotification>| {
+            let _ = unlocked_tx.send(AppEvent::ScreenUnlocked);
+        });
+        distributed_center.addObserverForName_object_queue_usingBlock(
+            Some(&screen_unlocked_name),
+            None,
+            Some(&main_queue),
+            &unlocked_block,
         );
     }
     rx

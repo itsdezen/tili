@@ -57,25 +57,13 @@ const ANIMATION_TICK_PERIOD_HIGH: Duration = Duration::from_millis(8);
 /// instead of sleeping for real.
 const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
-/// How long each individual sign of post-wake reconnect activity (a window
-/// vanishing into `pending_removal`, or one reappearing out of it — see
-/// `note_wake_activity`) extends `wake_grace_until` by, and the bound
-/// (`WAKE_GRACE_MAX`) on how far past the wake instant that extension can
-/// ever reach. Mirrors `tili-ax/src/watch.rs`'s `FULL_RESYNC_DEBOUNCE`/
-/// `FULL_RESYNC_MAX_INTERVAL` shape: a fixed flat timer either makes fast
-/// machines wait needlessly long after wake, or — sized down to avoid
-/// that — lapses before a genuinely slow-to-reconnect app gets back, at
-/// which point its window gets wrongly finalized as closed and then
-/// re-discovered as "new," re-triggering any matching `workspace-rules`
-/// entry (an unwanted workspace jump). Debouncing off real reconnect
-/// signals instead means the grace period naturally tracks how long
-/// reconnection is actually still happening, on that specific wake. Both
-/// values are proposals pending real-hardware validation — this repo's own
-/// history validated the previous flat timer's value (8s, then 90s) only
-/// after several rounds of real sleep/wake testing; these two haven't had
-/// that yet.
-const WAKE_GRACE_DEBOUNCE: Duration = Duration::from_secs(3);
-const WAKE_GRACE_MAX: Duration = Duration::from_secs(180);
+// Post-wake reconnection used to be gated by a flat/debounced timer
+// (`WAKE_GRACE_MAX`/`WAKE_GRACE_DEBOUNCE`) — a guessed duration standing in
+// for "has this app's AX connection actually come back yet." `note_system_wake`
+// now answers that directly instead: it fires a real AX probe at every
+// tracked window concurrently the instant wake is observed, and
+// `WmState::unconfirmed_pids` tracks — per pid, not as one global episode —
+// which ones haven't responded yet. See `note_system_wake`'s doc comment.
 
 /// How long a pid stays in `WmState::pending_launch_pids` after
 /// `AppLaunched` before being dropped even without ever getting a window —
@@ -869,23 +857,40 @@ pub struct WmState {
     /// doesn't know whether anything else is still open. Cleared in
     /// `remove_placement` alongside `floating_placed`.
     floating_centered: HashSet<WindowId>,
-    /// The end of the current post-wake grace episode — while
-    /// `Instant::now()` is still before this (`wake_grace_active`),
-    /// `finalize_expired_removals` uses `WAKE_GRACE_MAX` instead of
-    /// `removal_grace`, and `place_new_window`/`reveal_frontmost` suppress
-    /// their auto-switch. Set by `note_system_wake` to `now +
-    /// WAKE_GRACE_MAX`, then pulled *earlier* by `note_wake_activity` as
-    /// reconnect activity is observed (capped at that same `WAKE_GRACE_MAX`
-    /// ceiling) — see that method's doc comment. `None` the rest of the
-    /// time.
-    wake_grace_until: Option<Instant>,
-    /// The instant the current post-wake grace episode began — the anchor
-    /// `note_wake_activity` measures `WAKE_GRACE_MAX` from, since
-    /// `wake_grace_until` itself keeps moving. Set alongside
-    /// `wake_grace_until` by `note_system_wake`; not reset when
-    /// `note_wake_activity` extends the deadline, only when a fresh wake
-    /// starts a new episode.
-    wake_started_at: Option<Instant>,
+    /// Pids `note_system_wake`'s AX probe hasn't confirmed as reconnected
+    /// yet — populated with every currently-tracked window's pid the
+    /// instant a system wake is observed, then pulled out one at a time as
+    /// each pid's probe responds (or, failing that, whenever a later real
+    /// AX event for that pid succeeds — see `apply_windows_changed`).
+    /// `finalize_expired_removals` won't finalize a pending-removal window
+    /// whose pid is still in here — per-pid, not gated on one global
+    /// episode. Empty the rest of the time (including before the first
+    /// wake), so every check against it defaults to "confirmed" when
+    /// nothing's actually pending confirmation. Unlike `wake_lock_active`
+    /// below, this alone does *not* gate `place_new_window`/
+    /// `reveal_frontmost`'s auto-switch — see that field's doc comment for
+    /// why a per-pid signal isn't strong enough for that.
+    unconfirmed_pids: HashSet<i32>,
+    /// True from the instant `note_system_wake` observes a real system
+    /// wake until the next genuine `dispatch()`-routed command (hotkey or a
+    /// mutating socket command — see `clear_wake_lock`). While active,
+    /// `place_new_window`'s workspace-rules auto-switch and every action
+    /// `reveal_frontmost` would otherwise take (workspace switch,
+    /// focused-monitor change, refocus/raise) are hard-disabled outright,
+    /// rather than gated per-pid like `unconfirmed_pids` above. Confirmed
+    /// on real hardware that per-pid gating alone isn't enough: an app that
+    /// answers its own reconnect probe quickly is "confirmed" almost
+    /// immediately, but `frontmost_app_pid()` can still transiently report
+    /// the *wrong* already-confirmed app while the rest of the system's
+    /// AX/WindowServer connections are still settling from the same wake —
+    /// `reveal_frontmost` has no way to tell that misread apart from a
+    /// genuine Cmd-Tab using per-pid state alone. Deliberately doesn't
+    /// decay on any timer or per-pid signal — only an unambiguous real user
+    /// action (never a reactive NSWorkspace/AX notification path, even a
+    /// click-driven `reveal_current_frontmost` call) is trusted to end it,
+    /// so the workspace/focused window active at the moment of sleep stays
+    /// exactly as they were until the user actually does something.
+    wake_lock_active: bool,
     /// Rules `apply_config` skipped on its *most recent* call (not a
     /// lifetime accumulation — cleared and rebuilt on every call), mirroring
     /// the `eprintln!` already logged at each skip site. Exists so
@@ -944,8 +949,8 @@ impl Default for WmState {
             switch_epoch: 0,
             floating_placed: HashSet::new(),
             floating_centered: HashSet::new(),
-            wake_grace_until: None,
-            wake_started_at: None,
+            unconfirmed_pids: HashSet::new(),
+            wake_lock_active: false,
             config_warnings: Vec::new(),
         }
     }
@@ -961,11 +966,27 @@ impl WmState {
     /// this too, so it's rechecked even with no window events at all.
     pub fn finalize_expired_removals(&mut self) {
         let now = Instant::now();
-        let grace = self.effective_removal_grace(now);
+        let grace = self.removal_grace;
+        // A window whose pid is still `unconfirmed_pids` (its app hasn't
+        // proven it's reconnected to AX/WindowServer since the last wake —
+        // see `note_system_wake`) never finalizes here, however long it's
+        // been pending: it stays blocked until that pid actually responds,
+        // rather than being freed after a guessed timeout regardless of
+        // whether reconnection is actually done. `is_none_or` (rather than
+        // requiring a cached `AxWindow`) is only reached in practice for a
+        // window that's already been dropped from `self.windows` some
+        // other way — every ordinary pending-removal window still has one,
+        // since only this function's own removal below ever drops it.
         let expired: Vec<WindowId> = self
             .pending_removal
             .iter()
-            .filter(|&(_, &since)| now.duration_since(since) >= grace)
+            .filter(|&(&id, &since)| {
+                now.duration_since(since) >= grace
+                    && self
+                        .windows
+                        .get(&id)
+                        .is_none_or(|w| self.is_pid_confirmed(w.pid()))
+            })
             .map(|(&id, _)| id)
             .collect();
         if expired.is_empty() {
@@ -974,9 +995,8 @@ impl WmState {
         for id in &expired {
             if let Some(&since) = self.pending_removal.get(id) {
                 eprintln!(
-                    "tili-daemon: finalizing window {id} as closed after {:?} pending (grace={grace:?}, wake_grace_active={})",
-                    now.duration_since(since),
-                    self.wake_grace_active(now)
+                    "tili-daemon: finalizing window {id} as closed after {:?} pending (grace={grace:?})",
+                    now.duration_since(since)
                 );
             }
         }
@@ -1002,63 +1022,204 @@ impl WmState {
     }
 
     /// Records that the system just woke from sleep
-    /// (`WmEvent::SystemDidWake`) — starts a new wake-grace episode capped
-    /// at `WAKE_GRACE_MAX` from this instant. While the episode is active
-    /// (`wake_grace_active`), `finalize_expired_removals` uses that boosted
-    /// grace instead of `removal_grace`, so a window whose owning app hasn't
-    /// reconnected to the WindowServer/AX yet doesn't get finalized as
-    /// closed and then re-placed as brand new, and `reveal_frontmost`
-    /// distrusts `frontmost_app_pid()` reads for that same window. Actual
-    /// reconnect activity (see `note_wake_activity`) can pull the episode's
-    /// end earlier than the full `WAKE_GRACE_MAX`, or extend it back out —
-    /// but never past this call's `WAKE_GRACE_MAX` ceiling.
-    pub fn note_system_wake(&mut self) {
-        eprintln!("tili-daemon: system woke, granting up to {WAKE_GRACE_MAX:?} wake grace");
+    /// (`WmEvent::SystemDidWake`) — immediately fires a cheap AX probe at
+    /// every currently-tracked window's owning pid, concurrently
+    /// (`tokio::task::spawn_blocking`, one task per window), and confirms
+    /// whichever pids respond. Replaces the old flat/debounced
+    /// `WAKE_GRACE_MAX`/`WAKE_GRACE_DEBOUNCE` timer entirely: there's no
+    /// "grace episode" left to lapse or extend — a window proves itself
+    /// ready by actually answering an AX read, not by a clock running out,
+    /// so a fast machine's wait shrinks to whatever that read's real
+    /// round-trip takes instead of a guessed constant.
+    ///
+    /// A pid that doesn't respond stays in `unconfirmed_pids` — only that
+    /// pid, not the whole daemon — until either a later probe would
+    /// confirm it (nothing re-probes automatically; see below) or a real
+    /// AX event for it succeeds first: `apply_windows_changed` confirms a
+    /// pid itself once a scan for it actually returns windows, which
+    /// covers the pid arriving via its own `WindowsChanged`/resync path
+    /// even if this function's own probe missed it. `finalize_expired_removals`
+    /// won't finalize a pending-removal window whose pid is still
+    /// unconfirmed, for as long as that holds — bounded only by the app
+    /// actually reconnecting, not by a timeout that might fire before or
+    /// long after it does.
+    ///
+    /// Also arms `wake_lock_active` — synchronously, before any probing —
+    /// so `place_new_window`/`reveal_frontmost`'s auto-switch is hard-blocked
+    /// from this instant, not just once the (concurrent, `.await`-ing)
+    /// probing below happens to finish. See that field's doc comment for
+    /// why per-pid confirmation alone isn't a strong enough guard for those
+    /// two, unlike `finalize_expired_removals`.
+    ///
+    /// Also restarts the grace-period clock (`pending_removal`'s `Instant`)
+    /// on every entry already pending — same reasoning as
+    /// `note_screen_unlocked`'s identical reset, just for a real sleep
+    /// instead of a lock: `Instant` keeps advancing across suspend on macOS
+    /// (see `tili-ax/src/watch.rs`'s `SUSPECTED_SLEEP_GAP` doc comment), so
+    /// an entry that predates a sleep lasting hours would already read as
+    /// far past `removal_grace` the moment this function's probe below
+    /// confirms its pid — before anything has actually re-verified the
+    /// window itself. Resetting it here means `finalize_expired_removals`
+    /// can't act on it until a real `removal_grace` window has elapsed
+    /// *after* wake, giving `tili-ax`'s forced post-wake resync (see
+    /// `spawn_event_watcher`) a real chance to un-pend it first.
+    pub async fn note_system_wake(&mut self) {
+        self.wake_lock_active = true;
+        eprintln!("tili-daemon: system woke (real sleep), probing tracked windows");
+        self.restart_pending_removal_clocks();
+        self.probe_tracked_windows().await;
+    }
+
+    /// Records that the screen just locked (`WmEvent::ScreenLocked`,
+    /// `com.apple.screenIsLocked`) — real-hardware testing on this project
+    /// found that the user's actual "put this machine to sleep" gesture is
+    /// almost always locking the screen and waiting for the display to
+    /// blank (Control+Cmd+Q, the menu-bar lock icon, or an idle timeout),
+    /// not a genuine `pmset`/lid-close/Apple-menu sleep — which means
+    /// `note_system_wake` above, gated entirely on
+    /// `NSWorkspaceDidWakeNotification`, never ran for that case at all:
+    /// that notification is only sent when the machine actually suspends,
+    /// and it doesn't for a plain screen lock. Locking still switches the
+    /// session to loginwindow, and other apps' AX connections have been
+    /// observed to stop answering while that's active — the same
+    /// reconnect instability `note_system_wake` guards against, just
+    /// triggered by a different macOS mechanism.
+    ///
+    /// Arms `wake_lock_active` synchronously, same as `note_system_wake` —
+    /// freezing the active workspace/focus from the instant lock is
+    /// observed, since an AX read made *while* the screen is locked can't
+    /// be trusted to prove the app is actually reconnected either way (a
+    /// read could succeed against a stale cached value, or hang for the
+    /// lock's full duration). Also seeds `unconfirmed_pids` with every
+    /// currently-tracked window's pid, but deliberately does *not* fire the
+    /// AX probe itself here — that's `note_screen_unlocked`'s job, once the
+    /// user's own session (and its AX connections) are actually back.
+    pub fn note_screen_locked(&mut self) {
+        self.wake_lock_active = true;
+        let pids: Vec<i32> = self.windows.values().map(|w| w.pid()).collect();
+        let count = pids.len();
+        self.unconfirmed_pids.extend(pids);
+        eprintln!(
+            "tili-daemon: screen locked, freezing workspace/focus and marking {count} tracked window(s) unconfirmed"
+        );
+    }
+
+    /// Records that the screen just unlocked (`WmEvent::ScreenUnlocked`,
+    /// `com.apple.screenIsUnlocked`) — the AX server is expected to be
+    /// genuinely back by now, so this is where the confirmation probe
+    /// `note_screen_locked` deferred actually runs. Doesn't itself touch
+    /// `wake_lock_active`: like a real sleep/wake, that only ever clears
+    /// from a genuine `dispatch()`-routed command (see
+    /// `clear_wake_lock`'s doc comment) — unlocking the screen isn't itself
+    /// a hotkey or CLI action, so the workspace/focus stays frozen until
+    /// the user's very next real one. Also runs the probe unconditionally
+    /// (not gated on `note_screen_locked` having actually run first): a
+    /// daemon that started while the screen was already locked would reach
+    /// here with an empty `unconfirmed_pids`, in which case this is just a
+    /// harmless extra confirmation pass.
+    ///
+    /// Also restarts the grace-period clock (`pending_removal`'s `Instant`)
+    /// on every entry that's already pending: `spawn_event_watcher`'s
+    /// `AppEvent::ScreenUnlocked` handling fires a real full resync
+    /// alongside this same event, but that resync's `WindowsChanged` events
+    /// still have to make it through the daemon's single select! loop and a
+    /// `maintenance_tick` before `apply_windows_changed` actually re-scans
+    /// and un-pends anything — and `tokio::select!` picks among multiple
+    /// simultaneously-ready branches at random, so a `maintenance_tick`
+    /// (which calls `finalize_expired_removals` unconditionally) can win
+    /// that race and run *before* the resync's own `WindowsChanged` is
+    /// drained. Without this reset, an entry that predates the lock — its
+    /// clock already far past `removal_grace` from sitting frozen for the
+    /// whole lock duration (see `note_screen_locked`) — would be confirmed
+    /// finalizable the instant this function's probe below confirms its
+    /// pid, even though nothing has actually re-verified the window itself
+    /// yet. Resetting it here means `finalize_expired_removals` can't act on
+    /// it until a real `removal_grace` window has elapsed *after* unlock,
+    /// giving the resync's own re-scan a real chance to un-pend it first.
+    pub async fn note_screen_unlocked(&mut self) {
+        eprintln!("tili-daemon: screen unlocked, probing tracked windows");
+        self.restart_pending_removal_clocks();
+        self.probe_tracked_windows().await;
+    }
+
+    /// Restarts the grace-period clock (`pending_removal`'s `Instant`) on
+    /// every entry already pending, so `finalize_expired_removals` can't act
+    /// on a clock that's stale from before a lock/sleep — shared by
+    /// `note_screen_unlocked` and `note_system_wake`; see each caller's doc
+    /// comment for why its own triggering event needs this.
+    fn restart_pending_removal_clocks(&mut self) {
         let now = Instant::now();
-        self.wake_started_at = Some(now);
-        self.wake_grace_until = Some(now + WAKE_GRACE_MAX);
-    }
-
-    /// Whether a `note_system_wake` episode is still active at `now` — the
-    /// single check `effective_removal_grace`, `place_new_window`, and
-    /// `reveal_frontmost` all gate their wake-specific behavior on.
-    fn wake_grace_active(&self, now: Instant) -> bool {
-        self.wake_grace_until.is_some_and(|until| now < until)
-    }
-
-    /// Called from `apply_windows_changed` on each sign that post-wake
-    /// reconnection is still ongoing — a window newly entering
-    /// `pending_removal`, or one leaving it via rediscovery. No-ops if
-    /// there's no active episode (`wake_started_at` unset, or the episode
-    /// already lapsed — ordinary later churn shouldn't resurrect an episode
-    /// that's over). Otherwise pushes `wake_grace_until` out by
-    /// `WAKE_GRACE_DEBOUNCE`, capped so it never passes `wake_started_at +
-    /// WAKE_GRACE_MAX` — matching `tili-ax/src/watch.rs`'s
-    /// `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` debounce-with-cap
-    /// shape. Deliberately symmetric between the insertion and removal
-    /// sides: a window vanishing right after wake extends protection just
-    /// as much as one reconnecting does, since the reconnect burst may
-    /// still be ongoing for other apps either way.
-    fn note_wake_activity(&mut self) {
-        let now = Instant::now();
-        if !self.wake_grace_active(now) {
-            return;
+        for since in self.pending_removal.values_mut() {
+            *since = now;
         }
-        let Some(started_at) = self.wake_started_at else {
-            return;
-        };
-        self.wake_grace_until = Some((now + WAKE_GRACE_DEBOUNCE).min(started_at + WAKE_GRACE_MAX));
     }
 
-    /// `removal_grace`, unless a recent `note_system_wake` episode
-    /// (`wake_grace_active`) is still in effect, in which case the boosted
-    /// `WAKE_GRACE_MAX` applies instead.
-    fn effective_removal_grace(&self, now: Instant) -> Duration {
-        if self.wake_grace_active(now) {
-            self.removal_grace.max(WAKE_GRACE_MAX)
-        } else {
-            self.removal_grace
+    /// Fires the concurrent AX responsiveness probe (see
+    /// `tili_ax::WindowProbeHandle`) at every currently-tracked window's
+    /// owning pid, confirming whichever pids respond — the mechanism shared
+    /// by `note_system_wake` and `note_screen_unlocked`. Doesn't touch
+    /// `wake_lock_active`; each caller arms that lock itself, at the point
+    /// that's actually correct for its own triggering event (immediately,
+    /// for both — see each caller's doc comment for why).
+    async fn probe_tracked_windows(&mut self) {
+        let probes: Vec<(i32, tili_ax::WindowProbeHandle)> = self
+            .windows
+            .values()
+            .map(|w| (w.pid(), w.probe_handle()))
+            .collect();
+        self.unconfirmed_pids
+            .extend(probes.iter().map(|&(pid, _)| pid));
+        eprintln!(
+            "tili-daemon: probing {} tracked window(s) for AX responsiveness",
+            probes.len()
+        );
+
+        let handles: Vec<(i32, tokio::task::JoinHandle<bool>)> = probes
+            .into_iter()
+            .map(|(pid, handle)| {
+                (
+                    pid,
+                    tokio::task::spawn_blocking(move || handle.is_responsive()),
+                )
+            })
+            .collect();
+        for (pid, handle) in handles {
+            if handle.await.unwrap_or(false) {
+                self.unconfirmed_pids.remove(&pid);
+            }
         }
+        eprintln!(
+            "tili-daemon: probe done, {} pid(s) still unconfirmed",
+            self.unconfirmed_pids.len()
+        );
+    }
+
+    /// Whether `pid` has proven it's responsive since the last
+    /// `note_system_wake` probe — always `true` outside an active wake
+    /// (`unconfirmed_pids` only ever gains entries from that probe). The
+    /// single check `finalize_expired_removals` gates its wake-specific
+    /// behavior on. `place_new_window`/`reveal_frontmost` use
+    /// `wake_lock_active` instead — see that field's doc comment for why a
+    /// per-pid signal isn't strong enough for those two.
+    fn is_pid_confirmed(&self, pid: i32) -> bool {
+        !self.unconfirmed_pids.contains(&pid)
+    }
+
+    /// Clears `wake_lock_active` — called once from `dispatch()`, for every
+    /// command except the read-only queries `tili-menubar`'s own
+    /// long-poll-driven refresh issues (`command_is_read_only`). Excluding
+    /// those matters: the wake reconciliation itself (processing the
+    /// `WindowsChanged` burst `note_system_wake`'s probe and
+    /// `resync_watchers` both trigger) sets `changed`, which wakes any
+    /// blocked `WaitForChange` connection — `tili-menubar` would then send
+    /// a read-only refresh query within milliseconds of the wake, and
+    /// treating that as "real user action" would defeat the whole point of
+    /// this lock. Deliberately not called from any reactive
+    /// NSWorkspace/AX-notification-driven path (`reveal_current_frontmost`,
+    /// `apply_windows_changed`, ...) — only `dispatch()`'s hotkey/socket
+    /// seam is unambiguous proof the user actually did something.
+    pub(crate) fn clear_wake_lock(&mut self) {
+        self.wake_lock_active = false;
     }
 
     /// Drops any `pending_launch_pids` entry older than `LAUNCH_GRACE_PERIOD`
@@ -1094,9 +1255,15 @@ impl WmState {
 
         // `pid` now genuinely has a window — whatever launched it is no
         // longer a "just launched, no window yet" case `reveal_current_frontmost`
-        // needs to distrust a `frontmost_app_pid()` read over.
+        // needs to distrust a `frontmost_app_pid()` read over. A real,
+        // non-empty scan is also proof `pid`'s AX connection is up, same as
+        // `note_system_wake`'s own probe responding — confirms it here too,
+        // in case that probe missed this pid's window (an empty `fresh`
+        // isn't used to confirm: it's indistinguishable from a still-down
+        // AX connection silently returning nothing).
         if !fresh.is_empty() {
             self.pending_launch_pids.remove(&pid);
+            self.unconfirmed_pids.remove(&pid);
         }
 
         let fresh_ids: std::collections::HashSet<WindowId> =
@@ -1117,7 +1284,6 @@ impl WmState {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.pending_removal.entry(id)
             {
                 entry.insert(Instant::now());
-                self.note_wake_activity();
             }
         }
 
@@ -1131,9 +1297,7 @@ impl WmState {
             let id = window.id();
             // Present in this scan after all — un-pend it, whether or not
             // it was ever actually pending.
-            if self.pending_removal.remove(&id).is_some() {
-                self.note_wake_activity();
-            }
+            self.pending_removal.remove(&id);
             let is_new = !self.placements.contains_key(&id);
             let kind = window.kind();
             let minimized = window.minimized();
@@ -1248,17 +1412,18 @@ impl WmState {
     /// monitor, the focused monitor switches to it immediately (via
     /// `switch_workspace`, same as `move_focused_to_workspace`) so a window
     /// auto-placed by a `workspace-rules` match is never left off-screen —
-    /// unless `wake_grace_active` is still true, in which case the window
+    /// unless `wake_lock_active` is still set, in which case the window
     /// still gets placed into `target_workspace` (parked, not shown) but the
     /// switch itself is skipped. Confirmed on real hardware: a window whose
     /// app hasn't reconnected to the WindowServer/AX yet after a real wake
-    /// can get wrongly finalized as closed (see `WAKE_GRACE_MAX`) and
-    /// then rediscovered moments later — `is_new` from this function's
-    /// caller's perspective, but not from the user's — matching its
-    /// `workspace-rules` entry and switching away from whatever workspace
-    /// was showing before sleep with no real trigger. `reveal_frontmost`
-    /// already gets this same wake-grace guard for its own auto-switch
-    /// branch; this mirrors it for the `workspace-rules` one.
+    /// can get wrongly finalized as closed and then rediscovered moments
+    /// later — `is_new` from this function's caller's perspective, but not
+    /// from the user's — matching its `workspace-rules` entry and switching
+    /// away from whatever workspace was showing before sleep with no real
+    /// trigger. `reveal_frontmost` already gets this same guard for its own
+    /// auto-switch; this mirrors it for the `workspace-rules` one — see
+    /// `wake_lock_active`'s doc comment for why a hard, non-decaying lock
+    /// replaced this function's original per-pid (`unconfirmed_pids`) gate.
     /// Deliberately keyed only by `WindowId`/`PlacementKind`, no `AxWindow`
     /// — this is the seam that makes per-app-workspace placement
     /// unit-testable without a live `AXUIElement`, unlike
@@ -1313,16 +1478,16 @@ impl WmState {
         }
 
         if inactive {
-            let in_wake_grace = self.wake_grace_active(Instant::now());
             eprintln!(
-                "tili-daemon: {} workspace '{target_workspace}' for new window {id} (wake_grace_active={in_wake_grace})",
-                if in_wake_grace {
+                "tili-daemon: {} workspace '{target_workspace}' for new window {id} (wake_lock_active={})",
+                if self.wake_lock_active {
                     "skipping auto-switch to"
                 } else {
                     "auto-switching to"
-                }
+                },
+                self.wake_lock_active
             );
-            if !in_wake_grace {
+            if !self.wake_lock_active {
                 // Can only fail on an undeclared workspace, which can't
                 // happen here — `target_workspace` was just inserted into
                 // `self.workspaces` above via `entry(...).or_default()`.
@@ -2434,17 +2599,19 @@ impl WmState {
     /// comment and `pending_launch_pids`'s doc comment on `WmState` for the
     /// full mechanism.
     ///
-    /// Same branch also distrusts `pid` while `wake_grace_active` (see
-    /// `note_system_wake`) is still true — `frontmost_app_pid()` is a
-    /// synchronous `AXFocusedApplication` query, and right after a real wake
-    /// it can transiently report a different app than the one genuinely
-    /// frontmost while everyone's AX/WindowServer connection is still
-    /// reconnecting (the same underlying instability `WAKE_GRACE_MAX`
-    /// exists for). Without this, that misread pid still owns live windows
-    /// (so `suppress` above doesn't catch it either) and can force-switch
-    /// the active workspace a few seconds after wake — the exact symptom
-    /// `note_system_wake` was introduced to fix, just through this path
-    /// instead of `finalize_expired_removals`.
+    /// This whole function is a no-op while `wake_lock_active` is set (see
+    /// that field's doc comment) — `frontmost_app_pid()` is a synchronous
+    /// `AXFocusedApplication` query, and right after a real wake it can
+    /// transiently report a different app than the one genuinely frontmost
+    /// while the system's AX/WindowServer connections are still settling,
+    /// *even for an app whose own pid has already confirmed responsive* —
+    /// so this can't be narrowed to a per-pid check the way
+    /// `finalize_expired_removals` is. Without this, that misread pid still
+    /// owns live windows (so `suppress` above doesn't catch it either) and
+    /// can force-switch the active workspace, or just silently steal focus
+    /// to the wrong monitor/window, before the wake has actually settled —
+    /// the exact symptom `note_system_wake` was introduced to fix, just
+    /// through this path instead of `finalize_expired_removals`.
     ///
     /// `allow_unchanged_pid` controls whether the `None`/not-visible branch
     /// below is allowed to switch workspaces when `pid` is the *same* pid
@@ -2471,6 +2638,16 @@ impl WmState {
         // window, so the guard below alone can't catch them; see this
         // function's doc comment and `SYSTEM_UI_BUNDLE_IDS`'s.
         if is_system_ui_bundle(tili_ax::bundle_id_for_pid(pid).as_deref()) {
+            return;
+        }
+        // See this function's doc comment on `wake_lock_active` — bails
+        // out before touching *any* state (not just before the workspace
+        // switch below), including `last_frontmost_pid`: this whole
+        // function is inert while the lock holds, so there's nothing here
+        // worth recording yet. `raise_focused_window` still updates
+        // `last_frontmost_pid` independently for any real dispatch()-driven
+        // focus change, so nothing goes stale while this is skipped.
+        if self.wake_lock_active {
             return;
         }
         // Deliberately updated only once `pid` is confirmed to own a real
@@ -2564,11 +2741,9 @@ impl WmState {
                 // chasing means nothing really changed since the last
                 // resolved-to-a-real-window pid, so there's nothing to
                 // reveal.
-                let in_wake_grace = self.wake_grace_active(Instant::now());
                 if (pid_unchanged && !allow_unchanged_pid)
                     || suppress
                     || !self.pending_launch_pids.is_empty()
-                    || in_wake_grace
                 {
                     return;
                 }
@@ -2848,6 +3023,7 @@ impl WmState {
     /// are only ever created by `apply_config`'s declare-loop, never
     /// on-the-fly by name.
     pub fn switch_workspace(&mut self, name: &str) -> Result<(), String> {
+        let switch_start = Instant::now();
         if !self.workspaces.contains_key(name) {
             return Err(format!("workspace '{name}' isn't declared in config"));
         }
@@ -2869,10 +3045,12 @@ impl WmState {
         self.previous_workspace = current.clone();
 
         // Captured before any parking/relayout so the incoming workspace's
-        // windows can be brought on screen *first* (see below) — each AX
-        // position write is a synchronous per-window round-trip, not an
-        // atomic swap, so parking the outgoing *tiled* windows before the
-        // incoming ones arrive leaves a real (if brief) gap with nothing on
+        // windows can be brought on screen *first* (see below). Every
+        // window's AX write still fires concurrently within each of the
+        // steps below (see `write_windows_concurrently`) rather than one
+        // round-trip at a time, but the steps themselves stay ordered:
+        // parking the outgoing *tiled* windows before the incoming ones
+        // arrive would still leave a real (if brief) gap with nothing on
         // screen but the desktop. Floating and tiled are tracked separately
         // (see below) since that "avoid a blank gap" reasoning only applies
         // to tiled windows, which fill the screen — floating ones don't.
@@ -2907,8 +3085,18 @@ impl WmState {
         // "ease in from a hidden corner" would itself flash a slide across
         // the screen, the opposite of the point).
         self.frame_setter.set_suppressed(true);
-        self.relayout_active();
-        self.reposition_floating_in_active_workspace();
+        let phase_start = Instant::now();
+        self.relayout_monitor_concurrently(monitor_id);
+        eprintln!(
+            "tili-daemon: switch_workspace {name} phase=incoming_relayout took {:?}",
+            phase_start.elapsed()
+        );
+        let phase_start = Instant::now();
+        self.reposition_floating_for_monitor_concurrently(monitor_id);
+        eprintln!(
+            "tili-daemon: switch_workspace {name} phase=incoming_floating_reposition took {:?}",
+            phase_start.elapsed()
+        );
         self.frame_setter.set_suppressed(false);
 
         // Raised *before* either outgoing park loop below, not after —
@@ -2929,13 +3117,21 @@ impl WmState {
             .or_else(|| self.active_tree().default_focus());
         if let Some(node) = restore {
             self.set_focused_node(node);
+            let phase_start = Instant::now();
             self.raise_focused();
+            eprintln!(
+                "tili-daemon: switch_workspace {name} phase=raise_focused took {:?}",
+                phase_start.elapsed()
+            );
         }
 
         if swap_monitor.is_none() {
-            for id in outgoing_floating {
-                self.park(id);
-            }
+            let phase_start = Instant::now();
+            self.park_concurrently(&outgoing_floating);
+            eprintln!(
+                "tili-daemon: switch_workspace {name} phase=outgoing_floating_park took {:?}",
+                phase_start.elapsed()
+            );
         }
 
         if let Some(swap_id) = swap_monitor {
@@ -2943,14 +3139,31 @@ impl WmState {
             // out directly onto that monitor's own frame below, never
             // parked at all (parking then immediately relaying out
             // elsewhere would just be a second, needless flash).
-            self.relayout_monitor(swap_id);
-            self.reposition_floating_for_monitor(swap_id);
+            let phase_start = Instant::now();
+            self.relayout_monitor_concurrently(swap_id);
+            eprintln!(
+                "tili-daemon: switch_workspace {name} phase=swap_relayout took {:?}",
+                phase_start.elapsed()
+            );
+            let phase_start = Instant::now();
+            self.reposition_floating_for_monitor_concurrently(swap_id);
+            eprintln!(
+                "tili-daemon: switch_workspace {name} phase=swap_floating_reposition took {:?}",
+                phase_start.elapsed()
+            );
         } else {
-            for id in outgoing_tiled {
-                self.park(id);
-            }
+            let phase_start = Instant::now();
+            self.park_concurrently(&outgoing_tiled);
+            eprintln!(
+                "tili-daemon: switch_workspace {name} phase=outgoing_tiled_park took {:?}",
+                phase_start.elapsed()
+            );
         }
 
+        eprintln!(
+            "tili-daemon: switch_workspace {name} total took {:?}",
+            switch_start.elapsed()
+        );
         Ok(())
     }
 
@@ -3467,15 +3680,6 @@ impl WmState {
     }
 
     /// Re-centers/sizes every floating window belonging to whatever
-    /// workspace is active on `focused_monitor` — called when a workspace
-    /// becomes active again after being parked, so floating windows land
-    /// back where they should rather than staying at their off-screen
-    /// parked coordinates.
-    fn reposition_floating_in_active_workspace(&mut self) {
-        self.reposition_floating_for_monitor(self.focused_monitor);
-    }
-
-    /// Re-centers/sizes every floating window belonging to whatever
     /// workspace is active on `monitor_id`. A window with captured manual
     /// geometry (the user dragged/resized it at some point) is restored
     /// proportionally via `restore_floating_frame` instead of being
@@ -3515,6 +3719,158 @@ impl WmState {
                 None => {}
             }
         }
+    }
+
+    /// Fires `f`'s AX write for every `(WindowId, target)` pair
+    /// concurrently — one `std::thread::spawn` per window, all joined
+    /// before this returns — instead of writing them one at a time.
+    /// `switch_workspace`'s deadtime came from N synchronous AX
+    /// round-trips run in sequence; a write to one process's window is
+    /// completely independent of a write to another's (confirmed safe to
+    /// fire concurrently — see AeroSpace's own per-app-thread model), so
+    /// joining `max(latency)` instead of summing `N × latency` is free
+    /// correctness-wise. Plain OS threads rather than
+    /// `tokio::task::spawn_blocking`: every caller here runs synchronously
+    /// inside `dispatch()` (invoked directly from the `select!` loop, not
+    /// `.await`-ed), so there's no async boundary to join a spawned task
+    /// through — `f` runs on each window's own thread and hands the
+    /// (possibly frame-updated) `AxWindow` back so it can go back into
+    /// `self.windows` once every thread has finished; nothing outlives this
+    /// function's own return, so there's no job lifecycle to manage.
+    fn write_windows_concurrently<T: Send + 'static>(
+        &mut self,
+        targets: Vec<(WindowId, T)>,
+        f: fn(&mut AxWindow, T),
+    ) {
+        let join_start = Instant::now();
+        let window_count = targets.len();
+        let handles: Vec<std::thread::JoinHandle<AxWindow>> = targets
+            .into_iter()
+            .filter_map(|(id, target)| self.windows.remove(&id).map(|window| (window, target)))
+            .map(|(mut window, target)| {
+                std::thread::spawn(move || {
+                    let id = window.id();
+                    let write_start = Instant::now();
+                    f(&mut window, target);
+                    eprintln!(
+                        "tili-daemon: write_windows_concurrently window={id} took {:?}",
+                        write_start.elapsed()
+                    );
+                    window
+                })
+            })
+            .collect();
+        for handle in handles {
+            if let Ok(window) = handle.join() {
+                self.windows.insert(window.id(), window);
+            }
+        }
+        eprintln!(
+            "tili-daemon: write_windows_concurrently windows={window_count} join took {:?}",
+            join_start.elapsed()
+        );
+    }
+
+    /// `switch_workspace`-only variant of `park`: the bookkeeping that
+    /// touches shared `WmState` fields (settling a stale tween, capturing
+    /// manual floating geometry, resolving the parking origin) runs
+    /// sequentially first — none of that is safe to touch from multiple
+    /// threads at once — and only the actual `set_position` AX write, one
+    /// per window, fires concurrently via `write_windows_concurrently`.
+    fn park_concurrently(&mut self, ids: &[WindowId]) {
+        let mut targets = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if let Some(window) = self.windows.get_mut(&id) {
+                self.frame_setter.finish(window);
+            }
+            self.capture_manual_geometry_before_park(id);
+            let Some(window) = self.windows.get(&id) else {
+                continue;
+            };
+            let frame = window.frame();
+            let origin = tili_ax::parking_position(&self.monitors, (frame.width, frame.height));
+            targets.push((id, origin));
+        }
+        self.write_windows_concurrently(targets, |window: &mut AxWindow, (x, y): (f64, f64)| {
+            window.set_position(x, y);
+        });
+    }
+
+    /// `switch_workspace`-only variant of `relayout_monitor`: the same
+    /// layout computation, but writes every window's frame concurrently
+    /// (see `write_windows_concurrently`) instead of looping through
+    /// `frame_setter.set_frame` one window at a time. Only valid to call
+    /// while `frame_setter` is suppressed (see `switch_workspace`'s
+    /// `set_suppressed(true)`/`set_suppressed(false)` bracket): under
+    /// suppression `frame_setter.set_frame` already reduces to exactly
+    /// "settle any stale tween, then write the target straight to
+    /// `AxWindow`," which is what this does directly — so bypassing
+    /// `frame_setter` here doesn't change behavior, only the write loop's
+    /// shape. Not reused by any other relayout call site: those need
+    /// `Settings::animate` to keep working, which requires going through
+    /// the ordinary, single-threaded `frame_setter`.
+    fn relayout_monitor_concurrently(&mut self, monitor_id: u32) {
+        let Some((name, area, gaps)) = self.tiled_layout_inputs(monitor_id) else {
+            return;
+        };
+        let Some(tree) = self.workspaces.get(&name) else {
+            return;
+        };
+        #[cfg(test)]
+        self.relayout_calls.set(self.relayout_calls.get() + 1);
+
+        let targets: Vec<(WindowId, Rect)> =
+            if let Some(&fullscreen_node) = self.fullscreen_focus.get(&name) {
+                tree.window_at(fullscreen_node)
+                    .map(|id| vec![(id, area)])
+                    .unwrap_or_default()
+            } else {
+                tree.layout(area, gaps).into_iter().collect()
+            };
+
+        for &(id, _) in &targets {
+            if let Some(window) = self.windows.get_mut(&id) {
+                self.frame_setter.finish(window);
+            }
+        }
+        self.write_windows_concurrently(targets, AxWindow::set_frame);
+    }
+
+    /// `switch_workspace`-only variant of `reposition_floating_for_monitor`:
+    /// only the common "restore a captured manual geometry" branch writes
+    /// concurrently (see `write_windows_concurrently`) — the first-time
+    /// placement branch (`place_floating_window`) stays sequential, since
+    /// it reads/writes `floating_centered`/`floating_cascade_index` for its
+    /// cascade-offset nudge, shared state that isn't safe to touch from
+    /// multiple threads at once.
+    fn reposition_floating_for_monitor_concurrently(&mut self, monitor_id: u32) {
+        let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
+            return;
+        };
+        let Some(area) = self.monitor_frame(monitor_id) else {
+            return;
+        };
+        let ids = self.floating_windows_in(&name);
+        let mut targets = Vec::new();
+        for id in ids {
+            let manual = self.placements.get(&id).and_then(|p| match &p.kind {
+                PlacementKind::Floating { manual } => *manual,
+                _ => None,
+            });
+            match manual {
+                Some(geometry) => {
+                    if let Some(window) = self.windows.get_mut(&id) {
+                        self.frame_setter.finish(window);
+                    }
+                    targets.push((id, restore_floating_frame(geometry, area)));
+                }
+                None if !self.floating_placed.contains(&id) => {
+                    self.place_floating_window(id, area);
+                }
+                None => {}
+            }
+        }
+        self.write_windows_concurrently(targets, AxWindow::set_frame);
     }
 
     /// Finds the first configured floating rule matching `window`'s bundle
@@ -5002,13 +5358,181 @@ mod tests {
         assert!(state.pending_removal.contains_key(&id));
     }
 
+    #[tokio::test]
+    async fn note_system_wake_is_a_no_op_with_no_tracked_windows() {
+        // `self.windows` can't hold a real `AxWindow` at this level (see
+        // `place_new_window`'s doc comment on why it, not
+        // `apply_windows_changed`, is this module's unit-testable seam) —
+        // so the probe loop always finds zero windows here. Still worth
+        // covering directly: this proves `note_system_wake` doesn't panic
+        // or leave stray state (`unconfirmed_pids`) behind when there's
+        // nothing to probe, the shape every test below relies on for its
+        // own `WmState::default()` starting point. `wake_lock_active` is
+        // armed regardless of whether there was anything to probe — see
+        // `note_system_wake`'s doc comment on why that's synchronous and
+        // unconditional.
+        let mut state = WmState::default();
+
+        state.note_system_wake().await;
+
+        assert!(state.unconfirmed_pids.is_empty());
+        assert!(state.wake_lock_active);
+    }
+
+    #[tokio::test]
+    async fn note_system_wake_restarts_pending_removal_grace_clocks() {
+        // Mirrors `note_screen_unlocked_restarts_pending_removal_grace_clocks`
+        // below: a real sleep of several hours advances `Instant` just as
+        // much as a lock sitting frozen does (macOS keeps it running across
+        // suspend), so a window that predates the sleep can have a
+        // `pending_removal` timestamp far past `removal_grace` the instant
+        // this probe confirms its pid. Without this reset,
+        // `finalize_expired_removals` would treat that stale clock as proof
+        // enough to finalize before `tili-ax`'s forced post-wake resync has
+        // actually re-verified the window.
+        let mut state = WmState {
+            removal_grace: Duration::from_secs(3600),
+            ..WmState::default()
+        };
+        let id: WindowId = 1;
+        state
+            .pending_removal
+            .insert(id, Instant::now() - Duration::from_secs(93));
+
+        state.note_system_wake().await;
+
+        let since = *state.pending_removal.get(&id).expect("still pending");
+        assert!(
+            since.elapsed() < Duration::from_secs(1),
+            "waking must restart the entry's grace-period clock, not just leave the pre-sleep one in place"
+        );
+    }
+
     #[test]
-    fn note_system_wake_keeps_a_pending_removal_alive_past_zero_removal_grace() {
+    fn note_screen_locked_arms_the_wake_lock_and_is_a_no_op_with_no_tracked_windows() {
+        // Same limitation as `note_system_wake_is_a_no_op_with_no_tracked_windows`
+        // above: `self.windows` can't hold a real `AxWindow` at this level,
+        // so there's nothing for the pid-seeding loop to find here. Still
+        // worth covering directly: proves `note_screen_locked` arms
+        // `wake_lock_active` synchronously and doesn't panic with nothing
+        // to seed.
+        let mut state = WmState::default();
+
+        state.note_screen_locked();
+
+        assert!(state.wake_lock_active);
+        assert!(state.unconfirmed_pids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn note_screen_unlocked_probes_but_never_touches_the_wake_lock() {
+        // Unlike `note_system_wake`/`note_screen_locked`, unlocking the
+        // screen isn't itself proof of real user activity (see
+        // `clear_wake_lock`'s doc comment) — it must neither arm nor clear
+        // `wake_lock_active` on its own, only run the confirmation probe
+        // `note_screen_locked` deferred.
+        let mut state = WmState {
+            wake_lock_active: true,
+            ..WmState::default()
+        };
+
+        state.note_screen_unlocked().await;
+
+        assert!(
+            state.wake_lock_active,
+            "unlocking doesn't clear a lock armed by a prior lock"
+        );
+        assert!(state.unconfirmed_pids.is_empty());
+
+        state.wake_lock_active = false;
+        state.note_screen_unlocked().await;
+
+        assert!(
+            !state.wake_lock_active,
+            "unlocking never arms the lock either, unlike note_system_wake/note_screen_locked"
+        );
+    }
+
+    #[tokio::test]
+    async fn note_screen_unlocked_restarts_pending_removal_grace_clocks() {
+        // A window that predates the lock can have a `pending_removal`
+        // timestamp far older than `removal_grace` just from sitting frozen
+        // for the whole lock duration — real hardware showed a window
+        // finalized as closed after 93s "pending" despite being genuinely
+        // still open the entire time. Without this reset,
+        // `finalize_expired_removals` would treat that stale clock as
+        // proof enough to finalize the moment any later tick runs, racing
+        // ahead of the real resync `AppEvent::ScreenUnlocked` triggers to
+        // actually re-verify the window.
+        let mut state = WmState {
+            removal_grace: Duration::from_secs(3600),
+            ..WmState::default()
+        };
+        let id: WindowId = 1;
+        state
+            .pending_removal
+            .insert(id, Instant::now() - Duration::from_secs(93));
+
+        state.note_screen_unlocked().await;
+
+        let since = *state.pending_removal.get(&id).expect("still pending");
+        assert!(
+            since.elapsed() < Duration::from_secs(1),
+            "unlocking must restart the entry's grace-period clock, not just leave the pre-lock one in place"
+        );
+    }
+
+    #[test]
+    fn clear_wake_lock_clears_it() {
+        let mut state = WmState {
+            wake_lock_active: true,
+            ..WmState::default()
+        };
+
+        state.clear_wake_lock();
+
+        assert!(!state.wake_lock_active);
+    }
+
+    #[test]
+    fn is_pid_confirmed_reflects_unconfirmed_pids() {
+        let mut state = WmState::default();
+        assert!(
+            state.is_pid_confirmed(1234),
+            "a pid never marked unconfirmed is confirmed by default"
+        );
+
+        state.unconfirmed_pids.insert(1234);
+        assert!(!state.is_pid_confirmed(1234));
+        assert!(
+            state.is_pid_confirmed(5678),
+            "marking one pid unconfirmed doesn't affect another"
+        );
+
+        state.unconfirmed_pids.remove(&1234);
+        assert!(
+            state.is_pid_confirmed(1234),
+            "removing it (as note_system_wake's probe or apply_windows_changed does once it responds) restores confirmed"
+        );
+    }
+
+    #[test]
+    fn finalize_expired_removals_defaults_to_confirmed_when_the_window_cant_be_resolved() {
+        // `finalize_expired_removals` only blocks on `unconfirmed_pids` for
+        // a pending-removal window it can still resolve via `self.windows`
+        // (`is_none_or`'s "confirmed" default otherwise) — in production
+        // that lookup always succeeds (only this function's own removal
+        // below ever drops a `self.windows` entry), but this module has no
+        // way to populate `self.windows` with a real `AxWindow` (see
+        // `place_new_window`'s doc comment), so the blocking branch itself
+        // can't be exercised at this level, only this default. A populated
+        // `unconfirmed_pids` (for some unrelated pid) proves finalization
+        // isn't accidentally gated on "any pid is unconfirmed" instead.
         let mut state = WmState {
             removal_grace: Duration::ZERO,
             ..WmState::default()
         };
-        state.note_system_wake();
+        state.unconfirmed_pids.insert(9999);
         let id: WindowId = 1;
         state.placements.insert(
             id,
@@ -5021,88 +5545,15 @@ mod tests {
 
         state.finalize_expired_removals();
 
-        assert!(state.placements.contains_key(&id));
-        assert!(state.pending_removal.contains_key(&id));
+        assert!(!state.placements.contains_key(&id));
+        assert!(!state.pending_removal.contains_key(&id));
     }
 
     #[test]
-    fn note_wake_activity_extends_wake_grace_until_but_never_past_the_max() {
-        let now = Instant::now();
-        let original_deadline = now + Duration::from_secs(1);
-        let mut state = WmState {
-            wake_started_at: Some(now),
-            wake_grace_until: Some(original_deadline),
-            ..WmState::default()
-        };
-
-        state.note_wake_activity();
-        let extended = state.wake_grace_until.unwrap();
-        assert!(
-            extended > original_deadline,
-            "activity should push the deadline forward"
-        );
-        assert!(
-            extended <= now + WAKE_GRACE_MAX,
-            "activity should never push the deadline past wake_started_at + WAKE_GRACE_MAX"
-        );
-    }
-
-    #[test]
-    fn note_wake_activity_clamps_to_the_max_once_the_debounce_would_overshoot_it() {
-        let now = Instant::now();
-        // Started long enough ago that `WAKE_GRACE_MAX` is only 1s away —
-        // closer than a full `WAKE_GRACE_DEBOUNCE` (3s) push would reach.
-        let started_at = now - (WAKE_GRACE_MAX - Duration::from_secs(1));
-        let mut state = WmState {
-            wake_started_at: Some(started_at),
-            wake_grace_until: Some(now + Duration::from_millis(500)),
-            ..WmState::default()
-        };
-
-        state.note_wake_activity();
-
-        assert_eq!(state.wake_grace_until, Some(started_at + WAKE_GRACE_MAX));
-    }
-
-    #[test]
-    fn note_wake_activity_is_a_no_op_once_the_episode_has_lapsed() {
-        let now = Instant::now();
-        let mut state = WmState {
-            wake_started_at: Some(now - Duration::from_secs(200)),
-            wake_grace_until: Some(now - Duration::from_secs(1)),
-            ..WmState::default()
-        };
-
-        state.note_wake_activity();
-
-        assert_eq!(state.wake_grace_until, Some(now - Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn note_wake_activity_is_a_no_op_with_no_active_episode() {
-        let mut state = WmState::default();
-        assert!(state.wake_grace_until.is_none());
-
-        state.note_wake_activity();
-
-        assert!(state.wake_grace_until.is_none());
-    }
-
-    // `apply_windows_changed`'s own two `note_wake_activity` call sites
-    // (pending_removal insertion and rediscovery) aren't covered by a
-    // dedicated test here: unlike `place_new_window` below, that function
-    // takes real `AxWindow`s, which wrap a live `AXUIElement` with no
-    // test-constructible form (see `place_new_window`'s own doc comment on
-    // why it, not `apply_windows_changed`, is the unit-testable seam) —
-    // the same pre-existing limitation that keeps `reveal_frontmost`
-    // untestable at this level. `note_wake_activity`'s own behavior is
-    // covered directly above instead.
-
-    #[test]
-    fn place_new_window_skips_auto_switch_while_wake_grace_is_active_and_fires_once_it_lapses() {
+    fn place_new_window_skips_auto_switch_while_the_wake_lock_is_active_and_fires_once_cleared() {
         let mut state = floating_test_state();
         state.workspaces.insert("side".to_string(), Tree::new());
-        state.wake_grace_until = Some(Instant::now() + Duration::from_secs(60));
+        state.wake_lock_active = true;
 
         state.place_new_window(1, &PlacementKind::Tiled, "side");
 
@@ -5118,40 +5569,17 @@ mod tests {
         assert_eq!(
             state.active_workspace_name(),
             DEFAULT_WORKSPACE,
-            "auto-switch is skipped while wake grace is active"
+            "auto-switch is skipped while the wake lock is active"
         );
 
-        state.wake_grace_until = Some(Instant::now() - Duration::from_secs(1));
+        state.clear_wake_lock();
         state.place_new_window(2, &PlacementKind::Tiled, "side");
 
         assert_eq!(
             state.active_workspace_name(),
             "side",
-            "auto-switch fires normally once wake grace has lapsed"
+            "auto-switch fires normally once the wake lock is cleared"
         );
-    }
-
-    #[test]
-    fn an_expired_wake_grace_falls_back_to_removal_grace() {
-        let mut state = WmState {
-            removal_grace: Duration::ZERO,
-            ..WmState::default()
-        };
-        state.wake_grace_until = Some(Instant::now() - Duration::from_secs(1));
-        let id: WindowId = 1;
-        state.placements.insert(
-            id,
-            Placement {
-                workspace: DEFAULT_WORKSPACE.to_string(),
-                kind: PlacementKind::Tiled,
-            },
-        );
-        state.pending_removal.insert(id, Instant::now());
-
-        state.finalize_expired_removals();
-
-        assert!(!state.placements.contains_key(&id));
-        assert!(!state.pending_removal.contains_key(&id));
     }
 
     #[test]

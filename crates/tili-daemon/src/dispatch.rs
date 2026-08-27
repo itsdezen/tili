@@ -3,6 +3,17 @@ use tili_ipc::{Command, Response};
 use crate::state::WmState;
 
 pub fn dispatch(state: &mut WmState, command: Command) -> Response {
+    let dispatch_start = std::time::Instant::now();
+    let command_name = format!("{command:?}");
+    let response = dispatch_inner(state, command);
+    eprintln!(
+        "tili-daemon: dispatch {command_name} took {:?}",
+        dispatch_start.elapsed()
+    );
+    response
+}
+
+fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
     // Resolves `WmState`'s focus bookkeeping against whatever window real
     // macOS currently considers focused, synchronously, before *any*
     // command runs — see `WmState::sync_focus_from_frontmost`'s doc comment
@@ -11,6 +22,14 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
     // tiling WMs resolve this the same way: a synchronous focus resync at
     // the top of every command, not a reactive background sync.
     state.sync_focus_from_frontmost();
+    // A command reaching here that isn't one of the read-only queries
+    // `tili-menubar`'s own long-poll-driven refresh issues is unambiguous
+    // proof of real user activity (a hotkey press or an explicit CLI/socket
+    // action) — see `WmState::clear_wake_lock`'s doc comment for why that
+    // distinction (not just "reached dispatch()") matters.
+    if !crate::command_is_read_only(&command) {
+        state.clear_wake_lock();
+    }
     match command {
         Command::Ping => Response::Ok,
         Command::ListWindows => match serde_json::to_value(state.list_windows()) {
