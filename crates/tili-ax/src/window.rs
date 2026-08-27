@@ -139,6 +139,7 @@ pub struct AxWindow {
     element: AXUIElement,
     kind: WindowKind,
     has_zoom_button: bool,
+    is_resizable: bool,
     minimized: bool,
     fullscreen: bool,
 }
@@ -281,6 +282,20 @@ impl AxWindow {
             has_zoom_button,
             has_fullscreen_button,
         );
+        // Deliberately independent of `kind`: subrole/chrome-button shape
+        // says what *category* of window this claims to be, not whether it
+        // can actually be resized — an Electron splash screen or a popup
+        // torn off a main window commonly reports `AXStandardWindow` with a
+        // close button (so classifies as `Standard`) while still refusing
+        // any size write. `AXUIElementIsAttributeSettable` is the one API
+        // that asks the app directly rather than inferring from shape, so
+        // it applies uniformly across apps instead of needing a per-app
+        // rule. `Err` (attribute unqueryable) defaults to `true`: wrongly
+        // giving up on tiling a genuinely resizable window is worse than
+        // occasionally missing a truly non-resizable one.
+        let is_resizable = element
+            .is_attribute_settable(kAXSizeAttribute)
+            .unwrap_or(true);
 
         let id = Self::resolve_window_id(&element)?;
         let title = element
@@ -314,6 +329,7 @@ impl AxWindow {
             element,
             kind,
             has_zoom_button,
+            is_resizable,
             minimized,
             fullscreen,
         })
@@ -387,6 +403,15 @@ impl AxWindow {
     /// `is_transient_empty_dialog` in `tili-daemon`).
     pub fn has_zoom_button(&self) -> bool {
         self.has_zoom_button
+    }
+
+    /// Whether `kAXSizeAttribute` reported as settable at classification
+    /// time — see the doc comment on its computation in `from_element`.
+    /// Used by `tili-daemon` to force windows that can't actually be
+    /// resized to `Ignore` regardless of `kind` or any matching floating
+    /// rule (see `is_non_resizable_window`).
+    pub fn is_resizable(&self) -> bool {
+        self.is_resizable
     }
 
     pub fn minimized(&self) -> bool {

@@ -35,6 +35,20 @@ belt-and-suspenders bundle-id denylist forcing `FloatingRuleMode::Ignore`
 for a few specific confirmed cases, in case the general signal above
 doesn't apply to some future process.
 
+`AxWindow::is_resizable` (populated in `from_element` from
+`AXUIElement::is_attribute_settable(kAXSizeAttribute)`) is a deliberately
+separate signal from `WindowKind` — subrole/chrome-button shape says what
+*category* a window claims to be, not whether it can actually be resized.
+Reported non-real, e.g. for a splash screen or a popup window torn off an
+app's main window (`WindowKind::Standard` by chrome, but AX-refuses a
+`kAXSizeAttribute` write) — common in Electron apps generally, not scoped
+to any one bundle id. `Err` (attribute unqueryable) defaults to `true`:
+wrongly giving up on tiling a genuinely resizable window is worse than
+occasionally missing a truly non-resizable one. `tili-daemon`'s
+`is_non_resizable_window` forces such a window to `FloatingRuleMode::Ignore`
+regardless of `kind` or any matching floating rule — see
+`docs/architecture/tili-daemon.md`.
+
 `AxWindow::set_frame`/`set_position`/`set_size`/`focus` are the only place
 real windows get moved/resized/raised — `set_frame` sets position before
 size (some apps clamp size based on current position), `set_position` only
