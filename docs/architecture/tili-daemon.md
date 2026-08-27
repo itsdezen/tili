@@ -72,11 +72,11 @@ creation — see `resolve_disposition`/`classify_new_window`) is decided by
 `apply_windows_changed` in priority order: `is_system_ui_bundle` first,
 then `is_protected_finder_dialog`, then `is_transient_empty_dialog`, then
 `is_system_settings_suggestion_popup`, then `is_finder_quick_look_window`,
-then `is_finder_get_info_window`, then the user's own `floating-rules`
-(`matching_floating_rule`), then finally `tili_ax::WindowKind`'s AX-derived
-fallback. The first six are unconditional overrides — checked *before*
-`self.floating_rules` is consulted at all, so no config entry can win
-against them.
+then `is_finder_get_info_window`, then `is_non_resizable_window`, then the
+user's own `floating-rules` (`matching_floating_rule`), then finally
+`tili_ax::WindowKind`'s AX-derived fallback. The first seven are
+unconditional overrides — checked *before* `self.floating_rules` is
+consulted at all, so no config entry can win against them.
 `is_system_ui_bundle` force-`Ignore`s a small denylist of system UI bundle
 ids (Dock, Spotlight, SecurityAgent, `OSDUIHelper` — the volume/brightness
 HUD host — etc.; see its own doc comment for the confirmed cases and why
@@ -150,6 +150,24 @@ instead, scoped to `Dialog` kind so an ordinary folder window that happens
 to be named e.g. "Server Info" (`WindowKind::Standard`) isn't caught by
 mistake. `Dialog`'s kind-based default is `Float`, which centers it, wrong
 regardless of the user's `floating-rules` config for `com.apple.finder`.
+
+`is_non_resizable_window` handles the general case (not one specific app or
+window) of a window whose `kAXSizeAttribute` isn't AX-settable
+(`tili_ax::AxWindow::is_resizable`, backed by
+`AXUIElementIsAttributeSettable` — see `docs/architecture/tili-ax.md`) —
+reported for TradingView's startup splash screen and its 3-dot-menu
+Settings popup, both of which report `WindowKind::Standard`-shaped chrome
+(so weren't caught by any of the shape-based overrides above) while
+refusing an actual resize. Forcing a tile/float frame write onto such a
+window just leaves it clamped to whatever size it refused, visibly wrong —
+so, like the six overrides above, this forces `Ignore` ahead of
+`self.floating_rules` rather than falling back to the kind-based default:
+an explicit `mode="tile"` rule for the owning app can't make a genuinely
+non-resizable window tile any better than the default could. Unlike
+`is_system_ui_bundle`/`is_protected_finder_dialog`/`is_system_settings_suggestion_popup`,
+this one is deliberately not scoped to a bundle id — the same shape (an
+Electron app spinning up an unresizable auxiliary window detached from its
+main one) is common across many apps, not just TradingView.
 
 `workspace_focus` remembers each workspace's last-focused node — tiled or
 floating — so switching back restores where you left off. A new window

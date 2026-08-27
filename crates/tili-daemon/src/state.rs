@@ -603,6 +603,24 @@ fn is_system_settings_suggestion_popup(
         && title.is_empty()
 }
 
+/// A window whose `kAXSizeAttribute` isn't settable (see
+/// `tili_ax::AxWindow::is_resizable`) can't actually be tiled or usefully
+/// floated/centered — forcing a frame write onto it just leaves the window
+/// clamped to whatever size it refused, visibly wrong. Unlike the other
+/// force-`Ignore` predicates above, this isn't scoped to one app or bundle
+/// id: it's the general case reported for TradingView's startup splash
+/// screen and Settings popup, but the same shape shows up across many
+/// Electron apps that spin up an unresizable auxiliary window detached
+/// from their main one. `AXUIElementIsAttributeSettable` asks the window
+/// directly rather than inferring from subrole/chrome buttons (what `kind`
+/// does), so — like the other predicates here — it always overrides a
+/// matching floating rule rather than falling back to it: an explicit
+/// `mode="tile"` rule for the owning app can't make a genuinely
+/// non-resizable window tile any better than the kind-based default could.
+fn is_non_resizable_window(is_resizable: bool) -> bool {
+    !is_resizable
+}
+
 /// What a brand-new window's placement disposition should be: an explicit
 /// floating-rule `mode` match always wins; otherwise falls back to the
 /// kind-based default that predates per-rule modes — `Popup`
@@ -1353,6 +1371,7 @@ impl WmState {
                     || is_system_settings_suggestion_popup(window.bundle_id(), kind, window.title())
                     || is_finder_quick_look_window(window.bundle_id(), kind, window.title())
                     || is_finder_get_info_window(window.bundle_id(), kind, window.title())
+                    || is_non_resizable_window(window.is_resizable())
                 {
                     Some(tili_config::FloatingRuleMode::Ignore)
                 } else {
@@ -4448,6 +4467,12 @@ mod tests {
             tili_ax::WindowKind::Popup,
             "Wi‑Fi"
         ));
+    }
+
+    #[test]
+    fn is_non_resizable_window_matches_only_non_resizable() {
+        assert!(is_non_resizable_window(false));
+        assert!(!is_non_resizable_window(true));
     }
 
     #[test]

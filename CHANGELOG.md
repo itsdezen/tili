@@ -25,6 +25,19 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   already resolved into — leaving `default_workspace` alone whenever
   there's nothing unambiguous to go on (e.g. Finder/the desktop is
   frontmost with no window focused).
+- **Windows that can't actually be resized (an Electron app's startup
+  splash screen, a popup detached from its main window, etc.) were still
+  getting tiled into a slot they refused to fit, leaving them visibly
+  clamped/stuck** — window classification now also checks
+  `AXUIElementIsAttributeSettable(kAXSizeAttribute)`
+  (`tili_ax::AxWindow::is_resizable`), a general per-window AX signal
+  rather than a subrole/chrome-button heuristic, so it applies across apps
+  instead of needing a per-bundle-id rule. A window that reports itself as
+  non-resizable is now force-`Ignore`d (left untouched, matching normal
+  macOS behavior) regardless of its `WindowKind` or any matching
+  `floating-rules` entry. Reported against TradingView's startup splash and
+  its 3-dot-menu Settings popup, but the same shape affects other Electron
+  apps with detached auxiliary windows too.
 - **Post-wake readiness and the workspace-jump bug were both symptoms of the
   same guessed timer** — `WAKE_GRACE_MAX`/`WAKE_GRACE_DEBOUNCE` replaced
   entirely with a real per-window AX probe fired the instant wake is
