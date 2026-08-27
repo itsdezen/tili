@@ -786,6 +786,16 @@ pub struct WmState {
     /// `apply_config`'s doc comment) — every call after that is a hot
     /// reload, which must never yank focus off whatever's on screen.
     config_loaded_once: bool,
+    /// Whether `reveal_startup_frontmost` has already taken its one shot at
+    /// correcting `apply_config`'s `default_workspace` seed. Set the first
+    /// time that function runs, regardless of whether it actually found
+    /// anything to reveal — never retried afterward, so a real workspace
+    /// switch later in the process's life (the user actually changing
+    /// workspaces) is never second-guessed by this startup-only logic. See
+    /// `reveal_startup_frontmost`'s doc comment for why this can't just be
+    /// `config_loaded_once` itself: that flips *before* the initial window
+    /// scan even starts draining, while this must wait until after.
+    startup_frontmost_revealed: bool,
     /// Whether the left mouse button is currently held down. While true,
     /// `apply_windows_changed` skips its relayout — a drag-resize fires a
     /// continuous stream of `AXWindowResized` notifications, and forcing
@@ -939,6 +949,7 @@ impl Default for WmState {
             mouse_resize_step: 0.1,
             animate: tili_config::AnimationSpeed::Off,
             config_loaded_once: false,
+            startup_frontmost_revealed: false,
             mouse_button_down: false,
             resize_drag: None,
             default_root_orientation: None,
@@ -2813,6 +2824,70 @@ impl WmState {
         if let Some(pid) = tili_ax::workspace::frontmost_app_pid() {
             self.reveal_frontmost(pid, allow_unchanged_pid);
         }
+    }
+
+    /// One-time startup correction: `apply_config` always seeds
+    /// `focused_monitor`'s `active_workspace` entry with `default_workspace`
+    /// before a single real window has been scanned (see that function's
+    /// doc comment). Left alone, that seed stays showing even after the
+    /// initial burst of already-open windows lands — worse, whichever of
+    /// those windows a `workspace-rules` match happens to place *last*
+    /// (`apply_windows_changed`'s per-pid iteration order over a `HashSet`
+    /// is nondeterministic) can silently auto-switch away from it too, via
+    /// `place_new_window`'s inactive-workspace branch — neither outcome has
+    /// anything to do with what the user was actually looking at. Called
+    /// from `main.rs`'s `drain_pending_windows`, on every call (cheap: see
+    /// `startup_frontmost_revealed`), so the correction runs as soon as
+    /// possible after the startup burst — seeded into the event channel
+    /// synchronously by `tili_ax::spawn_event_watcher` before the daemon's
+    /// `select!` loop even starts — has actually drained into
+    /// `WmState::apply_windows_changed`/`self.placements`.
+    ///
+    /// Deliberately does not reuse `reveal_frontmost`/`reveal_current_frontmost`
+    /// outright: those carry runtime-only semantics (`wake_lock_active`,
+    /// `last_frontmost_pid`/`pid_unchanged`, mouse-follows-focus raising,
+    /// monitor-swap-to-reveal) that don't apply to a cold boot and would
+    /// make this harder to reason about and to unit-test. This only ever
+    /// overrides `focused_monitor`'s entry via `switch_workspace` — the only
+    /// monitor `apply_config`'s seed (and thus this correction) ever
+    /// touches; a secondary monitor gets no `active_workspace` entry at all
+    /// until a later `on_displays_changed` (a separate, pre-existing gap,
+    /// not this function's concern).
+    pub fn reveal_startup_frontmost(&mut self) {
+        if self.startup_frontmost_revealed {
+            return;
+        }
+        self.startup_frontmost_revealed = true;
+
+        let frontmost = tili_ax::workspace::frontmost_app_pid().and_then(|pid| {
+            if is_system_ui_bundle(tili_ax::bundle_id_for_pid(pid).as_deref()) {
+                return None;
+            }
+            AxWindow::focused_id_for_pid(pid)
+        });
+        self.reveal_startup_frontmost_window(frontmost);
+    }
+
+    /// The testable half of `reveal_startup_frontmost` — kept keyed by
+    /// `WindowId` alone, no `AxWindow`/pid, mirroring `place_new_window`'s
+    /// seam. `frontmost` is `None` when there's nothing unambiguous to go
+    /// on (no real frontmost window at all — e.g. Finder showing the
+    /// desktop with nothing focused — or system-UI chrome), which is
+    /// deliberately indistinguishable here from "that window isn't placed
+    /// yet" (the initial scan hasn't reached it, or it has no `Placement`
+    /// for some other reason): either way, the only safe move is to leave
+    /// whatever `default_workspace` seed is already showing alone.
+    /// `switch_workspace` is already a no-op when its target is already
+    /// active, so this doesn't need its own "already showing" check.
+    fn reveal_startup_frontmost_window(&mut self, frontmost: Option<WindowId>) {
+        let Some(id) = frontmost else {
+            return;
+        };
+        let Some(placement) = self.placements.get(&id) else {
+            return;
+        };
+        let workspace = placement.workspace.clone();
+        let _ = self.switch_workspace(&workspace);
     }
 
     /// Raises/focuses `id` directly (not through `focused_node()` — used by
@@ -6375,6 +6450,73 @@ mod tests {
             state.active_workspace.get(&2),
             Some(&"a".to_string()),
             "monitor 2 should pick up whatever monitor 1 was showing before, swap-style"
+        );
+    }
+
+    #[test]
+    fn reveal_startup_frontmost_window_with_no_frontmost_leaves_default_untouched() {
+        let mut state = floating_test_state();
+
+        state.reveal_startup_frontmost_window(None);
+
+        assert_eq!(state.active_workspace_name(), DEFAULT_WORKSPACE);
+        assert_eq!(state.relayout_calls.get(), 0);
+    }
+
+    #[test]
+    fn reveal_startup_frontmost_window_with_an_unplaced_window_leaves_default_untouched() {
+        let mut state = floating_test_state();
+
+        // The initial scan hasn't reached this window yet (or it was
+        // filtered out entirely) — no `Placement` exists for it, same
+        // observable state as "no clear frontmost at all".
+        state.reveal_startup_frontmost_window(Some(1));
+
+        assert_eq!(state.active_workspace_name(), DEFAULT_WORKSPACE);
+        assert_eq!(state.relayout_calls.get(), 0);
+    }
+
+    #[test]
+    fn reveal_startup_frontmost_window_switches_to_the_frontmost_windows_workspace() {
+        let mut state = floating_test_state();
+        state.workspaces.insert("work".to_string(), Tree::new());
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: "work".to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+
+        state.reveal_startup_frontmost_window(Some(1));
+
+        assert_eq!(
+            state.active_workspace_name(),
+            "work",
+            "the daemon restarted with the frontmost window already resolved into 'work' — \
+             that should win over apply_config's default_workspace seed"
+        );
+        assert!(state.relayout_calls.get() > 0);
+    }
+
+    #[test]
+    fn reveal_startup_frontmost_window_already_showing_the_default_is_a_no_op() {
+        let mut state = floating_test_state();
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+
+        state.reveal_startup_frontmost_window(Some(1));
+
+        assert_eq!(state.active_workspace_name(), DEFAULT_WORKSPACE);
+        assert_eq!(
+            state.relayout_calls.get(),
+            0,
+            "switch_workspace no-ops when the target is already active — nothing to relayout"
         );
     }
 

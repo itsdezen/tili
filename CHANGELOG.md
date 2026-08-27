@@ -10,6 +10,21 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ### Fixed
 
+- **Daemon startup (a real boot, or — far more commonly — a daemon restart
+  with apps already open) always revealed `default_workspace`, ignoring
+  whatever window was actually frontmost.** `apply_config` seeds
+  `default_workspace` before a single window has been scanned, and
+  nothing reactive fires for an app that was already frontmost before the
+  daemon's observer registered — so the default seed just stuck, and
+  whichever already-open window a `workspace-rules` match happened to
+  place *last* during the startup burst (processed in nondeterministic
+  pid order) could silently steal the display to yet another workspace
+  instead. `WmState::reveal_startup_frontmost` now runs once, right after
+  the initial scan of already-open windows settles, and switches
+  `focused_monitor` to whichever workspace the real frontmost window
+  already resolved into — leaving `default_workspace` alone whenever
+  there's nothing unambiguous to go on (e.g. Finder/the desktop is
+  frontmost with no window focused).
 - **Post-wake readiness and the workspace-jump bug were both symptoms of the
   same guessed timer** — `WAKE_GRACE_MAX`/`WAKE_GRACE_DEBOUNCE` replaced
   entirely with a real per-window AX probe fired the instant wake is

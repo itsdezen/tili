@@ -620,6 +620,13 @@ fn drain_pending_windows(state: &mut WmState, pending_pids: &mut HashSet<i32>) -
         let windows = tili_ax::list_windows_for_pid(pid);
         state.apply_windows_changed(pid, windows);
     }
+    // Cheap no-op after its first real call (see `startup_frontmost_revealed`)
+    // — called unconditionally here, from every call site of this function
+    // (the `maintenance_tick` arm and the socket/hotkey arms), rather than
+    // gated on "the first tick", so whichever fires soonest after the
+    // startup burst (seeded into the event channel before the daemon's
+    // `select!` loop even starts) has actually drained gets to run it.
+    state.reveal_startup_frontmost();
     pids_changed
 }
 

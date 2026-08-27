@@ -698,6 +698,54 @@ this fix closes the specific mechanism that was actually firing in the
 reported repro, and still applies unchanged now that the signal is
 push-based rather than polled.
 
+None of the above ever runs at daemon startup: `apply_config`'s first-load
+branch seeds `focused_monitor`'s `active_workspace` entry with
+`default_workspace` *before* a single real window has been scanned (see
+its own doc comment), and `handle_event`'s `FrontmostAppChanged` arm only
+fires on a genuine AX/`NSWorkspace` transition — an app that was already
+frontmost *before* the daemon's observer registered produces no such edge
+for it to react to. Left alone, that meant a daemon restart (far more
+common in practice than a real reboot — apps stay open, the user is
+sitting right there) always came back showing `default_workspace`,
+regardless of which app/workspace the user actually had frontmost —
+worse, whichever already-open window a `workspace-rules` match happened to
+place *last* during the startup burst (`apply_windows_changed`'s per-pid
+iteration order over a `HashSet<i32>` of `pending_pids` is nondeterministic)
+could silently auto-switch away from the default too, via
+`place_new_window`'s inactive-workspace branch — neither outcome tracked
+the real frontmost window. `WmState::reveal_startup_frontmost` fixes this
+with a one-time correction (`startup_frontmost_revealed` guards it to
+exactly once per process): called unconditionally from `main.rs`'s
+`drain_pending_windows` (cheap after the first real call), so it runs on
+whichever call — `maintenance_tick`, or an earlier socket/hotkey command —
+happens first after the startup burst of already-open windows (seeded into
+the event channel synchronously by `tili_ax::spawn_event_watcher`, before
+the daemon's `select!` loop even starts) has actually drained into
+`apply_windows_changed`/`self.placements`. It resolves the real frontmost
+window the same way `reveal_frontmost` does (`frontmost_app_pid()` +
+`AxWindow::focused_id_for_pid`, with the same system-UI-bundle guard), then
+looks up that window's already-resolved workspace (via `workspace-rules` or
+the plain fallback) in `self.placements` and calls `switch_workspace` to
+bring it onto `focused_monitor` — overriding whatever `apply_config`'s seed
+(or the nondeterministic burst-ordering bug above) left showing. It's a
+no-op — leaving `default_workspace` exactly as seeded — whenever there's
+nothing unambiguous to go on: no real frontmost window at all (Finder
+showing the desktop has nothing AX-focused), system-UI chrome, or a window
+the initial scan hasn't placed yet. Deliberately doesn't reuse
+`reveal_frontmost`/`reveal_current_frontmost` outright: those carry
+runtime-only semantics (`wake_lock_active`, `last_frontmost_pid`/
+`pid_unchanged`, mouse-follows-focus raising, monitor-swap-to-reveal) that
+don't apply to a cold boot and would make the one-shot correction harder to
+reason about and to unit-test; the pure decision (given an already-resolved
+`WindowId`, override or leave alone) is split into
+`reveal_startup_frontmost_window`, mirroring `place_new_window`'s
+`AxWindow`-free seam, so it's covered by ordinary unit tests despite the
+outer function depending on live AX. This only ever targets
+`focused_monitor` — the one monitor `apply_config`'s seed (and this
+correction) ever touches; a secondary monitor gets no `active_workspace`
+entry at all until a later `on_displays_changed` fires, a separate,
+pre-existing gap this doesn't address.
+
 ## Layout commands, config, and dispatch
 
 `toggle_layout`/`set_layout` (M7) wrap `Tree::toggle_layout` for
