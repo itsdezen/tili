@@ -6,7 +6,7 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
-## [Unreleased]
+## [0.7.3] - 2026-08-28
 
 ### Fixed
 
