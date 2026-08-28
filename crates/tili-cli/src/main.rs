@@ -329,18 +329,32 @@ fn send(command: Command) -> io::Result<Response> {
     stream.set_read_timeout(timeout)?;
     stream.set_write_timeout(timeout)?;
 
-    let payload = serde_json::to_vec(&command)?;
+    write_framed(&mut stream, &command)?;
+    let response_buf = read_framed(&mut stream)?;
+    serde_json::from_slice(&response_buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Writes one length-prefixed JSON `Command` — the wire format documented
+/// on `tili_ipc::default_socket_path`. Shared by `send()` and
+/// `daemon_is_reachable()`, which frame identically and only differ in
+/// timeout and how they surface an error.
+fn write_framed(stream: &mut UnixStream, command: &Command) -> io::Result<()> {
+    let payload = serde_json::to_vec(command)?;
     let len = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "command too large"))?;
     stream.write_all(&len.to_be_bytes())?;
-    stream.write_all(&payload)?;
+    stream.write_all(&payload)
+}
 
+/// Reads one length-prefixed payload back — the other half of
+/// `write_framed`, shared the same way.
+fn read_framed(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     let mut len_buf = [0_u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut response_buf = vec![0_u8; len];
     stream.read_exact(&mut response_buf)?;
-    serde_json::from_slice(&response_buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    Ok(response_buf)
 }
 
 fn print_response(response: Response, expected: ExpectedPayload) {
@@ -598,23 +612,7 @@ fn daemon_is_reachable() -> bool {
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
 
-    let Ok(payload) = serde_json::to_vec(&Command::Ping) else {
-        return false;
-    };
-    let Ok(len) = u32::try_from(payload.len()) else {
-        return false;
-    };
-    if stream.write_all(&len.to_be_bytes()).is_err() || stream.write_all(&payload).is_err() {
-        return false;
-    }
-
-    let mut len_buf = [0_u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        return false;
-    }
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut response_buf = vec![0_u8; len];
-    stream.read_exact(&mut response_buf).is_ok()
+    write_framed(&mut stream, &Command::Ping).is_ok() && read_framed(&mut stream).is_ok()
 }
 
 /// `daemon_is_reachable`, retried a few times with a short gap — a single
@@ -793,11 +791,24 @@ fn stop_daemon() {
         if !plist_path.exists() {
             continue;
         }
-        if let Err(e) = std::fs::remove_file(plist_path) {
-            eprintln!("tili: couldn't remove {}: {e}", plist_path.display());
-        }
+        remove_file_reporting(plist_path);
     }
     println!("tili: daemon stopped");
+}
+
+/// Removes `path`, printing `"tili: couldn't remove {path}: {e}"` on
+/// failure — the pattern shared by `stop_daemon`'s plist removal and
+/// `uninstall`'s config/socket removal. Returns whether an error was
+/// printed, so `uninstall` can fold it into its own exit-status tracking;
+/// `stop_daemon` ignores the return value, matching its original
+/// best-effort handling.
+fn remove_file_reporting(path: &std::path::Path) -> bool {
+    if let Err(e) = std::fs::remove_file(path) {
+        eprintln!("tili: couldn't remove {}: {e}", path.display());
+        true
+    } else {
+        false
+    }
 }
 
 /// `~/.config/tili/tili.kdl` — duplicated from `tili_config::default_config_path`
@@ -818,14 +829,10 @@ fn default_config_path() -> std::path::PathBuf {
 /// `symlink_metadata(path)` resolves transparently through a symlinked
 /// parent, so the file itself still reports as an ordinary regular file.
 fn symlinked_ancestor(path: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut current = path.parent();
-    while let Some(dir) = current {
-        if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Some(dir.to_path_buf());
-        }
-        current = dir.parent();
-    }
-    None
+    path.parent()?
+        .ancestors()
+        .find(|dir| std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()))
+        .map(std::path::Path::to_path_buf)
 }
 
 /// `tili uninstall` — a full teardown, unlike `tili stop` (which only
@@ -864,8 +871,7 @@ fn uninstall() {
                     config_path.display(),
                     dir.display()
                 );
-            } else if let Err(e) = std::fs::remove_file(&config_path) {
-                eprintln!("tili: couldn't remove {}: {e}", config_path.display());
+            } else if remove_file_reporting(&config_path) {
                 had_error = true;
             }
         }
@@ -883,10 +889,7 @@ fn uninstall() {
     }
 
     let socket_path = tili_ipc::default_socket_path();
-    if socket_path.exists()
-        && let Err(e) = std::fs::remove_file(&socket_path)
-    {
-        eprintln!("tili: couldn't remove {}: {e}", socket_path.display());
+    if socket_path.exists() && remove_file_reporting(&socket_path) {
         had_error = true;
     }
 

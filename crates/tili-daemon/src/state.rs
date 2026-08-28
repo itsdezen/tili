@@ -1469,6 +1469,33 @@ impl WmState {
     /// — this is the seam that makes per-app-workspace placement
     /// unit-testable without a live `AXUIElement`, unlike
     /// `apply_windows_changed` itself.
+    /// Inserts `id` into `workspace`'s tree (tiled or floating) and, if that
+    /// workspace has no recorded focus yet, records this new node as it —
+    /// the bookkeeping shared by `place_new_window` and
+    /// `promote_from_special`'s `Tiled`/`Floating` arms. Not used by
+    /// `set_floating`, which unconditionally re-focuses the node instead of
+    /// only filling in a missing one — a real behavioral difference, not
+    /// just a naming one.
+    fn insert_into_workspace_tree(
+        &mut self,
+        id: WindowId,
+        workspace: &str,
+        floating: bool,
+    ) -> NodeId {
+        let near = self.workspace_focus.get(workspace).copied();
+        let root_orientation = self.root_orientation_hint();
+        let tree = self.workspaces.entry(workspace.to_string()).or_default();
+        let node = if floating {
+            tree.insert_floating(id, near, root_orientation)
+        } else {
+            tree.insert_window(id, near, root_orientation)
+        };
+        self.workspace_focus
+            .entry(workspace.to_string())
+            .or_insert(node);
+        node
+    }
+
     fn place_new_window(
         &mut self,
         id: WindowId,
@@ -1480,16 +1507,7 @@ impl WmState {
 
         match placement_kind {
             PlacementKind::Tiled => {
-                let near = self.workspace_focus.get(target_workspace).copied();
-                let root_orientation = self.root_orientation_hint();
-                let node = self
-                    .workspaces
-                    .entry(target_workspace.to_string())
-                    .or_default()
-                    .insert_window(id, near, root_orientation);
-                self.workspace_focus
-                    .entry(target_workspace.to_string())
-                    .or_insert(node);
+                self.insert_into_workspace_tree(id, target_workspace, false);
             }
             PlacementKind::Floating { .. } => {
                 // Joins the tree as a `Node::Floating` leaf exactly like the
@@ -1497,16 +1515,7 @@ impl WmState {
                 // can address it — its actual on-screen frame is separate
                 // (`place_floating_window` below), only written when its
                 // workspace is actually visible right now.
-                let near = self.workspace_focus.get(target_workspace).copied();
-                let root_orientation = self.root_orientation_hint();
-                let node = self
-                    .workspaces
-                    .entry(target_workspace.to_string())
-                    .or_default()
-                    .insert_floating(id, near, root_orientation);
-                self.workspace_focus
-                    .entry(target_workspace.to_string())
-                    .or_insert(node);
+                self.insert_into_workspace_tree(id, target_workspace, true);
                 if !inactive {
                     let area = self.focused_monitor_area();
                     self.place_floating_window(id, area);
@@ -1620,16 +1629,7 @@ impl WmState {
         };
         match restore {
             Restore::Tiled => {
-                let near = self.workspace_focus.get(&workspace).copied();
-                let root_orientation = self.root_orientation_hint();
-                let node = self
-                    .workspaces
-                    .entry(workspace.clone())
-                    .or_default()
-                    .insert_window(id, near, root_orientation);
-                self.workspace_focus
-                    .entry(workspace.clone())
-                    .or_insert(node);
+                self.insert_into_workspace_tree(id, &workspace, false);
                 self.placements.insert(
                     id,
                     Placement {
@@ -1639,16 +1639,7 @@ impl WmState {
                 );
             }
             Restore::Floating => {
-                let near = self.workspace_focus.get(&workspace).copied();
-                let root_orientation = self.root_orientation_hint();
-                let node = self
-                    .workspaces
-                    .entry(workspace.clone())
-                    .or_default()
-                    .insert_floating(id, near, root_orientation);
-                self.workspace_focus
-                    .entry(workspace.clone())
-                    .or_insert(node);
+                self.insert_into_workspace_tree(id, &workspace, true);
                 // Only write a real on-screen frame if `workspace` is
                 // actually the one showing on the focused monitor right now
                 // — same gate `place_new_window`'s `Floating` arm applies.
@@ -1702,23 +1693,7 @@ impl WmState {
             return;
         }
         let workspace = placement.workspace.clone();
-        let area = self
-            .active_workspace
-            .iter()
-            .find(|(_, w)| **w == workspace)
-            .and_then(|(&mid, _)| self.monitor_frame(mid))
-            .or_else(|| self.monitor_frame(self.focused_monitor))
-            .unwrap_or(live_frame);
-        let geometry = capture_float_geometry(live_frame, area);
-        self.placements.insert(
-            id,
-            Placement {
-                workspace,
-                kind: PlacementKind::Floating {
-                    manual: Some(geometry),
-                },
-            },
-        );
+        self.capture_manual_geometry(id, workspace, live_frame);
     }
 
     /// Captures a `Floating` window's current on-screen position/size
@@ -1739,6 +1714,16 @@ impl WmState {
             return;
         };
         let workspace = placement.workspace.clone();
+        self.capture_manual_geometry(id, workspace, frame);
+    }
+
+    /// Captures `frame` (`id`'s current position/size) proportionally
+    /// against whichever monitor `workspace` is showing on — the tail
+    /// shared by `maybe_capture_manual_geometry` (a live drag/resize) and
+    /// `capture_manual_geometry_before_park` (right before going off-screen),
+    /// which differ only in *which* frame counts as "current" and under
+    /// what condition it's worth capturing at all.
+    fn capture_manual_geometry(&mut self, id: WindowId, workspace: String, frame: Rect) {
         let area = self
             .active_workspace
             .iter()
@@ -2121,15 +2106,26 @@ impl WmState {
     /// Cycles `focused_monitor` to the next connected monitor, wrapping —
     /// a no-op with fewer than two monitors connected.
     pub fn focus_monitor_next(&mut self) {
+        if let Some(id) = self.next_monitor_id() {
+            self.focused_monitor = id;
+        }
+    }
+
+    /// The connected monitor id after `focused_monitor` in wraparound
+    /// order, or `None` with fewer than two monitors connected — shared by
+    /// `focus_monitor_next` and `resolve_monitor_target`'s
+    /// `MonitorTarget::Next` arm, which must agree on exactly the same
+    /// "next" monitor.
+    fn next_monitor_id(&self) -> Option<u32> {
         if self.monitors.len() < 2 {
-            return;
+            return None;
         }
         let ids: Vec<u32> = self.monitors.iter().map(|m| m.id).collect();
         let current_idx = ids
             .iter()
             .position(|&id| id == self.focused_monitor)
             .unwrap_or(0);
-        self.focused_monitor = ids[(current_idx + 1) % ids.len()];
+        Some(ids[(current_idx + 1) % ids.len()])
     }
 
     /// Re-enumerates connected monitors in response to a hot-plug/unplug
@@ -2177,17 +2173,7 @@ impl WmState {
 
         for id in diff.disconnected {
             if let Some(name) = self.active_workspace.remove(&id) {
-                let outgoing: Vec<WindowId> = self
-                    .workspaces
-                    .get(&name)
-                    .map(Tree::tiled_window_ids)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .chain(self.floating_windows_in(&name))
-                    .collect();
-                for wid in outgoing {
-                    self.park(wid);
-                }
+                self.park_workspace(&name);
             }
         }
 
@@ -2302,15 +2288,29 @@ impl WmState {
         self.workspace_focus.insert(workspace, node);
     }
 
+    /// The focused node, rejected if there isn't one or if it's a
+    /// `Floating` leaf and `root` is `false` — the guard shared by
+    /// `move_focused`/`join` (always `root: false`, since a tiled-topology
+    /// command is never meaningful on a floating window) and
+    /// `set_orientation`/`toggle_layout`/`set_layout`/`balance_sizes`
+    /// (`root: true` skips the floating check, since targeting the
+    /// workspace root doesn't depend on which node is focused). Not used
+    /// by `resize`/`toggle_fullscreen`'s non-native branch — same shape,
+    /// but a distinct error message each caller already relies on.
+    fn require_focused_tiled_node(&self, root: bool) -> Result<NodeId, String> {
+        let current = self.focused_node().ok_or("no window is focused")?;
+        if !root && self.focused_window_is_floating(current) {
+            return Err("no tiled window is focused".to_string());
+        }
+        Ok(current)
+    }
+
     /// Moves the focused window one step in `dir`, re-parenting it through
     /// the tree (see `Tree::move_in_direction`) rather than just swapping
     /// which window sits where — the moved window keeps its own `NodeId`,
     /// so it stays "the focused one" without needing to look up a target.
     pub fn move_focused(&mut self, dir: Direction) -> Result<(), String> {
-        let current = self.focused_node().ok_or("no window is focused")?;
-        if self.focused_window_is_floating(current) {
-            return Err("no tiled window is focused".to_string());
-        }
+        let current = self.require_focused_tiled_node(false)?;
         if !self.active_tree_mut().move_in_direction(current, dir) {
             return Err("no window in that direction".to_string());
         }
@@ -2323,10 +2323,7 @@ impl WmState {
     /// Wraps the focused window and its neighbor in `dir` into a new,
     /// perpendicular container.
     pub fn join(&mut self, dir: Direction) -> Result<(), String> {
-        let current = self.focused_node().ok_or("no window is focused")?;
-        if self.focused_window_is_floating(current) {
-            return Err("no tiled window is focused".to_string());
-        }
+        let current = self.require_focused_tiled_node(false)?;
         if self.active_tree_mut().join_with(current, dir) {
             self.relayout_active();
             Ok(())
@@ -2358,10 +2355,7 @@ impl WmState {
         orientation: tili_tree::Orientation,
         root: bool,
     ) -> Result<(), String> {
-        let current = self.focused_node().ok_or("no window is focused")?;
-        if !root && self.focused_window_is_floating(current) {
-            return Err("no tiled window is focused".to_string());
-        }
+        let current = self.require_focused_tiled_node(root)?;
         let changed = if root {
             self.active_tree_mut().set_root_orientation(orientation)
         } else {
@@ -2403,10 +2397,7 @@ impl WmState {
     /// recursive apply-to-everything). Errors if nothing's focused, or if
     /// the target container is a lone window with no container to toggle.
     pub fn toggle_layout(&mut self, root: bool) -> Result<(), String> {
-        let current = self.focused_node().ok_or("no window is focused")?;
-        if !root && self.focused_window_is_floating(current) {
-            return Err("no tiled window is focused".to_string());
-        }
+        let current = self.require_focused_tiled_node(root)?;
         let toggled = if root {
             self.active_tree_mut().toggle_root_layout()
         } else {
@@ -2426,10 +2417,7 @@ impl WmState {
     /// `toggle_layout` does (there are only two kinds, so "set" and
     /// "toggle away from the other one" are the same operation).
     pub fn set_layout(&mut self, kind: tili_ipc::LayoutKind, root: bool) -> Result<(), String> {
-        let current = self.focused_node().ok_or("no window is focused")?;
-        if !root && self.focused_window_is_floating(current) {
-            return Err("no tiled window is focused".to_string());
-        }
+        let current = self.require_focused_tiled_node(root)?;
         let is_accordion = if root {
             self.active_tree().is_root_accordion()
         } else {
@@ -2457,10 +2445,7 @@ impl WmState {
     /// `resize_weight` calls. Same dual-target split as
     /// `set_orientation`/`toggle_layout`.
     pub fn balance_sizes(&mut self, root: bool) -> Result<(), String> {
-        let current = self.focused_node().ok_or("no window is focused")?;
-        if !root && self.focused_window_is_floating(current) {
-            return Err("no tiled window is focused".to_string());
-        }
+        let current = self.require_focused_tiled_node(root)?;
         if self.active_tree_mut().balance_weights(current, root) {
             self.relayout_active();
             Ok(())
@@ -3002,17 +2987,7 @@ impl WmState {
             },
             None => {
                 if let Some(displaced_name) = &displaced {
-                    let outgoing: Vec<WindowId> = self
-                        .workspaces
-                        .get(displaced_name)
-                        .map(Tree::tiled_window_ids)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .chain(self.floating_windows_in(displaced_name))
-                        .collect();
-                    for id in outgoing {
-                        self.park(id);
-                    }
+                    self.park_workspace(displaced_name);
                 }
             }
         }
@@ -3043,17 +3018,9 @@ impl WmState {
                 .find(|m| m.is_main)
                 .map(|m| m.id)
                 .ok_or_else(|| "no main monitor connected".to_string()),
-            tili_ipc::MonitorTarget::Next => {
-                if self.monitors.len() < 2 {
-                    return Err("fewer than two monitors connected".to_string());
-                }
-                let ids: Vec<u32> = self.monitors.iter().map(|m| m.id).collect();
-                let current_idx = ids
-                    .iter()
-                    .position(|&id| id == self.focused_monitor)
-                    .unwrap_or(0);
-                Ok(ids[(current_idx + 1) % ids.len()])
-            }
+            tili_ipc::MonitorTarget::Next => self
+                .next_monitor_id()
+                .ok_or_else(|| "fewer than two monitors connected".to_string()),
         }
     }
 
@@ -3412,6 +3379,25 @@ impl WmState {
             })
             .map(|(&id, _)| id)
             .collect()
+    }
+
+    /// Parks every tiled and floating window of `name`'s workspace — shared
+    /// by `on_displays_changed` (a monitor disconnected) and
+    /// `move_workspace_to_monitor` (a workspace displaced off every
+    /// monitor), both of which need the same "this workspace is no longer
+    /// shown anywhere" cleanup.
+    fn park_workspace(&mut self, name: &str) {
+        let outgoing: Vec<WindowId> = self
+            .workspaces
+            .get(name)
+            .map(Tree::tiled_window_ids)
+            .unwrap_or_default()
+            .into_iter()
+            .chain(self.floating_windows_in(name))
+            .collect();
+        for id in outgoing {
+            self.park(id);
+        }
     }
 
     /// Drops a window's placement entirely — from its workspace's `Tree`
@@ -4790,6 +4776,35 @@ mod tests {
     // simple zero-value default, so overwriting a couple of fields
     // afterward for a deterministic test fixture is clearer here than
     // spelling out every other field via `..Default::default()`.
+    /// The 1920x1080 main + 1920x1080 secondary two-monitor fixture several
+    /// tests below share verbatim.
+    fn two_monitor_fixture() -> Vec<Monitor> {
+        vec![
+            Monitor {
+                id: 1,
+                frame: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: true,
+                notch: 0.0,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect {
+                    x: 1920.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+                notch: 0.0,
+            },
+        ]
+    }
+
     #[allow(clippy::field_reassign_with_default)]
     fn floating_test_state() -> WmState {
         let mut state = WmState::default();
@@ -6018,30 +6033,7 @@ mod tests {
     #[allow(clippy::field_reassign_with_default)]
     fn resolve_monitor_target_id_main_and_next() {
         let mut state = WmState::default();
-        state.monitors = vec![
-            Monitor {
-                id: 1,
-                frame: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: true,
-                notch: 0.0,
-            },
-            Monitor {
-                id: 2,
-                frame: Rect {
-                    x: 1920.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: false,
-                notch: 0.0,
-            },
-        ];
+        state.monitors = two_monitor_fixture();
         state.focused_monitor = 1;
 
         assert_eq!(
@@ -6067,30 +6059,7 @@ mod tests {
     #[allow(clippy::field_reassign_with_default)]
     fn move_workspace_to_monitor_swaps_with_whatever_is_there() {
         let mut state = WmState::default();
-        state.monitors = vec![
-            Monitor {
-                id: 1,
-                frame: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: true,
-                notch: 0.0,
-            },
-            Monitor {
-                id: 2,
-                frame: Rect {
-                    x: 1920.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: false,
-                notch: 0.0,
-            },
-        ];
+        state.monitors = two_monitor_fixture();
         state.workspaces.insert("a".to_string(), Tree::new());
         state.workspaces.insert("b".to_string(), Tree::new());
         state.active_workspace.clear();
@@ -6112,30 +6081,7 @@ mod tests {
     #[allow(clippy::field_reassign_with_default)]
     fn move_workspace_to_monitor_from_parked_displaces_whatever_was_shown() {
         let mut state = WmState::default();
-        state.monitors = vec![
-            Monitor {
-                id: 1,
-                frame: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: true,
-                notch: 0.0,
-            },
-            Monitor {
-                id: 2,
-                frame: Rect {
-                    x: 1920.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: false,
-                notch: 0.0,
-            },
-        ];
+        state.monitors = two_monitor_fixture();
         state.workspaces.insert("parked".to_string(), Tree::new());
         state.workspaces.insert("shown".to_string(), Tree::new());
         state.active_workspace.clear();
@@ -6166,30 +6112,7 @@ mod tests {
     #[allow(clippy::field_reassign_with_default)]
     fn move_workspace_to_monitor_with_no_name_targets_the_current_workspace() {
         let mut state = WmState::default();
-        state.monitors = vec![
-            Monitor {
-                id: 1,
-                frame: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: true,
-                notch: 0.0,
-            },
-            Monitor {
-                id: 2,
-                frame: Rect {
-                    x: 1920.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: false,
-                notch: 0.0,
-            },
-        ];
+        state.monitors = two_monitor_fixture();
         state.workspaces.insert("a".to_string(), Tree::new());
         state.workspaces.insert("b".to_string(), Tree::new());
         state.active_workspace.clear();
@@ -6460,30 +6383,7 @@ mod tests {
     fn place_new_window_tiled_into_a_workspace_active_on_another_monitor_swaps_monitors_to_show_it()
     {
         let mut state = WmState::default();
-        state.monitors = vec![
-            Monitor {
-                id: 1,
-                frame: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: true,
-                notch: 0.0,
-            },
-            Monitor {
-                id: 2,
-                frame: Rect {
-                    x: 1920.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: false,
-                notch: 0.0,
-            },
-        ];
+        state.monitors = two_monitor_fixture();
         state.workspaces.insert("a".to_string(), Tree::new());
         state.workspaces.insert("b".to_string(), Tree::new());
         state.active_workspace.clear();
@@ -6611,30 +6511,7 @@ mod tests {
     #[allow(clippy::field_reassign_with_default)]
     fn move_focused_to_workspace_swaps_monitors_when_target_visible_on_another_monitor() {
         let mut state = WmState::default();
-        state.monitors = vec![
-            Monitor {
-                id: 1,
-                frame: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: true,
-                notch: 0.0,
-            },
-            Monitor {
-                id: 2,
-                frame: Rect {
-                    x: 1920.0,
-                    y: 0.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                },
-                is_main: false,
-                notch: 0.0,
-            },
-        ];
+        state.monitors = two_monitor_fixture();
         state.workspaces.insert("a".to_string(), Tree::new());
         state.workspaces.insert("b".to_string(), Tree::new());
         state.active_workspace.clear();

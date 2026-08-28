@@ -41,22 +41,10 @@ pub fn build_initial(mtm: MainThreadMarker) -> TrayIcon {
 /// `Command::CurrentMode` (for the badge glyph) — best-effort, `None` on
 /// any transport/decode failure.
 pub fn poll_daemon() -> Option<Snapshot> {
-    let monitors = match crate::ipc::send(tili_ipc::Command::ListMonitors).ok()? {
-        tili_ipc::Response::OkWithPayload(v) => {
-            serde_json::from_value::<Vec<tili_ipc::MonitorInfo>>(v).ok()?
-        }
-        _ => return None,
-    };
-    let workspaces = match crate::ipc::send(tili_ipc::Command::ListWorkspaces).ok()? {
-        tili_ipc::Response::OkWithPayload(v) => {
-            serde_json::from_value::<Vec<tili_ipc::WorkspaceInfo>>(v).ok()?
-        }
-        _ => return None,
-    };
-    let mode = match crate::ipc::send(tili_ipc::Command::CurrentMode).ok()? {
-        tili_ipc::Response::OkWithPayload(v) => serde_json::from_value::<String>(v).ok()?,
-        _ => return None,
-    };
+    let monitors: Vec<tili_ipc::MonitorInfo> = send_and_decode(tili_ipc::Command::ListMonitors)?;
+    let workspaces: Vec<tili_ipc::WorkspaceInfo> =
+        send_and_decode(tili_ipc::Command::ListWorkspaces)?;
+    let mode: String = send_and_decode(tili_ipc::Command::CurrentMode)?;
     let current = monitors
         .into_iter()
         .find(|m| m.focused)
@@ -66,6 +54,16 @@ pub fn poll_daemon() -> Option<Snapshot> {
         workspaces,
         mode,
     })
+}
+
+/// Sends `command` and decodes its `OkWithPayload` response as `T` — the
+/// pattern all three `poll_daemon` requests share, `None` on any
+/// transport/decode failure or non-payload response.
+fn send_and_decode<T: serde::de::DeserializeOwned>(command: tili_ipc::Command) -> Option<T> {
+    match crate::ipc::send(command).ok()? {
+        tili_ipc::Response::OkWithPayload(v) => serde_json::from_value(v).ok(),
+        _ => None,
+    }
 }
 
 /// `(current, sorted workspace names, mode)` — enough to detect "did

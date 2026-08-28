@@ -388,18 +388,11 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
     let Some(children) = node.children() else {
         return gaps;
     };
-    if let Some(v) = children
-        .get_arg("inner")
-        .and_then(|v| v.as_integer())
-        .and_then(|v| u32::try_from(v).ok())
-    {
+    if let Some(v) = as_u32(children.get_arg("inner")) {
         gaps.inner = v;
     }
     if let Some(outer_node) = children.get("outer") {
-        let values: Vec<u32> = (0..4)
-            .filter_map(|i| outer_node.get(i).and_then(|v| v.as_integer()))
-            .filter_map(|v| u32::try_from(v).ok())
-            .collect();
+        let values: Vec<u32> = (0..4).filter_map(|i| as_u32(outer_node.get(i))).collect();
         gaps.outer = match values.as_slice() {
             [all] => (*all, *all, *all, *all),
             // CSS shorthand's 2- and 3-value forms — `outer` is documented
@@ -413,11 +406,7 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
             _ => gaps.outer,
         };
     }
-    if let Some(v) = children
-        .get_arg("accordion")
-        .and_then(|v| v.as_integer())
-        .and_then(|v| u32::try_from(v).ok())
-    {
+    if let Some(v) = as_u32(children.get_arg("accordion")) {
         gaps.accordion = v;
     }
     if let Some(v) = children.get_arg("ignore-notch").and_then(|v| v.as_bool()) {
@@ -474,14 +463,8 @@ fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaul
             };
             let (width, height, center) = match n.children() {
                 Some(rule_children) => (
-                    rule_children
-                        .get_arg("width")
-                        .and_then(|v| v.as_integer())
-                        .and_then(|v| u32::try_from(v).ok()),
-                    rule_children
-                        .get_arg("height")
-                        .and_then(|v| v.as_integer())
-                        .and_then(|v| u32::try_from(v).ok()),
+                    as_u32(rule_children.get_arg("width")),
+                    as_u32(rule_children.get_arg("height")),
                     rule_children.get_arg("center").and_then(|v| v.as_bool()),
                 ),
                 None => (None, None, None),
@@ -525,6 +508,14 @@ fn as_f32(value: Option<&kdl::KdlValue>) -> Option<f32> {
             .map(|f| f as f32)
             .or_else(|| v.as_integer().map(|i| i as f32))
     })
+}
+
+/// A KDL integer value as a `u32`, or `None` if it's missing, not an
+/// integer, or negative/too large to fit.
+fn as_u32(value: Option<&kdl::KdlValue>) -> Option<u32> {
+    value
+        .and_then(|v| v.as_integer())
+        .and_then(|v| u32::try_from(v).ok())
 }
 
 fn parse_gaps(doc: &KdlDocument) -> (Gaps, HashMap<String, Gaps>) {

@@ -128,6 +128,10 @@ pub struct Tree {
     root: Option<NodeId>,
 }
 
+/// `tiles_layout_inputs`'s return shape: sizeable children with their
+/// weights, total weight, and divisible space.
+type TilesLayoutInputs = (Vec<(NodeId, f32)>, f32, f64);
+
 impl Tree {
     pub fn new() -> Self {
         Self::default()
@@ -192,12 +196,11 @@ impl Tree {
             .collect()
     }
 
-    /// Finds the leaf node for a window, if it's in the tree.
+    /// Finds the leaf node for a window, if it's in the tree. Same lookup as
+    /// `node_for_window` (the two names exist for different callers' reading
+    /// context), so this just delegates to it.
     pub fn find_node(&self, window: WindowId) -> Option<NodeId> {
-        self.nodes.iter().find_map(|(id, node)| match node {
-            Node::Window { window: w } | Node::Floating { window: w } if *w == window => Some(id),
-            _ => None,
-        })
+        self.node_for_window(window)
     }
 
     /// Inserts a new window as a sibling of `near`, in `near`'s own parent
@@ -421,28 +424,10 @@ impl Tree {
         }
     }
 
-    /// Whether `from`'s immediate parent container is an `Accordion` (as
-    /// opposed to `Tiles`, or `from` having no parent at all).
-    pub fn is_accordion_container(&self, from: NodeId) -> bool {
-        self.parents
-            .get(&from)
-            .and_then(|&p| self.nodes.get(p))
-            .is_some_and(|n| {
-                matches!(
-                    n,
-                    Node::Container {
-                        layout: Layout::Accordion,
-                        ..
-                    }
-                )
-            })
-    }
-
-    /// Whether the workspace's root container is itself an `Accordion` —
-    /// the root-container analogue of `is_accordion_container`, used by
-    /// `layout --root` (`set_layout`) since the root has no parent to check.
-    pub fn is_root_accordion(&self) -> bool {
-        self.root.and_then(|r| self.nodes.get(r)).is_some_and(|n| {
+    /// Whether `node` (if any) resolves to an `Accordion` container — the
+    /// shared predicate behind `is_accordion_container`/`is_root_accordion`.
+    fn is_accordion(&self, node: Option<NodeId>) -> bool {
+        node.and_then(|n| self.nodes.get(n)).is_some_and(|n| {
             matches!(
                 n,
                 Node::Container {
@@ -451,6 +436,19 @@ impl Tree {
                 }
             )
         })
+    }
+
+    /// Whether `from`'s immediate parent container is an `Accordion` (as
+    /// opposed to `Tiles`, or `from` having no parent at all).
+    pub fn is_accordion_container(&self, from: NodeId) -> bool {
+        self.is_accordion(self.parents.get(&from).copied())
+    }
+
+    /// Whether the workspace's root container is itself an `Accordion` —
+    /// the root-container analogue of `is_accordion_container`, used by
+    /// `layout --root` (`set_layout`) since the root has no parent to check.
+    pub fn is_root_accordion(&self) -> bool {
+        self.is_accordion(self.root)
     }
 
     /// `from`'s immediate parent container's orientation, or `None` if
@@ -659,8 +657,7 @@ impl Tree {
         let Some(idx) = children.iter().position(|&c| c == branch) else {
             return false;
         };
-        let others: Vec<usize> = (0..children.len()).filter(|&i| i != idx).collect();
-        let others_total: f32 = others.iter().map(|&i| weights[i]).sum();
+        let (others, others_total) = other_indices_and_total(children, weights, idx);
 
         weights[idx] += actual_delta;
         for &i in &others {
@@ -686,8 +683,7 @@ impl Tree {
             return None;
         }
         let idx = children.iter().position(|&c| c == branch)?;
-        let others: Vec<usize> = (0..children.len()).filter(|&i| i != idx).collect();
-        let others_total: f32 = others.iter().map(|&i| weights[i]).sum();
+        let (others, others_total) = other_indices_and_total(children, weights, idx);
         if others_total <= 0.0 {
             return None;
         }
@@ -790,18 +786,10 @@ impl Tree {
                 // footprint in `layout`, so directional navigation treats
                 // them as if they weren't there rather than landing focus
                 // on one.
-                let mut cursor = if forward {
-                    idx.checked_add(1)
-                } else {
-                    idx.checked_sub(1)
-                };
+                let mut cursor = step_cursor(Some(idx), forward);
                 while let Some(&target) = cursor.and_then(|i| children.get(i)) {
                     if matches!(self.nodes.get(target), Some(Node::Floating { .. })) {
-                        cursor = if forward {
-                            cursor.and_then(|i| i.checked_add(1))
-                        } else {
-                            cursor.and_then(|i| i.checked_sub(1))
-                        };
+                        cursor = step_cursor(cursor, forward);
                         continue;
                     }
                     return Some(self.mru_leaf(target));
@@ -884,21 +872,13 @@ impl Tree {
         // Skips over `Floating` siblings — they carry no footprint in
         // `layout`, so they shouldn't block a tiled window from moving past
         // them the way an actual tiled/container sibling does.
-        let mut cursor = if forward {
-            idx.checked_add(1)
-        } else {
-            idx.checked_sub(1)
-        };
+        let mut cursor = step_cursor(Some(idx), forward);
         let (target_idx, sibling) = loop {
             let Some(&candidate) = cursor.and_then(|i| children.get(i)) else {
                 return false;
             };
             if matches!(self.nodes.get(candidate), Some(Node::Floating { .. })) {
-                cursor = if forward {
-                    cursor.and_then(|i| i.checked_add(1))
-                } else {
-                    cursor.and_then(|i| i.checked_sub(1))
-                };
+                cursor = step_cursor(cursor, forward);
                 continue;
             }
             break (cursor.expect("checked above"), candidate);
@@ -1021,16 +1001,47 @@ impl Tree {
     pub fn layout(&self, area: Rect, gaps: Gaps) -> Vec<(WindowId, Rect)> {
         let mut out = Vec::new();
         if let Some(root) = self.root {
-            let (top, right, bottom, left) = gaps.outer;
-            let padded = Rect {
-                x: area.x + left,
-                y: area.y + top,
-                width: (area.width - left - right).max(0.0),
-                height: (area.height - top - bottom).max(0.0),
-            };
+            let padded = apply_outer_gaps(area, gaps.outer);
             self.layout_node(root, padded, gaps.inner, gaps.accordion, &mut out);
         }
         out
+    }
+
+    /// Shared by `layout_node` and `resize_handle_node`'s `Tiles` branches:
+    /// the sizeable (non-`Floating`) children with their weights, the total
+    /// weight (floored at `f32::EPSILON` to avoid a division by zero), and
+    /// the space actually divisible among them once `inner_gap` is
+    /// subtracted for the gaps between them. `None` if every child is
+    /// `Floating` (nothing to size).
+    fn tiles_layout_inputs(
+        &self,
+        children: &[NodeId],
+        weights: &[f32],
+        orientation: Orientation,
+        area: Rect,
+        inner_gap: f64,
+    ) -> Option<TilesLayoutInputs> {
+        let sizeable: Vec<(NodeId, f32)> = children
+            .iter()
+            .zip(weights.iter())
+            .filter(|&(&c, _)| !matches!(self.nodes.get(c), Some(Node::Floating { .. })))
+            .map(|(&c, &w)| (c, w))
+            .collect();
+        let n = sizeable.len();
+        if n == 0 {
+            return None;
+        }
+        let total: f32 = sizeable
+            .iter()
+            .map(|&(_, w)| w)
+            .sum::<f32>()
+            .max(f32::EPSILON);
+        let total_gap = inner_gap * (n.saturating_sub(1)) as f64;
+        let divisible = match orientation {
+            Orientation::Horizontal => (area.width - total_gap).max(0.0),
+            Orientation::Vertical => (area.height - total_gap).max(0.0),
+        };
+        Some((sizeable, total, divisible))
     }
 
     fn layout_node(
@@ -1059,44 +1070,16 @@ impl Tree {
                 // they take no share of `area` and don't count toward the
                 // inner-gap total, so tiled siblings divide the space
                 // exactly as if the floating child weren't there.
-                let sizeable: Vec<(NodeId, f32)> = children
-                    .iter()
-                    .zip(weights.iter())
-                    .filter(|&(&c, _)| !matches!(self.nodes.get(c), Some(Node::Floating { .. })))
-                    .map(|(&c, &w)| (c, w))
-                    .collect();
-                let n = sizeable.len();
-                if n == 0 {
+                let Some((sizeable, total, divisible)) =
+                    self.tiles_layout_inputs(children, weights, *orientation, area, inner_gap)
+                else {
                     return;
-                }
-                let total: f32 = sizeable
-                    .iter()
-                    .map(|&(_, w)| w)
-                    .sum::<f32>()
-                    .max(f32::EPSILON);
-                let total_gap = inner_gap * (n.saturating_sub(1)) as f64;
-                let divisible = match orientation {
-                    Orientation::Horizontal => (area.width - total_gap).max(0.0),
-                    Orientation::Vertical => (area.height - total_gap).max(0.0),
                 };
                 let mut offset = 0.0_f64;
                 for (child, weight) in sizeable {
                     let fraction = f64::from(weight / total);
                     let child_size = divisible * fraction;
-                    let child_area = match orientation {
-                        Orientation::Horizontal => Rect {
-                            x: area.x + offset,
-                            y: area.y,
-                            width: child_size,
-                            height: area.height,
-                        },
-                        Orientation::Vertical => Rect {
-                            x: area.x,
-                            y: area.y + offset,
-                            width: area.width,
-                            height: child_size,
-                        },
-                    };
+                    let child_area = split_child_area(area, *orientation, offset, child_size);
                     offset += child_size + inner_gap;
                     self.layout_node(child, child_area, inner_gap, accordion_padding, out);
                 }
@@ -1117,31 +1100,8 @@ impl Tree {
                     .collect();
                 let n = sizeable.len();
                 for (i, &child) in sizeable.iter().enumerate() {
-                    let mut child_area = area;
-                    let pad_before = i > 0;
-                    let pad_after = i + 1 < n;
-                    match orientation {
-                        Orientation::Horizontal => {
-                            if pad_before {
-                                child_area.x += accordion_padding;
-                                child_area.width -= accordion_padding;
-                            }
-                            if pad_after {
-                                child_area.width -= accordion_padding;
-                            }
-                        }
-                        Orientation::Vertical => {
-                            if pad_before {
-                                child_area.y += accordion_padding;
-                                child_area.height -= accordion_padding;
-                            }
-                            if pad_after {
-                                child_area.height -= accordion_padding;
-                            }
-                        }
-                    }
-                    child_area.width = child_area.width.max(0.0);
-                    child_area.height = child_area.height.max(0.0);
+                    let child_area =
+                        accordion_child_area(area, *orientation, i, n, accordion_padding);
                     self.layout_node(child, child_area, inner_gap, accordion_padding, out);
                 }
             }
@@ -1162,13 +1122,7 @@ impl Tree {
         point: (f64, f64),
     ) -> Option<ResizeHandle> {
         let root = self.root?;
-        let (top, right, bottom, left) = gaps.outer;
-        let padded = Rect {
-            x: area.x + left,
-            y: area.y + top,
-            width: (area.width - left - right).max(0.0),
-            height: (area.height - top - bottom).max(0.0),
-        };
+        let padded = apply_outer_gaps(area, gaps.outer);
         self.resize_handle_node(root, padded, gaps.inner, gaps.accordion, point)
     }
 
@@ -1189,26 +1143,9 @@ impl Tree {
                 weights,
                 ..
             } => {
-                let sizeable: Vec<(NodeId, f32)> = children
-                    .iter()
-                    .zip(weights.iter())
-                    .filter(|&(&c, _)| !matches!(self.nodes.get(c), Some(Node::Floating { .. })))
-                    .map(|(&c, &w)| (c, w))
-                    .collect();
+                let (sizeable, total, divisible) =
+                    self.tiles_layout_inputs(children, weights, *orientation, area, inner_gap)?;
                 let n = sizeable.len();
-                if n == 0 {
-                    return None;
-                }
-                let total: f32 = sizeable
-                    .iter()
-                    .map(|&(_, w)| w)
-                    .sum::<f32>()
-                    .max(f32::EPSILON);
-                let total_gap = inner_gap * (n.saturating_sub(1)) as f64;
-                let divisible = match orientation {
-                    Orientation::Horizontal => (area.width - total_gap).max(0.0),
-                    Orientation::Vertical => (area.height - total_gap).max(0.0),
-                };
                 let weight_per_pixel = if divisible > 0.0 {
                     f64::from(total) / divisible
                 } else {
@@ -1219,20 +1156,7 @@ impl Tree {
                 for (i, &(child, weight)) in sizeable.iter().enumerate() {
                     let fraction = f64::from(weight / total);
                     let child_size = divisible * fraction;
-                    let child_area = match orientation {
-                        Orientation::Horizontal => Rect {
-                            x: area.x + offset,
-                            y: area.y,
-                            width: child_size,
-                            height: area.height,
-                        },
-                        Orientation::Vertical => Rect {
-                            x: area.x,
-                            y: area.y + offset,
-                            width: area.width,
-                            height: child_size,
-                        },
-                    };
+                    let child_area = split_child_area(area, *orientation, offset, child_size);
 
                     let past_child = match orientation {
                         Orientation::Horizontal => point.0 >= child_area.x + child_area.width,
@@ -1293,31 +1217,8 @@ impl Tree {
                     .collect();
                 let n = sizeable.len();
                 let idx = (*mru).min(n.checked_sub(1)?);
-                let mut child_area = area;
-                let pad_before = idx > 0;
-                let pad_after = idx + 1 < n;
-                match orientation {
-                    Orientation::Horizontal => {
-                        if pad_before {
-                            child_area.x += accordion_padding;
-                            child_area.width -= accordion_padding;
-                        }
-                        if pad_after {
-                            child_area.width -= accordion_padding;
-                        }
-                    }
-                    Orientation::Vertical => {
-                        if pad_before {
-                            child_area.y += accordion_padding;
-                            child_area.height -= accordion_padding;
-                        }
-                        if pad_after {
-                            child_area.height -= accordion_padding;
-                        }
-                    }
-                }
-                child_area.width = child_area.width.max(0.0);
-                child_area.height = child_area.height.max(0.0);
+                let child_area =
+                    accordion_child_area(area, *orientation, idx, n, accordion_padding);
                 self.resize_handle_node(
                     sizeable[idx],
                     child_area,
@@ -1488,11 +1389,105 @@ impl Tree {
     }
 }
 
+/// Every index into `children` other than `idx`, plus their combined
+/// weight — shared by `apply_resize` and `branch_resize_bounds`, which must
+/// agree on exactly the same set of "other" siblings and total.
+fn other_indices_and_total(children: &[NodeId], weights: &[f32], idx: usize) -> (Vec<usize>, f32) {
+    let others: Vec<usize> = (0..children.len()).filter(|&i| i != idx).collect();
+    let others_total: f32 = others.iter().map(|&i| weights[i]).sum();
+    (others, others_total)
+}
+
+/// Steps `cursor` one child index forward or backward, saturating to `None`
+/// past either end — shared by `navigate`/`move_within`'s "skip over a
+/// `Floating` sibling" loops, both for their first step and each retry.
+fn step_cursor(cursor: Option<usize>, forward: bool) -> Option<usize> {
+    if forward {
+        cursor.and_then(|i| i.checked_add(1))
+    } else {
+        cursor.and_then(|i| i.checked_sub(1))
+    }
+}
+
 fn axis_for(dir: Direction) -> Orientation {
     match dir {
         Direction::Left | Direction::Right => Orientation::Horizontal,
         Direction::Up | Direction::Down => Orientation::Vertical,
     }
+}
+
+/// Insets `area` by `outer` (top, right, bottom, left) — shared by `layout`
+/// and `resize_handle_at`, which must agree on exactly the same padded area
+/// for a resize-handle hit to agree with what `layout` actually drew.
+fn apply_outer_gaps(area: Rect, outer: (f64, f64, f64, f64)) -> Rect {
+    let (top, right, bottom, left) = outer;
+    Rect {
+        x: area.x + left,
+        y: area.y + top,
+        width: (area.width - left - right).max(0.0),
+        height: (area.height - top - bottom).max(0.0),
+    }
+}
+
+/// One `Tiles` child's rect: `child_size` along the split axis starting at
+/// `offset` from `area`'s edge, the full cross-axis extent otherwise —
+/// shared by `layout_node` and `resize_handle_node`, which must agree on
+/// exactly the same child geometry.
+fn split_child_area(area: Rect, orientation: Orientation, offset: f64, child_size: f64) -> Rect {
+    match orientation {
+        Orientation::Horizontal => Rect {
+            x: area.x + offset,
+            y: area.y,
+            width: child_size,
+            height: area.height,
+        },
+        Orientation::Vertical => Rect {
+            x: area.x,
+            y: area.y + offset,
+            width: area.width,
+            height: child_size,
+        },
+    }
+}
+
+/// One `Accordion` child's rect at index `idx` of `n`: `area` inset by
+/// `accordion_padding` on whichever edges have a sibling peeking out (every
+/// edge but the first/last) — shared by `layout_node` and
+/// `resize_handle_node`, which must agree on exactly the same child
+/// geometry.
+fn accordion_child_area(
+    area: Rect,
+    orientation: Orientation,
+    idx: usize,
+    n: usize,
+    accordion_padding: f64,
+) -> Rect {
+    let mut child_area = area;
+    let pad_before = idx > 0;
+    let pad_after = idx + 1 < n;
+    match orientation {
+        Orientation::Horizontal => {
+            if pad_before {
+                child_area.x += accordion_padding;
+                child_area.width -= accordion_padding;
+            }
+            if pad_after {
+                child_area.width -= accordion_padding;
+            }
+        }
+        Orientation::Vertical => {
+            if pad_before {
+                child_area.y += accordion_padding;
+                child_area.height -= accordion_padding;
+            }
+            if pad_after {
+                child_area.height -= accordion_padding;
+            }
+        }
+    }
+    child_area.width = child_area.width.max(0.0);
+    child_area.height = child_area.height.max(0.0);
+    child_area
 }
 
 #[cfg(test)]

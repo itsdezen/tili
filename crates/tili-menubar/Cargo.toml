@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 tili-ipc = { path = "../tili-ipc" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tray-icon = "0.24"
 # Same objc2/objc2-app-kit/objc2-foundation version family already pinned

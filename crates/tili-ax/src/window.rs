@@ -111,6 +111,13 @@ pub(crate) fn apply_call_timeout(app: &AXUIElement) {
     let _ = app.set_timeout(AX_CALL_TIMEOUT_SECS);
 }
 
+/// Whether `element` has a given child attribute at all (e.g. a chrome
+/// button) — the read succeeding with a value is all that's checked here,
+/// the value itself is discarded.
+fn has_attribute(element: &AXUIElement, attr: &str) -> bool {
+    element.element_attribute(attr).ok().flatten().is_some()
+}
+
 pub(crate) fn frame_matches(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < FRAME_EPSILON
         && (a.y - b.y).abs() < FRAME_EPSILON
@@ -269,29 +276,13 @@ impl AxWindow {
             .string_attribute(AX_SUBROLE_ATTRIBUTE)
             .ok()
             .flatten();
-        let has_fullscreen_button = element
-            .element_attribute(AX_FULL_SCREEN_BUTTON_ATTRIBUTE)
-            .ok()
-            .flatten()
-            .is_some();
-        let has_close_button = element
-            .element_attribute(AX_CLOSE_BUTTON_ATTRIBUTE)
-            .ok()
-            .flatten()
-            .is_some();
-        let has_zoom_button = element
-            .element_attribute(AX_ZOOM_BUTTON_ATTRIBUTE)
-            .ok()
-            .flatten()
-            .is_some();
+        let has_fullscreen_button = has_attribute(&element, AX_FULL_SCREEN_BUTTON_ATTRIBUTE);
+        let has_close_button = has_attribute(&element, AX_CLOSE_BUTTON_ATTRIBUTE);
+        let has_zoom_button = has_attribute(&element, AX_ZOOM_BUTTON_ATTRIBUTE);
         let has_any_chrome_button = has_fullscreen_button
             || has_close_button
             || has_zoom_button
-            || element
-                .element_attribute(AX_MINIMIZE_BUTTON_ATTRIBUTE)
-                .ok()
-                .flatten()
-                .is_some();
+            || has_attribute(&element, AX_MINIMIZE_BUTTON_ATTRIBUTE);
         let is_regular_app = crate::workspace::is_regular_app(pid);
         let kind = classify_window_kind(
             subrole.as_deref(),

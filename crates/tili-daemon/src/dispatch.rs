@@ -32,12 +32,7 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
     }
     match command {
         Command::Ping => Response::Ok,
-        Command::ListWindows => match serde_json::to_value(state.list_windows()) {
-            Ok(payload) => Response::OkWithPayload(payload),
-            Err(e) => Response::Err {
-                message: e.to_string(),
-            },
-        },
+        Command::ListWindows => payload_response(state.list_windows()),
         Command::Focus(dir) => result_response(state.focus(to_tree_direction(dir))),
         Command::Move(dir) => result_response(state.move_focused(to_tree_direction(dir))),
         Command::Join(dir) => result_response(state.join(to_tree_direction(dir))),
@@ -46,12 +41,7 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
             result_response(state.set_orientation(to_tree_orientation(kind), root))
         }
         Command::OrientationToggle(root) => result_response(state.toggle_orientation(root)),
-        Command::ListWorkspaces => match serde_json::to_value(state.list_workspaces()) {
-            Ok(payload) => Response::OkWithPayload(payload),
-            Err(e) => Response::Err {
-                message: e.to_string(),
-            },
-        },
+        Command::ListWorkspaces => payload_response(state.list_workspaces()),
         Command::WorkspaceSwitch(name) => result_response(state.switch_workspace(&name)),
         Command::MoveNodeToWorkspace(name) => {
             result_response(state.move_focused_to_workspace(&name))
@@ -70,12 +60,7 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
             state.focus_monitor_next();
             Response::Ok
         }
-        Command::ListMonitors => match serde_json::to_value(state.list_monitors()) {
-            Ok(payload) => Response::OkWithPayload(payload),
-            Err(e) => Response::Err {
-                message: e.to_string(),
-            },
-        },
+        Command::ListMonitors => payload_response(state.list_monitors()),
         Command::BalanceSizes { root } => result_response(state.balance_sizes(root)),
         // A distinct `flatten` has no additional effect to implement:
         // `Tree::normalize` already runs after every mutation and already
@@ -103,12 +88,7 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
                 input_monitoring_granted: tili_ax::has_input_monitoring_permission(),
                 config_warnings: state.config_warnings(),
             };
-            match serde_json::to_value(report) {
-                Ok(payload) => Response::OkWithPayload(payload),
-                Err(e) => Response::Err {
-                    message: e.to_string(),
-                },
-            }
+            payload_response(report)
         }
         // `tili-ipc`'s parser deliberately never fails on an unrecognized
         // command string — it becomes `Command::Raw` so a typo'd keybinding
@@ -146,6 +126,17 @@ fn result_response(result: Result<(), String>) -> Response {
     match result {
         Ok(()) => Response::Ok,
         Err(message) => Response::Err { message },
+    }
+}
+
+/// Serializes `value` into a `Response`, same shape every `ListWindows`/
+/// `ListWorkspaces`/`ListMonitors`/`Doctor` arm needs.
+fn payload_response<T: serde::Serialize>(value: T) -> Response {
+    match serde_json::to_value(value) {
+        Ok(payload) => Response::OkWithPayload(payload),
+        Err(e) => Response::Err {
+            message: e.to_string(),
+        },
     }
 }
 

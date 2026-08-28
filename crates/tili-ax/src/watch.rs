@@ -427,6 +427,33 @@ fn watchable_pids() -> BTreeSet<i32> {
         .collect()
 }
 
+/// Subscribes to `pid`'s window notifications (or, on failure, marks it
+/// `unwatchable`), then seeds an immediate `WindowsChanged` if it already
+/// has on-screen windows — a fresh subscription only catches *future*
+/// per-window notifications, so anything already open needs this one nudge
+/// to get tiled. Shared by `seed_watchers` and `resync_watchers`, which
+/// both attach a watcher to a not-yet-watched pid the same way.
+fn attach_watcher(
+    rt: &tokio::runtime::Handle,
+    event_tx: &mpsc::UnboundedSender<WmEvent>,
+    watched: &mut HashMap<i32, tokio::task::JoinHandle<()>>,
+    unwatchable: &mut HashSet<i32>,
+    onscreen: &BTreeSet<i32>,
+    pid: i32,
+) {
+    match watch_app(rt, pid, event_tx.clone()) {
+        Some(handle) => {
+            watched.insert(pid, handle);
+        }
+        None => {
+            unwatchable.insert(pid);
+        }
+    }
+    if onscreen.contains(&pid) {
+        let _ = event_tx.send(WmEvent::WindowsChanged { pid });
+    }
+}
+
 fn seed_watchers(
     rt: &tokio::runtime::Handle,
     event_tx: &mpsc::UnboundedSender<WmEvent>,
@@ -435,17 +462,7 @@ fn seed_watchers(
 ) {
     let onscreen = enumerate::onscreen_owner_pids();
     for pid in watchable_pids() {
-        match watch_app(rt, pid, event_tx.clone()) {
-            Some(handle) => {
-                watched.insert(pid, handle);
-            }
-            None => {
-                unwatchable.insert(pid);
-            }
-        }
-        if onscreen.contains(&pid) {
-            let _ = event_tx.send(WmEvent::WindowsChanged { pid });
-        }
+        attach_watcher(rt, event_tx, watched, unwatchable, &onscreen, pid);
     }
 }
 
@@ -487,17 +504,7 @@ fn resync_watchers(
 
     for &pid in &current {
         if !watched.contains_key(&pid) && !unwatchable.contains(&pid) {
-            match watch_app(rt, pid, event_tx.clone()) {
-                Some(handle) => {
-                    watched.insert(pid, handle);
-                }
-                None => {
-                    unwatchable.insert(pid);
-                }
-            }
-            if onscreen.contains(&pid) {
-                let _ = event_tx.send(WmEvent::WindowsChanged { pid });
-            }
+            attach_watcher(rt, event_tx, watched, unwatchable, &onscreen, pid);
         }
     }
 
