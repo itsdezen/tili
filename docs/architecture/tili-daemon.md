@@ -882,6 +882,25 @@ tight fit. Over-length frames are rejected with a descriptive `io::Error`,
 surfaced through the same generic `eprintln!("tili-daemon: failed to read
 command: {e}")` the accept arm already had for any other read failure.
 
+`handle_wait_for_change` (spawned per `Command::WaitForChange` connection,
+see `dispatch()`'s doc comment for why this bypasses it) races the real
+`change_notify` wait against `stream.readable()`, to end the task early if
+the client disconnects before anything actually changes rather than
+holding the accepted `UnixStream` open for the full
+`WAIT_FOR_CHANGE_TIMEOUT`. `stream.readable()` alone is **not** sufficient
+to detect that — confirmed on real hardware (reproduced 100% of the time
+against a signed release build with a bare Python socket client) that it
+resolves spuriously, with nothing actually readable, causing the task to
+bail out and return with zero bytes written on literally every single
+`WaitForChange` call — a total, silent regression of the long-poll this
+whole zero-polling design depends on, previously undetected because it
+looks identical to "the client already hung up" from every angle except a
+live capture. The fix loops on a single pinned `timeout` future, and on
+each `readable()` wakeup does a non-blocking `try_read` to confirm genuine
+EOF (`Ok(0)`) before returning — a `WouldBlock` means it was spurious, so
+the loop goes back to waiting on the same timeout instead of restarting it
+or giving up.
+
 `tili_ax::spawn_hotkey_tap`/`spawn_display_watcher`/`spawn_mouse_watcher`
 each build and send on a `tokio::sync::mpsc` channel directly from their own
 dedicated thread, so `main.rs` calls them straight — no separate relay-

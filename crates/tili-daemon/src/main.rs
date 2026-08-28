@@ -609,12 +609,37 @@ async fn handle_wait_for_change(
 ) {
     // Races the real wait against the client closing its end early (a
     // crash, a force-quit) — the protocol never sends anything more after
-    // the initial command, so any readability edge here means "gone,"
-    // letting this task (and its accepted `UnixStream`) end immediately
-    // instead of sitting held open for up to `WAIT_FOR_CHANGE_TIMEOUT`.
-    tokio::select! {
-        _ = tokio::time::timeout(WAIT_FOR_CHANGE_TIMEOUT, notified) => {}
-        _ = stream.readable() => return,
+    // the initial command, so real EOF here means "gone," letting this
+    // task (and its accepted `UnixStream`) end immediately instead of
+    // sitting held open for up to `WAIT_FOR_CHANGE_TIMEOUT`.
+    let timeout = tokio::time::timeout(WAIT_FOR_CHANGE_TIMEOUT, notified);
+    tokio::pin!(timeout);
+    loop {
+        tokio::select! {
+            _ = &mut timeout => break,
+            ready = stream.readable() => {
+                if ready.is_err() {
+                    return;
+                }
+                // `readable()` can resolve spuriously — ready with nothing
+                // actually to read (a documented tokio caveat, not specific
+                // to this socket) — so a bare `_ = stream.readable() =>
+                // return` here would bail out of every single wait
+                // immediately on the first spurious wakeup, breaking the
+                // long-poll entirely (confirmed: made `WaitForChange` fail
+                // instantly on every call, 100% of the time, on real
+                // hardware). Confirm genuine EOF with a non-blocking read
+                // before treating it as "client gone"; a `WouldBlock` means
+                // it was spurious, so loop back and keep waiting on the
+                // same still-pinned `timeout` instead of restarting it.
+                let mut probe = [0_u8; 1];
+                match stream.try_read(&mut probe) {
+                    Ok(_) => return, // EOF (0) or unexpected data either way means done waiting
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(_) => return,
+                }
+            }
+        }
     }
     let _ = socket::write_response(&mut stream, &Response::Ok).await;
 }
