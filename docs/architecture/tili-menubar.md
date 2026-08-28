@@ -95,49 +95,35 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   had just re-subscribed — turning the long-poll design back into a
   continuously-spinning loop the instant the first real change of a
   session happened. Worth fixing on its own (a "long-poll" design spinning
-  continuously defeats its entire purpose), but ruled out as the cause of
-  the known issue below via `tili workspace <name>` from a terminal (goes
-  through the identical socket path) staying fast throughout.
-- `src/badge.rs`'s `image_for`/`glyph_for_mode` and `src/menu.rs`'s
-  `workspace_label` all take a `&tili_ipc::MenubarStyle`, fetched by
-  `poll_daemon` via `Command::MenubarStyle` and cached on `MenuState.style`
-  (kept across a single failed style fetch — same "don't flash a broken
-  state on a hiccup" reasoning as `Snapshot` itself). `tili-menubar` has
-  no `tili-config` dependency; `tili-daemon` owns the `menubar { }` KDL
-  block (`tili_config::MenubarConfig`) and converts it to the wire type at
+  continuously defeats its entire purpose) — confirmed via `tili workspace
+  <name>` from a terminal (goes through the identical socket path) staying
+  fast throughout.
+- `src/badge.rs`'s `image_for` takes a `&tili_ipc::MenubarStyle`
+  (`fill`/`shape`/`uppercase`), fetched by `poll_daemon` via
+  `Command::MenubarStyle` and cached on `MenuState.style` (kept across a
+  single failed style fetch — same "don't flash a broken state on a
+  hiccup" reasoning as `Snapshot` itself). `fill` picks the pill's drawing
+  path in `pill_image` — `Filled` (default) knocks the text out of a solid
+  fill via `NSCompositingOperation::DestinationOut`; `Outlined` strokes an
+  inset border instead and draws the text normally. `shape` only changes
+  the corner radius passed to that same path (`Pill` = `HEIGHT / 2.0`,
+  `Rounded` = a fixed smaller radius) — both fill modes support both
+  shapes. `uppercase` is applied to the badge text in `image_for` itself,
+  not to dropdown item labels (`menu.rs`'s `workspace_label`, which takes
+  no style at all — window counts show unconditionally, not behind a
+  config flag). `tili-menubar` has no `tili-config` dependency;
+  `tili-daemon` owns the `menubar { }` KDL block
+  (`tili_config::MenubarConfig`) and converts it to the wire type at
   `WmState::apply_config` time (`state.rs`'s `menubar_style` field), so a
   hot-reloaded config change reaches the badge through the same
   `WaitForChange` wakeup as every other state change — no second,
   independent config-watch path. `image_for_connecting` (the disconnected
-  spinner) deliberately never takes a `style` parameter at all: a user's
-  custom color/glyphs must not double as the "everything's fine"
-  indicator, which would defeat the point of it being visually distinct.
+  spinner) deliberately never takes a `style` parameter at all — always
+  the default filled pill — so a user's chosen fill/shape can't double as
+  the "everything's fine" indicator, which would defeat the point of it
+  being visually distinct.
 - `src/actions.rs` handles menu clicks (`workspace:<name>` switches,
   `open-settings` opens the config via `$EDITOR`/`open`/`open -a TextEdit`
   in that fallback order, `quit` runs `tili stop` before exiting this
   process too) on its own background thread, since none of those reactions
   need the main thread.
-
-## Known issue: ~1s delay between clicking a menu item and its action firing
-
-Clicking a workspace item in the already-open dropdown consistently takes
-about a second before `actions::handle` (and thus `ipc::send`) even runs —
-confirmed via direct instrumentation. Ruled out: the status item's dropdown
-itself opens instantly (not a menu-build/layout cost); `ipc::send` measures
-in single-digit milliseconds once called (not IPC/socket/daemon — the
-`hotkey`/CLI paths, which skip `tili-menubar` and this crate's threads
-entirely, are always fast); the delay doesn't shrink on a second click
-fired immediately after the first (not App Nap throttling a backgrounded
-thread waking up — that would predict the opposite). That leaves the gap
-squarely inside AppKit's own `NSMenuItem` target-action dispatch
-(`fireMenuItemAction:`, wired synchronously in `muda`'s
-`fire_menu_item_click` — confirmed via that crate's source, both the
-predefined-item and regular-item paths use the same selector) between
-mouse-up on an open menu and that method actually being invoked — outside
-what either this crate or `muda` control, and not reproducible via reading
-source alone. Tried and reverted: calling
-`NSApplication::activateIgnoringOtherApps` at startup (a known workaround
-for a *different*, superficially similar accessory-app AppKit quirk —
-menus staying unresponsive until the app is tabbed away from and back) had
-no effect here. Unresolved; needs a profiler (e.g. Instruments) attached to
-a running `tili-menubar` to go further, not more source reading.

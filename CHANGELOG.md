@@ -854,8 +854,7 @@ A ~1s delay between clicking a workspace item in the menu bar's dropdown
 and the switch happening is still open — ruled out IPC/socket overhead,
 App Nap, and the two menu-bar fixes above; narrowed to AppKit's own
 `NSMenuItem` target-action dispatch, undiagnosable further without a
-profiler attached to a running process. See
-`docs/architecture/tili-menubar.md`'s "Known issue" section.
+profiler attached to a running process.
 
 ## [0.1.11] - 2026-07-17
 

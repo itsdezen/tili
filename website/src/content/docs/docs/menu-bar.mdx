@@ -12,11 +12,14 @@ monitor.
 - The badge title is the focused monitor's active workspace name — the
   unambiguous "current workspace" for a single badge, since more than one
   monitor's workspace can independently be "active" at once.
-- The dropdown menu lists every workspace (a `•` prefix marks the current
-  one), then **Open Settings** and **Quit tili**.
-- It hides itself entirely — not a stale badge, nothing — whenever the
-  daemon isn't reachable, including when it's stopped from outside
-  tili-menubar entirely (e.g. `tili stop` from the CLI).
+- The dropdown menu lists every workspace with its window count (a `•`
+  prefix marks the current one), then **Open Settings** and **Quit tili**.
+- The badge's shape/fill/casing is configurable — see [`menubar` in
+  Configuration](/docs/configuration#menubar).
+- When the daemon isn't reachable — including when it's stopped from
+  outside tili-menubar entirely (e.g. `tili stop` from the CLI) — the
+  badge switches to an animated "connecting" spinner instead of hiding, so
+  it's clear tili is retrying rather than gone.
 
 ## Menu actions
 
@@ -36,9 +39,9 @@ because something actually changed or the daemon's own internal wait hit
 its 30s idle timeout — both look the same from the client's side by
 design.
 
-If the daemon becomes unreachable, tili-menubar hides the badge
-immediately and retries once a second. After roughly a minute of
-consecutive failures (60 attempts), it gives up, unloads its own
+If the daemon becomes unreachable, tili-menubar switches the badge to the
+connecting spinner immediately and retries once a second. After roughly a
+minute of consecutive failures (60 attempts), it gives up, unloads its own
 LaunchAgent, and stops itself — treating a daemon that's been gone that
 long as "stopped on purpose" (e.g. via `tili stop`) rather than a
 transient blip like the brief restart a Homebrew upgrade can trigger.

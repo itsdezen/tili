@@ -43,7 +43,7 @@ pub struct Snapshot {
 /// shows a placeholder badge that might be lying about the daemon being
 /// up.
 pub fn build_initial(mtm: MainThreadMarker) -> TrayIcon {
-    let (menu, _items) = build_menu(None, &[], &tili_ipc::MenubarStyle::default());
+    let (menu, _items) = build_menu(None, &[]);
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .build()
@@ -176,8 +176,8 @@ pub fn apply_snapshot(
         return;
     };
     state.connected = Some(true);
-    if let Some(style) = &snapshot.style {
-        state.style = style.clone();
+    if let Some(style) = snapshot.style {
+        state.style = style;
     }
 
     let title = snapshot.current.as_deref().unwrap_or("tili");
@@ -188,7 +188,7 @@ pub fn apply_snapshot(
     for ws in &snapshot.workspaces {
         if let Some(item) = state.items.get(&ws.name) {
             let checked = snapshot.current.as_deref() == Some(ws.name.as_str());
-            item.set_text(workspace_label(ws, checked, &state.style));
+            item.set_text(workspace_label(ws, checked));
         }
     }
 
@@ -196,11 +196,7 @@ pub fn apply_snapshot(
     if state.key.as_ref() == Some(&key) {
         return;
     }
-    let (menu, items) = build_menu(
-        snapshot.current.as_deref(),
-        &snapshot.workspaces,
-        &state.style,
-    );
+    let (menu, items) = build_menu(snapshot.current.as_deref(), &snapshot.workspaces);
     tray.set_menu(Some(Box::new(menu)));
     state.items = items;
     state.key = Some(key);
@@ -226,14 +222,11 @@ pub fn tick_spinner(tray: &TrayIcon, mtm: MainThreadMarker, state: &mut MenuStat
 
 /// Shared by `build_menu` (initial label) and `apply_snapshot` (per-tick
 /// update) so both agree on formatting. Omits the count suffix for an
-/// empty workspace (to avoid a noisy "(0)" on every unused workspace) or
-/// when `style.show_window_count` is off.
-fn workspace_label(
-    ws: &tili_ipc::WorkspaceInfo,
-    checked: bool,
-    style: &tili_ipc::MenubarStyle,
-) -> String {
-    let count_suffix = if style.show_window_count && ws.window_count > 0 {
+/// empty workspace to avoid a noisy "(0)" on every unused workspace.
+/// Dropdown labels always stay as-typed — `MenubarStyle::uppercase` only
+/// applies to the badge itself (see `badge::image_for`).
+fn workspace_label(ws: &tili_ipc::WorkspaceInfo, checked: bool) -> String {
+    let count_suffix = if ws.window_count > 0 {
         format!(" ({})", ws.window_count)
     } else {
         String::new()
@@ -248,13 +241,12 @@ fn workspace_label(
 fn build_menu(
     current: Option<&str>,
     workspaces: &[tili_ipc::WorkspaceInfo],
-    style: &tili_ipc::MenubarStyle,
 ) -> (Menu, HashMap<String, MenuItem>) {
     let menu = Menu::new();
     let mut items = HashMap::with_capacity(workspaces.len());
     for ws in workspaces {
         let checked = current == Some(ws.name.as_str());
-        let label = workspace_label(ws, checked, style);
+        let label = workspace_label(ws, checked);
         let item = MenuItem::with_id(
             MenuId::new(format!("workspace:{}", ws.name)),
             &label,

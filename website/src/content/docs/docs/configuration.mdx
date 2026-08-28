@@ -124,6 +124,33 @@ that multiplier in extra latency per relayout, more so at `"high"`. Try
 `"medium"` first.
 :::
 
+## `menubar`
+
+```kdl
+menubar {
+    style "filled"
+    shape "pill"
+    uppercase #false
+}
+```
+
+Styles the [menu bar badge](/docs/menu-bar)'s pill. Applies live — a hot
+reload reaches the badge over the same IPC channel it already polls, no
+restart needed.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `style` | `"filled"` / `"outlined"` | `"filled"` | `"filled"`: a solid pill with the workspace name/glyph knocked out as transparency. `"outlined"`: a stroked border instead, with the text drawn normally inside it. Any other value falls back to `"filled"`. |
+| `shape` | `"pill"` / `"rounded"` | `"pill"` | `"pill"`: fully rounded ends. `"rounded"`: a smaller, fixed corner radius, more like an ordinary button. Any other value falls back to `"pill"`. |
+| `uppercase` | boolean | `#false` | Uppercases the workspace name shown in the badge itself. Doesn't affect the dropdown menu's item labels, which stay as-typed for readability. |
+
+:::note
+The "connecting" spinner shown when the daemon is unreachable (see
+[Menu Bar Badge](/docs/menu-bar)) always renders as the built-in filled
+pill, ignoring this section entirely — a custom style must never be
+mistakable for "everything's fine."
+:::
+
 ## `keybindings`
 
 ```kdl

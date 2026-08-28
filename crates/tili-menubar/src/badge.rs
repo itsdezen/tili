@@ -16,6 +16,14 @@ const PADDING_X: f64 = 7.0;
 /// Fixed badge height — matches the typical menu bar content height so it
 /// sits centered without extra vertical margin.
 const HEIGHT: f64 = 16.0;
+/// Corner radius for `MenubarShape::Rounded` — a smaller, fixed radius than
+/// `Pill`'s fully-rounded ends (`HEIGHT / 2.0`), reading as an ordinary
+/// rounded-rect button instead of a capsule.
+const ROUNDED_RADIUS: f64 = 4.0;
+/// Border width for `MenubarFill::Outlined` — the stroked path is inset by
+/// half this so the stroke doesn't get clipped at the image edge (an
+/// `NSBezierPath` stroke draws centered on the path).
+const STROKE_WIDTH: f64 = 1.2;
 /// The "main" mode dot's own font size — deliberately smaller than the
 /// workspace name's (see `text_attributes`), landing between the tiny "•"
 /// bullet glyph and a full-size "●" circle at the name's own font size.
@@ -37,23 +45,25 @@ const SPINNER_FRAMES: [&str; 10] = [
     "\u{2807}", "\u{280F}",
 ];
 
-/// Draws `text` as a solid rounded-rect pill with the text itself
-/// "knocked out" (cut fully transparent) through the fill, so whatever's
-/// behind the menu bar shows through in the shape of the letters — then,
-/// unless `style.color` overrides it, marks the result as a template
-/// image, so AppKit tints the opaque pill area with the correct color for
-/// the current light/dark/highlighted menu bar state automatically, same
-/// as any other menu bar icon. A user-configured color opts out of that
-/// tinting — a fixed color and "adapt to the current menu bar appearance"
-/// aren't both possible at once.
+/// Draws `text` as a rounded pill (see `tili_ipc::MenubarShape`), either
+/// solid with the text/glyph "knocked out" as transparency
+/// (`MenubarFill::Filled`, the default) or as a stroked outline with the
+/// text/glyph drawn normally inside it (`MenubarFill::Outlined`) — then
+/// marks the result as a template image, so AppKit tints the opaque area
+/// with the correct color for the current light/dark/highlighted menu bar
+/// state automatically, same as any other menu bar icon.
+/// `style.uppercase` uppercases `text` before layout — not applied to the
+/// dropdown menu's own item labels, which stay as-typed for readability.
 pub fn image_for(text: &str, mode: &str, style: &tili_ipc::MenubarStyle) -> Retained<NSImage> {
-    let custom_color = style.color.as_deref().and_then(parse_hex_color);
-    let template = custom_color.is_none();
-    let fill_color = custom_color.unwrap_or_else(NSColor::blackColor);
+    let text = if style.uppercase {
+        text.to_uppercase()
+    } else {
+        text.to_string()
+    };
     pill_image(
-        badge_attributed_string(text, mode, style),
-        fill_color,
-        template,
+        badge_attributed_string(&text, mode),
+        style.fill,
+        style.shape,
     )
 }
 
@@ -64,25 +74,27 @@ pub fn image_for(text: &str, mode: &str, style: &tili_ipc::MenubarStyle) -> Reta
 /// common case (see `MAX_CONSECUTIVE_FAILURES`'s doc comment in
 /// `main.rs`). `frame` indexes `SPINNER_FRAMES`, wrapping via `%` so the
 /// caller doesn't need to track the modulus itself. Deliberately ignores
-/// `MenubarStyle` — a user's custom bright color/glyphs must not also
-/// become the "everything's fine" connecting indicator, which would
-/// defeat the point of it being visually distinct.
+/// `MenubarStyle` — a user's custom fill/shape must not also become the
+/// "everything's fine" connecting indicator, which would defeat the point
+/// of it being visually distinct, so this always renders the built-in
+/// filled pill look.
 pub fn image_for_connecting(frame: usize) -> Retained<NSImage> {
     let glyph = format!("{} ", SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]);
     pill_image(
         attributed_string("tili", &glyph, MODE_GLYPH_FONT_SIZE),
-        NSColor::blackColor(),
-        true,
+        tili_ipc::MenubarFill::Filled,
+        tili_ipc::MenubarShape::Pill,
     )
 }
 
-/// The knockout-pill drawing path shared by `image_for` and
-/// `image_for_connecting` — takes ownership of `attr_string`/`fill_color`
-/// since both must move into the `'static` drawing block.
+/// The pill drawing path shared by `image_for` and `image_for_connecting`
+/// — takes ownership of `attr_string` since it must move into the
+/// `'static` drawing block. Always a single (template-tinted) color;
+/// there is no user-configurable badge color, only fill style and shape.
 fn pill_image(
     attr_string: Retained<NSAttributedString>,
-    fill_color: Retained<NSColor>,
-    template: bool,
+    fill: tili_ipc::MenubarFill,
+    shape: tili_ipc::MenubarShape,
 ) -> Retained<NSImage> {
     let text_size = attr_string.size();
 
@@ -91,80 +103,75 @@ fn pill_image(
         width,
         height: HEIGHT,
     };
+    let radius = match shape {
+        tili_ipc::MenubarShape::Pill => HEIGHT / 2.0,
+        tili_ipc::MenubarShape::Rounded => ROUNDED_RADIUS,
+    };
 
     let draw = block2::RcBlock::new(move |rect: NSRect| -> Bool {
-        let radius = rect.size.height / 2.0;
-        let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius);
-        fill_color.set();
-        path.fill();
-
-        if let Some(ctx) = NSGraphicsContext::currentContext() {
-            ctx.setCompositingOperation(NSCompositingOperation::DestinationOut);
-        }
-        let point = NSPoint {
+        let text_point = NSPoint {
             x: (rect.size.width - text_size.width) / 2.0,
             y: (rect.size.height - text_size.height) / 2.0,
         };
-        attr_string.drawAtPoint(point);
+        match fill {
+            tili_ipc::MenubarFill::Filled => {
+                let path =
+                    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius);
+                NSColor::blackColor().set();
+                path.fill();
+
+                if let Some(ctx) = NSGraphicsContext::currentContext() {
+                    ctx.setCompositingOperation(NSCompositingOperation::DestinationOut);
+                }
+                attr_string.drawAtPoint(text_point);
+            }
+            tili_ipc::MenubarFill::Outlined => {
+                let half_stroke = STROKE_WIDTH / 2.0;
+                let stroke_rect = NSRect {
+                    origin: NSPoint {
+                        x: rect.origin.x + half_stroke,
+                        y: rect.origin.y + half_stroke,
+                    },
+                    size: NSSize {
+                        width: rect.size.width - STROKE_WIDTH,
+                        height: rect.size.height - STROKE_WIDTH,
+                    },
+                };
+                let stroke_radius = (radius - half_stroke).max(0.0);
+                let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                    stroke_rect,
+                    stroke_radius,
+                    stroke_radius,
+                );
+                path.setLineWidth(STROKE_WIDTH);
+                NSColor::blackColor().set();
+                path.stroke();
+
+                attr_string.drawAtPoint(text_point);
+            }
+        }
 
         Bool::YES
     });
 
     let image = NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw);
-    image.setTemplate(template);
+    image.setTemplate(true);
     image
 }
 
-/// Parses a `"#RRGGBB"`/`"#RGB"` config color into an `NSColor` — not
-/// validated at config-parse time (`tili-config` doesn't cross-check this
-/// kind of value, same as `default-root-orientation`'s precedent), so a
-/// malformed value here just falls back to the default auto-tinted look
-/// (see `image_for`) rather than erroring.
-fn parse_hex_color(hex: &str) -> Option<Retained<NSColor>> {
-    let hex = hex.strip_prefix('#').unwrap_or(hex);
-    let (r, g, b) = match hex.len() {
-        6 => (
-            u8::from_str_radix(&hex[0..2], 16).ok()?,
-            u8::from_str_radix(&hex[2..4], 16).ok()?,
-            u8::from_str_radix(&hex[4..6], 16).ok()?,
-        ),
-        3 => {
-            let component = |c: &str| u8::from_str_radix(c, 16).ok().map(|v| v * 17);
-            (
-                component(&hex[0..1])?,
-                component(&hex[1..2])?,
-                component(&hex[2..3])?,
-            )
-        }
-        _ => return None,
-    };
-    Some(NSColor::colorWithSRGBRed_green_blue_alpha(
-        f64::from(r) / 255.0,
-        f64::from(g) / 255.0,
-        f64::from(b) / 255.0,
-        1.0,
-    ))
-}
-
-/// The leading glyph for each keybindings mode — `style.glyphs` is
-/// consulted first (see `tili_ipc::MenubarStyle`), falling back to the
-/// built-in default when the mode has no configured override: `"main"`
-/// (the default, nothing special active) keeps the plain dot;
-/// `resize`/`manage` (the two built-in modes, see `example/tili.kdl`) get
-/// a distinct glyph so the badge visibly reflects which one is active. Any
-/// other mode name a user declares in their own config falls back to the
-/// plain dot, same as `"main"`, rather than guessing at an unrecognized
-/// custom mode's intent.
-fn glyph_for_mode(mode: &str, style: &tili_ipc::MenubarStyle) -> String {
-    if let Some(glyph) = style.glyphs.get(mode) {
-        return format!("{glyph} ");
-    }
+/// The leading glyph for each keybindings mode — `"main"` (the default,
+/// nothing special active) keeps the plain dot; `resize`/`manage` (the
+/// two built-in modes, see `example/tili.kdl`) get a distinct glyph so
+/// the badge visibly reflects which one is active. Any other mode name a
+/// user declares in their own config falls back to the plain dot, same
+/// as `"main"`, rather than guessing at an unrecognized custom mode's
+/// intent.
+fn glyph_for_mode(mode: &str) -> &'static str {
     match mode {
         "resize" => "\u{2194} ",
         "manage" => "\u{2699} ",
         _ => "\u{25CF} ",
     }
-    .to_string()
 }
 
 /// The leading glyph's font size for each mode — `"manage"` matches
@@ -183,16 +190,12 @@ fn glyph_font_size_for_mode(mode: &str, name_font_point_size: f64) -> f64 {
 }
 
 /// The normal (connected) badge's glyph + name text, resolved from the
-/// current keybindings mode and any `style` glyph override.
-fn badge_attributed_string(
-    text: &str,
-    mode: &str,
-    style: &tili_ipc::MenubarStyle,
-) -> Retained<NSAttributedString> {
+/// current keybindings mode.
+fn badge_attributed_string(text: &str, mode: &str) -> Retained<NSAttributedString> {
     let name_font_size = NSFont::smallSystemFontSize();
     attributed_string(
         text,
-        &glyph_for_mode(mode, style),
+        glyph_for_mode(mode),
         glyph_font_size_for_mode(mode, name_font_size),
     )
 }

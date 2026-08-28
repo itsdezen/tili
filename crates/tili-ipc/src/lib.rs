@@ -242,34 +242,38 @@ pub struct DoctorReport {
     pub config_warnings: Vec<String>,
 }
 
+/// Whether the badge pill is drawn solid (with the text/glyph knocked out
+/// as transparency) or as a stroked outline (with the text/glyph drawn
+/// normally inside it) — see `tili-menubar/src/badge.rs`'s `pill_image`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MenubarFill {
+    #[default]
+    Filled,
+    Outlined,
+}
+
+/// The badge's corner rounding — `Pill` (radius = half the badge height,
+/// fully rounded ends, the original look) or `Rounded` (a smaller, fixed
+/// corner radius, more like an ordinary button).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MenubarShape {
+    #[default]
+    Pill,
+    Rounded,
+}
+
 /// `Command::MenubarStyle`'s payload — mirrors `tili-config`'s `menubar { }`
 /// block (see `tili_config::MenubarConfig`), converted at the daemon's
 /// config-load boundary rather than shared as one type, since `tili-ipc`
 /// doesn't depend on `tili-config` (wire types stay independent of the KDL
 /// schema that produces them, same as every other `Command` payload here).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct MenubarStyle {
-    pub show_window_count: bool,
-    /// `#RRGGBB`/`#RGB`, or `None` to keep the default auto-tinted
-    /// (`NSImage::setTemplate(true)`) look — see `tili-menubar/src/badge.rs`.
-    pub color: Option<String>,
-    /// Keybindings mode name -> glyph override. A mode with no entry here
-    /// keeps its built-in glyph (`tili-menubar/src/badge.rs`'s
-    /// `glyph_for_mode`).
-    pub glyphs: std::collections::HashMap<String, String>,
-}
-
-impl Default for MenubarStyle {
-    fn default() -> Self {
-        // Matches tili-menubar's hardcoded pre-config behavior exactly, so
-        // adopting a `tili-config` dependency on this doesn't silently
-        // change existing users' badges.
-        Self {
-            show_window_count: true,
-            color: None,
-            glyphs: std::collections::HashMap::new(),
-        }
-    }
+    pub fill: MenubarFill,
+    pub shape: MenubarShape,
+    /// Uppercases the workspace name shown in the badge itself — not the
+    /// dropdown menu's item labels, which stay as-typed for readability.
+    pub uppercase: bool,
 }
 
 /// A connected display as reported by `Command::ListMonitors` (M9).

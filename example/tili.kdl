@@ -92,6 +92,22 @@ settings {
     animate #false
 }
 
+// Menu bar badge styling — every field optional, defaults shown below.
+menubar {
+    // "filled" (default): solid pill with the workspace name/glyph knocked
+    // out as transparency. "outlined": a stroked border instead, with the
+    // text drawn normally inside it.
+    style "filled"
+
+    // "pill" (default): fully rounded ends. "rounded": a smaller, fixed
+    // corner radius, more like an ordinary button.
+    shape "pill"
+
+    // Uppercases the workspace name shown in the badge itself — not the
+    // dropdown menu's item labels, which stay as-typed.
+    uppercase #false
+}
+
 // Global hotkeys — no external tool (skhd etc.) needed, tili captures these
 // itself. Key strings are "modifier-modifier-key", e.g. "alt-shift-h";
 // modifiers can be listed in any order. Recognized modifiers: alt/option,

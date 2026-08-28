@@ -1867,9 +1867,15 @@ impl WmState {
         // accumulation.
         self.config_warnings.clear();
         self.menubar_style = tili_ipc::MenubarStyle {
-            show_window_count: config.menubar.show_window_count,
-            color: config.menubar.color.clone(),
-            glyphs: config.menubar.glyphs.clone(),
+            fill: match config.menubar.fill {
+                tili_config::MenubarFill::Filled => tili_ipc::MenubarFill::Filled,
+                tili_config::MenubarFill::Outlined => tili_ipc::MenubarFill::Outlined,
+            },
+            shape: match config.menubar.shape {
+                tili_config::MenubarShape::Pill => tili_ipc::MenubarShape::Pill,
+                tili_config::MenubarShape::Rounded => tili_ipc::MenubarShape::Rounded,
+            },
+            uppercase: config.menubar.uppercase,
         };
         self.gaps = to_tree_gaps(config.gaps);
         self.workspace_gaps = config
@@ -2118,7 +2124,7 @@ impl WmState {
     /// The most recently loaded `menubar { }` config. Backs
     /// `Command::MenubarStyle`.
     pub fn menubar_style(&self) -> tili_ipc::MenubarStyle {
-        self.menubar_style.clone()
+        self.menubar_style
     }
 
     /// Cycles `focused_monitor` to the next connected monitor, wrapping —
