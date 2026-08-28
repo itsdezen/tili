@@ -141,6 +141,13 @@ pub enum Command {
     /// so it goes through `dispatch()` like `ListWindows`/`ListWorkspaces`/
     /// `ListMonitors`, not the `Command::Shutdown` process-lifecycle path.
     Doctor,
+    /// The current `menubar { }` config, read by `tili-menubar` on every
+    /// poll (see `menu::poll_daemon`) — read-only, excluded from
+    /// `WaitForChange` change-detection like `Doctor`/`CurrentMode`.
+    /// `tili-menubar` has no `tili-config` dependency of its own; this is
+    /// how it learns styling without a second, independent config-watch
+    /// path (see `MenubarStyle`).
+    MenubarStyle,
     /// Gracefully stops the daemon: responds `Ok` (so a client waiting on
     /// the reply doesn't hang) before the process exits. Handled directly
     /// in `tili-daemon`'s main loop, not through `dispatch()` — it isn't a
@@ -233,6 +240,36 @@ pub struct DoctorReport {
     /// undeclared workspace in `workspace-rules`, or an invalid regex in
     /// `floating-rules`. Empty if the last load had none to skip.
     pub config_warnings: Vec<String>,
+}
+
+/// `Command::MenubarStyle`'s payload — mirrors `tili-config`'s `menubar { }`
+/// block (see `tili_config::MenubarConfig`), converted at the daemon's
+/// config-load boundary rather than shared as one type, since `tili-ipc`
+/// doesn't depend on `tili-config` (wire types stay independent of the KDL
+/// schema that produces them, same as every other `Command` payload here).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MenubarStyle {
+    pub show_window_count: bool,
+    /// `#RRGGBB`/`#RGB`, or `None` to keep the default auto-tinted
+    /// (`NSImage::setTemplate(true)`) look — see `tili-menubar/src/badge.rs`.
+    pub color: Option<String>,
+    /// Keybindings mode name -> glyph override. A mode with no entry here
+    /// keeps its built-in glyph (`tili-menubar/src/badge.rs`'s
+    /// `glyph_for_mode`).
+    pub glyphs: std::collections::HashMap<String, String>,
+}
+
+impl Default for MenubarStyle {
+    fn default() -> Self {
+        // Matches tili-menubar's hardcoded pre-config behavior exactly, so
+        // adopting a `tili-config` dependency on this doesn't silently
+        // change existing users' badges.
+        Self {
+            show_window_count: true,
+            color: None,
+            glyphs: std::collections::HashMap::new(),
+        }
+    }
 }
 
 /// A connected display as reported by `Command::ListMonitors` (M9).

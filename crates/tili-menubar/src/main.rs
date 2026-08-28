@@ -99,19 +99,30 @@ fn main() {
                 }
                 // Connection failed outright — the daemon isn't reachable
                 // at all (not running, or between `tili stop`/`tili
-                // start`). Report that immediately so the badge hides
-                // (see menu::apply_snapshot), then back off before
-                // retrying rather than hammering `connect()` in a tight
-                // loop. After enough consecutive failures, stop trying —
-                // see `MAX_CONSECUTIVE_FAILURES`.
-                Err(_) => {
+                // start`). Report that immediately so the badge switches to
+                // the connecting spinner (see `menu::apply_snapshot`), then
+                // back off before retrying rather than hammering
+                // `connect()` in a tight loop. After enough consecutive
+                // failures, stop trying — see `MAX_CONSECUTIVE_FAILURES`.
+                Err(e) => {
                     let _ = tx.send(None);
+                    // Logged only on the first failure of a run (not every
+                    // `RECONNECT_BACKOFF` tick, which would spam the log
+                    // file `StandardErrorPath` points at for the whole
+                    // outage) — the underlying `io::Error` (ENOENT, EPERM,
+                    // connection refused, ...) is the one clue this log
+                    // file has for diagnosing *why* the daemon was
+                    // unreachable, since `wait_for_change`'s `Ok`/`Err`
+                    // alone doesn't say.
+                    if consecutive_failures == 0 {
+                        eprintln!("tili-menubar: daemon connection failed: {e}");
+                    }
                     consecutive_failures += 1;
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                         eprintln!(
                             "tili-menubar: tili-daemon unreachable for \
-                             {MAX_CONSECUTIVE_FAILURES} consecutive attempts — stopping \
-                             rather than running without it."
+                             {MAX_CONSECUTIVE_FAILURES} consecutive attempts (last error: \
+                             {e}) — stopping rather than running without it."
                         );
                         stop_self();
                     }
@@ -142,9 +153,13 @@ fn main() {
     // why.
     let state = std::cell::RefCell::new(menu::MenuState::default());
     let drain = block2::RcBlock::new(move |_timer: NonNull<NSTimer>| {
+        let mut state = state.borrow_mut();
         while let Ok(snapshot) = rx.try_recv() {
-            menu::apply_snapshot(&tray, mtm, &snapshot, &mut state.borrow_mut());
+            menu::apply_snapshot(&tray, mtm, &snapshot, &mut state);
         }
+        // Keeps the connecting-state spinner animating between poll
+        // attempts (RECONNECT_BACKOFF apart) — a no-op once connected.
+        menu::tick_spinner(&tray, mtm, &mut state);
     });
     unsafe {
         NSTimer::scheduledTimerWithTimeInterval_repeats_block(DRAIN_INTERVAL, true, &drain);

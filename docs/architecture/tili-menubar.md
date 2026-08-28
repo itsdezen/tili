@@ -14,13 +14,26 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   baseline offset so it lines up with the workspace name's visual center
   instead of sitting low.
 - `src/menu.rs`'s `MenuState` tracks the last-applied `(current workspace,
-  workspace name list)` key so `apply_snapshot` only rebuilds the live
+  workspace name list, mode)` key so `apply_snapshot` only rebuilds the live
   `NSMenu` when that key actually changes (rebuilding unconditionally on
   every tick previously caused menu clicks to fire on their own with zero
   user interaction) — the badge title and visibility are still updated
-  every tick regardless, since those are cheap. A daemon-unreachable poll
-  result (`None`) hides the status item entirely rather than leaving a
-  stale workspace name on screen.
+  every tick regardless, since those are cheap. Each workspace's
+  `window_count` is excluded from the key (it churns every tick) but is
+  still shown in its label, updated in place via `MenuItem::set_text` on a
+  `HashMap<String, MenuItem>` of live item handles rather than going
+  through a rebuild.
+  A daemon-unreachable poll result (`None`) switches the badge to an
+  animated connecting-spinner glyph (`badge::image_for_connecting`, a
+  braille dot-spinner advanced by `menu::tick_spinner` off the existing
+  `DRAIN_INTERVAL` timer) with a "connecting…" tooltip and a disabled
+  "Connecting…" line in the dropdown, rather than hiding the status item —
+  a badge that's visibly retrying reads better than one that vanishes with
+  no explanation. It stays visible (never hidden) once shown for the first
+  time; `MenuState::connected` (`Option<bool>`, not `visible`) tracks which
+  content — spinner or real data — is currently applied, so the spinner
+  image isn't redrawn on every `RECONNECT_BACKOFF` retry, only once per
+  animation frame.
 - `src/ipc.rs` duplicates `tili-cli`'s own socket framing rather than
   sharing it (same precedent as `tili_ipc::default_socket_path`'s doc
   comment) and adds `wait_for_change`, sent as `Command::WaitForChange` —
@@ -85,6 +98,20 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   continuously defeats its entire purpose), but ruled out as the cause of
   the known issue below via `tili workspace <name>` from a terminal (goes
   through the identical socket path) staying fast throughout.
+- `src/badge.rs`'s `image_for`/`glyph_for_mode` and `src/menu.rs`'s
+  `workspace_label` all take a `&tili_ipc::MenubarStyle`, fetched by
+  `poll_daemon` via `Command::MenubarStyle` and cached on `MenuState.style`
+  (kept across a single failed style fetch — same "don't flash a broken
+  state on a hiccup" reasoning as `Snapshot` itself). `tili-menubar` has
+  no `tili-config` dependency; `tili-daemon` owns the `menubar { }` KDL
+  block (`tili_config::MenubarConfig`) and converts it to the wire type at
+  `WmState::apply_config` time (`state.rs`'s `menubar_style` field), so a
+  hot-reloaded config change reaches the badge through the same
+  `WaitForChange` wakeup as every other state change — no second,
+  independent config-watch path. `image_for_connecting` (the disconnected
+  spinner) deliberately never takes a `style` parameter at all: a user's
+  custom color/glyphs must not double as the "everything's fine"
+  indicator, which would defeat the point of it being visually distinct.
 - `src/actions.rs` handles menu clicks (`workspace:<name>` switches,
   `open-settings` opens the config via `$EDITOR`/`open`/`open -a TextEdit`
   in that fallback order, `quit` runs `tili stop` before exiting this

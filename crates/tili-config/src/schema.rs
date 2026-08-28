@@ -196,6 +196,37 @@ pub struct Config {
     /// Matched in order — first match wins.
     pub floating_rules: Vec<FloatingRule>,
     pub floating_defaults: FloatingDefaults,
+    pub menubar: MenubarConfig,
+}
+
+/// `menubar { show-window-count #bool; color "#RRGGBB"; glyphs { ... } }`
+/// — `tili-daemon` converts this into `tili_ipc::MenubarStyle` and serves
+/// it over `Command::MenubarStyle`; `tili-menubar` itself has no
+/// dependency on this crate (see that command's doc comment).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MenubarConfig {
+    pub show_window_count: bool,
+    /// `#RRGGBB`/`#RGB`, or `None` to keep the badge's default
+    /// auto-tinted look — not validated here (a malformed value is
+    /// `tili-menubar`'s problem to fall back from at render time), same
+    /// as `default_root_orientation`'s "don't cross-validate" precedent.
+    pub color: Option<String>,
+    /// Keybindings mode name -> glyph override, from a `glyphs { main
+    /// "●"; resize "↔"; manage "⚙"; }` child block. A mode with no entry
+    /// keeps its built-in glyph.
+    pub glyphs: HashMap<String, String>,
+}
+
+impl Default for MenubarConfig {
+    fn default() -> Self {
+        // Matches tili-menubar's hardcoded pre-config behavior exactly, so
+        // an existing config with no `menubar` block renders identically.
+        Self {
+            show_window_count: true,
+            color: None,
+            glyphs: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -255,6 +286,7 @@ pub fn parse(source: &str) -> Result<Config, ConfigError> {
         workspace_rules: parse_workspace_rules(&doc),
         floating_rules,
         floating_defaults,
+        menubar: parse_menubar(&doc),
         ..Config::default()
     };
     let (gaps, workspace_gaps) = parse_gaps(&doc);
@@ -381,6 +413,32 @@ fn parse_settings(doc: &KdlDocument) -> Settings {
         };
     }
     settings
+}
+
+fn parse_menubar(doc: &KdlDocument) -> MenubarConfig {
+    let mut menubar = MenubarConfig::default();
+    let Some(children) = doc.get("menubar").and_then(KdlNode::children) else {
+        return menubar;
+    };
+    if let Some(v) = children
+        .get_arg("show-window-count")
+        .and_then(|v| v.as_bool())
+    {
+        menubar.show_window_count = v;
+    }
+    if let Some(v) = children.get_arg("color").and_then(|v| v.as_string()) {
+        menubar.color = Some(v.to_string());
+    }
+    if let Some(glyph_children) = children.get("glyphs").and_then(KdlNode::children) {
+        for node in glyph_children.nodes() {
+            if let Some(glyph) = node.get(0).and_then(|v| v.as_string()) {
+                menubar
+                    .glyphs
+                    .insert(node.name().value().to_string(), glyph.to_string());
+            }
+        }
+    }
+    menubar
 }
 
 fn parse_gap_values(node: &KdlNode) -> Gaps {
@@ -967,6 +1025,36 @@ mod tests {
             .find(|m| m.name == "manage")
             .unwrap();
         assert!(manage.auto_exit);
+    }
+
+    #[test]
+    fn menubar_defaults_when_section_is_absent() {
+        let config = parse("").unwrap();
+        assert!(config.menubar.show_window_count);
+        assert_eq!(config.menubar.color, None);
+        assert!(config.menubar.glyphs.is_empty());
+    }
+
+    #[test]
+    fn parses_menubar_style() {
+        let source = r##"
+            menubar {
+                show-window-count #false
+                color "#FF00FF"
+                glyphs {
+                    main "*"
+                    resize "<->"
+                }
+            }
+        "##;
+        let config = parse(source).unwrap();
+        assert!(!config.menubar.show_window_count);
+        assert_eq!(config.menubar.color.as_deref(), Some("#FF00FF"));
+        assert_eq!(config.menubar.glyphs.get("main"), Some(&"*".to_string()));
+        assert_eq!(
+            config.menubar.glyphs.get("resize"),
+            Some(&"<->".to_string())
+        );
     }
 
     #[test]

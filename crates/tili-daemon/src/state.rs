@@ -925,6 +925,12 @@ pub struct WmState {
     /// `Command::Doctor` has something to report beyond the log file, which
     /// nobody reads day to day.
     config_warnings: Vec<String>,
+    /// The most recently loaded `menubar { }` config, converted to its
+    /// wire type at load time — served over `Command::MenubarStyle` so
+    /// `tili-menubar` learns styling through the same IPC channel it
+    /// already uses for everything else, without a `tili-config`
+    /// dependency of its own.
+    menubar_style: tili_ipc::MenubarStyle,
 }
 
 impl Default for WmState {
@@ -981,6 +987,7 @@ impl Default for WmState {
             unconfirmed_pids: HashSet::new(),
             wake_lock_active: false,
             config_warnings: Vec::new(),
+            menubar_style: tili_ipc::MenubarStyle::default(),
         }
     }
 }
@@ -1859,6 +1866,11 @@ impl WmState {
         // comment for why it's the *last* load's warnings, not a lifetime
         // accumulation.
         self.config_warnings.clear();
+        self.menubar_style = tili_ipc::MenubarStyle {
+            show_window_count: config.menubar.show_window_count,
+            color: config.menubar.color.clone(),
+            glyphs: config.menubar.glyphs.clone(),
+        };
         self.gaps = to_tree_gaps(config.gaps);
         self.workspace_gaps = config
             .workspace_gaps
@@ -2101,6 +2113,12 @@ impl WmState {
     /// field's own doc comment. Backs `Command::Doctor`.
     pub fn config_warnings(&self) -> Vec<String> {
         self.config_warnings.clone()
+    }
+
+    /// The most recently loaded `menubar { }` config. Backs
+    /// `Command::MenubarStyle`.
+    pub fn menubar_style(&self) -> tili_ipc::MenubarStyle {
+        self.menubar_style.clone()
     }
 
     /// Cycles `focused_monitor` to the next connected monitor, wrapping —

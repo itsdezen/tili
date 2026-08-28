@@ -90,6 +90,7 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
             };
             payload_response(report)
         }
+        Command::MenubarStyle => payload_response(state.menubar_style()),
         // `tili-ipc`'s parser deliberately never fails on an unrecognized
         // command string — it becomes `Command::Raw` so a typo'd keybinding
         // still lets the rest of the config load, and fails here instead
