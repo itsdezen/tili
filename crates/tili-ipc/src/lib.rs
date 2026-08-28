@@ -129,6 +129,11 @@ pub enum Command {
     /// operate on. A no-op with fewer than two monitors connected.
     FocusMonitor,
     ListMonitors,
+    /// Deliberately a no-op placeholder, same reasoning as `Flatten`: config
+    /// already reloads automatically via file-watching
+    /// (`spawn_config_reload_bridge` in `tili-daemon`), so there's no
+    /// manual-reload behavior to wire into `dispatch()` yet. Kept in the
+    /// wire protocol for a future explicit "reload now" use case.
     ReloadConfig,
     /// Health check for `tili doctor` — reports the daemon's current
     /// Accessibility/Input Monitoring permission grants and any warnings

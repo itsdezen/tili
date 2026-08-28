@@ -36,6 +36,15 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 60;
 const DRAIN_INTERVAL: f64 = 0.05;
 
 fn main() {
+    // `actions::default_config_path`/`tili_ipc::default_socket_path` both
+    // resolve `$HOME` with a bare `.expect` — checking it once here turns
+    // a raw panic (a stripped launchd environment, `env -i`, ...) into a
+    // clear message and a clean exit instead.
+    if std::env::var("HOME").is_err() {
+        eprintln!("tili-menubar: $HOME is not set — can't locate config or socket files.");
+        std::process::exit(1);
+    }
+
     let mtm = MainThreadMarker::new().expect("tili-menubar must start on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     // No Dock icon, no app-switcher entry — this is a background menu

@@ -201,12 +201,18 @@ pub struct Config {
 #[derive(Debug)]
 pub enum ConfigError {
     Parse(String),
+    /// A non-`NotFound` I/O error reading the config file (permission
+    /// denied, the path is a directory, ...) — kept distinct from `Parse`
+    /// so a permissions problem doesn't get reported as a KDL syntax error,
+    /// sending the user to debug the wrong thing.
+    Io(String),
 }
 
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigError::Parse(msg) => write!(f, "config parse error: {msg}"),
+            ConfigError::Io(msg) => write!(f, "config file error: {msg}"),
         }
     }
 }
@@ -227,7 +233,7 @@ pub fn load(path: &std::path::Path) -> Result<Config, ConfigError> {
     match std::fs::read_to_string(path) {
         Ok(source) => parse(&source),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(e) => Err(ConfigError::Parse(e.to_string())),
+        Err(e) => Err(ConfigError::Io(e.to_string())),
     }
 }
 
@@ -396,6 +402,13 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
             .collect();
         gaps.outer = match values.as_slice() {
             [all] => (*all, *all, *all, *all),
+            // CSS shorthand's 2- and 3-value forms — `outer` is documented
+            // as CSS-shorthand-ordered, so accepting only 1 or 4 values
+            // silently drops a natural thing to try (e.g. `outer 8 8` for
+            // "8 vertical, 8 horizontal") down to `(0, 0, 0, 0)` with no
+            // warning.
+            [vert, horiz] => (*vert, *horiz, *vert, *horiz),
+            [top, horiz, bottom] => (*top, *horiz, *bottom, *horiz),
             [top, right, bottom, left] => (*top, *right, *bottom, *left),
             _ => gaps.outer,
         };
@@ -578,6 +591,25 @@ mod tests {
         let config = parse(source).unwrap();
         assert_eq!(config.gaps.inner, 4);
         assert_eq!(config.gaps.outer, (8, 8, 8, 8));
+    }
+
+    #[test]
+    fn parses_global_gaps_two_and_three_value_outer() {
+        let source = r#"
+            gaps {
+                outer 8 12
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.gaps.outer, (8, 12, 8, 12));
+
+        let source = r#"
+            gaps {
+                outer 8 12 16
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.gaps.outer, (8, 12, 16, 12));
     }
 
     #[test]
@@ -950,5 +982,23 @@ mod tests {
     fn load_missing_file_returns_default_config() {
         let config = load(std::path::Path::new("/nonexistent/tili-test.kdl")).unwrap();
         assert!(config.workspaces.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn load_unreadable_file_is_an_io_error_not_a_parse_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path =
+            std::env::temp_dir().join(format!("tili-test-unreadable-{}.kdl", std::process::id()));
+        std::fs::write(&path, "workspaces {}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = load(&path);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(matches!(result, Err(ConfigError::Io(_))));
     }
 }

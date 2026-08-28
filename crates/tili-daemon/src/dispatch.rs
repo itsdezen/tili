@@ -110,6 +110,16 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
                 },
             }
         }
+        // `tili-ipc`'s parser deliberately never fails on an unrecognized
+        // command string — it becomes `Command::Raw` so a typo'd keybinding
+        // still lets the rest of the config load, and fails here instead
+        // (see `tili_ipc::parse`'s doc comment). Naming `verb` here, rather
+        // than falling into the generic arm below, is what actually
+        // surfaces the typo to the user instead of a useless "not
+        // implemented yet".
+        Command::Raw { verb, .. } => Response::Err {
+            message: format!("unknown command: {verb}"),
+        },
         _ => Response::Err {
             message: "not implemented yet".to_string(),
         },
@@ -148,6 +158,25 @@ mod tests {
         let mut state = WmState::default();
         let response = dispatch(&mut state, Command::Ping);
         assert!(matches!(response, Response::Ok));
+    }
+
+    #[test]
+    fn raw_command_error_names_the_unknown_verb() {
+        let mut state = WmState::default();
+        let response = dispatch(
+            &mut state,
+            Command::Raw {
+                verb: "fcous".to_string(),
+                args: vec!["left".to_string()],
+            },
+        );
+        let Response::Err { message } = response else {
+            panic!("expected Response::Err");
+        };
+        assert!(
+            message.contains("fcous"),
+            "message should name the unknown verb: {message}"
+        );
     }
 
     #[test]

@@ -604,6 +604,7 @@ fn watch_app(
     tx: mpsc::UnboundedSender<WmEvent>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let app = AXUIElement::from_pid(pid)?;
+    crate::window::apply_call_timeout(&app);
     let stream = match AXNotificationStream::subscribe_many(&app, WINDOW_NOTIFICATIONS, 32) {
         Ok(stream) => stream,
         Err(e) => {

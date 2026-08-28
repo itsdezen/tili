@@ -691,7 +691,26 @@ impl Tree {
         if others_total <= 0.0 {
             return None;
         }
-        let max_grow = (others_total - MIN_WEIGHT * others.len() as f32).max(0.0);
+        // `apply_resize` shrinks every sibling by the same *proportional*
+        // factor (each loses `delta * weights[i] / others_total`, i.e. every
+        // sibling keeps the same fraction `1 - delta/others_total` of its
+        // own weight) — so the smallest sibling is still the smallest after
+        // shrinking, and it's the one that hits `MIN_WEIGHT` first. Bounding
+        // `max_grow` off the *aggregate* (`others_total - MIN_WEIGHT * n`)
+        // assumes an even split across siblings and doesn't hold when
+        // weights are uneven: it can let a small sibling get crushed to a
+        // sliver while the aggregate still looks fine. Solving
+        // `min_weight * (1 - delta/others_total) >= MIN_WEIGHT` for `delta`
+        // gives the bound below instead.
+        let min_other_weight = others
+            .iter()
+            .map(|&i| weights[i])
+            .fold(f32::INFINITY, f32::min);
+        let max_grow = if min_other_weight <= MIN_WEIGHT {
+            0.0
+        } else {
+            (others_total * (1.0 - MIN_WEIGHT / min_other_weight)).max(0.0)
+        };
         let max_shrink = (weights[idx] - MIN_WEIGHT).max(0.0);
         Some((max_shrink, max_grow))
     }
@@ -1885,6 +1904,33 @@ mod tests {
         let layout = tree.layout(area(), Gaps::default());
         for (_, rect) in &layout {
             assert!(rect.width > 0.0, "clamped weight must stay positive");
+        }
+    }
+
+    #[test]
+    fn resize_weight_never_crushes_a_smaller_sibling_below_min_weight() {
+        // Regression test: `apply_resize` shrinks siblings by a uniform
+        // *proportional* factor, so with uneven weights the smallest
+        // sibling used to be crushed far below the documented floor even
+        // though the aggregate bound looked fine — see `branch_resize_bounds`.
+        let mut tree = Tree::new();
+        let a = insert(&mut tree, 1, None);
+        let b = insert(&mut tree, 2, Some(a));
+        let c = insert(&mut tree, 3, Some(b));
+
+        assert!(tree.resize_weight(c, -0.9));
+        assert!(tree.resize_weight(a, 100.0));
+
+        let parent = tree.parents[&a];
+        let Some(Node::Container { weights, .. }) = tree.nodes.get(parent) else {
+            panic!("expected a Tiles container");
+        };
+        const MIN_WEIGHT: f32 = 0.05; // mirrors `branch_resize_bounds`'s own constant
+        for &w in weights {
+            assert!(
+                w >= MIN_WEIGHT,
+                "sibling weight {w} fell below the documented floor {MIN_WEIGHT}"
+            );
         }
     }
 

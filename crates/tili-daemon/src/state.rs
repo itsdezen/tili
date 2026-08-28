@@ -1212,8 +1212,19 @@ impl WmState {
                 )
             })
             .collect();
+        // A second, coarser bound on top of `tili_ax`'s own AX messaging
+        // timeout — protects this loop (which runs synchronously inside
+        // `main.rs`'s single `select!` loop, see `note_system_wake`/
+        // `note_screen_unlocked`) even if `spawn_blocking`'s worker pool is
+        // saturated enough that a probe doesn't start running promptly.
+        const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
         for (pid, handle) in handles {
-            if handle.await.unwrap_or(false) {
+            let responsive = tokio::time::timeout(PROBE_TIMEOUT, handle)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(false);
+            if responsive {
                 self.unconfirmed_pids.remove(&pid);
             }
         }
@@ -1638,6 +1649,15 @@ impl WmState {
                 self.workspace_focus
                     .entry(workspace.clone())
                     .or_insert(node);
+                // Only write a real on-screen frame if `workspace` is
+                // actually the one showing on the focused monitor right now
+                // — same gate `place_new_window`'s `Floating` arm applies.
+                // Without it, un-hiding an app whose window belongs to a
+                // different (possibly parked-elsewhere, possibly
+                // wrong-monitor) workspace either sizes the frame against
+                // the wrong monitor's area, or writes a visible frame that
+                // the very next re-park check below immediately overwrites.
+                let is_active = self.active_workspace_name() == workspace;
                 self.placements.insert(
                     id,
                     Placement {
@@ -1645,8 +1665,10 @@ impl WmState {
                         kind: PlacementKind::Floating { manual: None },
                     },
                 );
-                let area = self.focused_monitor_area();
-                self.place_floating_window(id, area);
+                if is_active {
+                    let area = self.focused_monitor_area();
+                    self.place_floating_window(id, area);
+                }
             }
         }
     }
@@ -3191,7 +3213,6 @@ impl WmState {
             "tili-daemon: switch_workspace {name} phase=incoming_floating_reposition took {:?}",
             phase_start.elapsed()
         );
-        self.frame_setter.set_suppressed(false);
 
         // Raised *before* either outgoing park loop below, not after —
         // `raise_focused` changes z-order/keyboard focus only, it doesn't
@@ -3254,6 +3275,16 @@ impl WmState {
             );
         }
 
+        // Kept suppressed through the `swap_monitor` branch above too, not
+        // just the primary incoming relayout: `relayout_monitor_concurrently`/
+        // `reposition_floating_for_monitor_concurrently` bypass `frame_setter`
+        // entirely (direct concurrent writes), never calling `finish()` — so
+        // un-suppressing before they run wouldn't change *their* behavior,
+        // but it would let a window's stale in-flight tween from some
+        // earlier operation resume on the next `animation_tick` and visibly
+        // drag it away from the frame just written here.
+        self.frame_setter.set_suppressed(false);
+
         eprintln!(
             "tili-daemon: switch_workspace {name} total took {:?}",
             switch_start.elapsed()
@@ -3311,15 +3342,17 @@ impl WmState {
             Some(PlacementKind::Floating { .. })
         );
 
-        let suggested = self.active_tree_mut().remove_window(id);
-        match suggested {
-            Some(n) => {
-                self.workspace_focus.insert(active_workspace.clone(), n);
-            }
-            None => {
-                self.workspace_focus.remove(&active_workspace);
-            }
-        }
+        // Goes through `remove_from_tree` rather than `Tree::remove_window`
+        // directly so a `fullscreen_focus` entry pointing at `id` gets
+        // cleared too — otherwise the source workspace is left with a
+        // dangling fullscreen node id that `relayout_monitor`/
+        // `relayout_monitor_concurrently` never fall back away from,
+        // permanently freezing that workspace's tiled layout. The return
+        // value is ignored, same reasoning as `demote_to_special`: `id` is
+        // about to be reinserted (into a different workspace) and focused
+        // again immediately below, so a mid-flight raise here would just be
+        // a spurious flash.
+        self.remove_from_tree(id, &active_workspace);
 
         let target_focus_hint = self.workspace_focus.get(target_name).copied();
         let root_orientation = self.root_orientation_hint();
@@ -6662,6 +6695,40 @@ mod tests {
 
         assert_eq!(state.active_workspace_name(), "side");
         assert!(state.active_tree().window_ids().contains(&1));
+    }
+
+    #[test]
+    fn move_focused_to_workspace_clears_the_source_workspaces_fullscreen_focus() {
+        // Regression test: `move_focused_to_workspace` used to bypass
+        // `remove_from_tree` (calling `Tree::remove_window` directly), which
+        // left a stale `fullscreen_focus` entry pointing at the moved
+        // window's now-dangling node id — permanently freezing the source
+        // workspace's tiled layout, since `relayout_monitor` never falls
+        // back away from a `fullscreen_focus` entry it can't resolve.
+        let mut state = floating_test_state();
+        let root_orientation = state.root_orientation_hint();
+
+        let node = state
+            .workspaces
+            .get_mut(DEFAULT_WORKSPACE)
+            .unwrap()
+            .insert_window(1, None, root_orientation);
+        state.set_focused_node(node);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state
+            .fullscreen_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), node);
+        state.workspaces.insert("side".to_string(), Tree::new());
+
+        assert!(state.move_focused_to_workspace("side").is_ok());
+
+        assert!(!state.fullscreen_focus.contains_key(DEFAULT_WORKSPACE));
     }
 
     #[test]

@@ -181,6 +181,17 @@ enum ExpectedPayload {
 }
 
 fn main() {
+    // Every subcommand eventually locates the config file, socket, or
+    // LaunchAgent/log directories under `$HOME` (`default_config_path`,
+    // `tili_ipc::default_socket_path`, `install_launch_agent`, ...) — each
+    // of those resolves it with a bare `.expect`, so checking it once here
+    // turns a raw panic (a stripped launchd environment, `env -i`, ...)
+    // into a clear, actionable message before any of them run.
+    if std::env::var("HOME").is_err() {
+        eprintln!("tili: $HOME is not set — tili can't locate its config, socket, or log files.");
+        std::process::exit(1);
+    }
+
     let cli = Cli::parse();
     let defaulted_to_start = cli.command.is_none();
     let command = cli.command.unwrap_or(Commands::Start);
@@ -606,6 +617,26 @@ fn daemon_is_reachable() -> bool {
     stream.read_exact(&mut response_buf).is_ok()
 }
 
+/// `daemon_is_reachable`, retried a few times with a short gap — a single
+/// 300ms probe is too tight for a daemon that's alive but momentarily slow
+/// to answer (every command, `Ping` included, runs a synchronous AX focus
+/// resync first — see `dispatch()`'s doc comment — which can legitimately
+/// take longer than that against a busy/unresponsive frontmost app). Used
+/// only by `doctor()`'s "stale socket" check, whose `--fix` deletes the
+/// socket file on a negative result — a false negative there doesn't just
+/// misreport, it breaks IPC for a daemon that was never actually down.
+fn daemon_is_reachable_retrying() -> bool {
+    for attempt in 0..3 {
+        if daemon_is_reachable() {
+            return true;
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    false
+}
+
 /// Writes `label`'s LaunchAgent plist (`RunAtLoad`+`KeepAlive`, logging to
 /// `~/Library/Logs/tili/{log_name}.{log,err.log}`) and `launchctl load`s
 /// it. Shared by `start_daemon` (the daemon itself) and the menu bar
@@ -636,7 +667,8 @@ fn install_launch_agent(label: &str, binary: &std::path::Path, log_name: &str) -
             .status();
     }
 
-    let home = std::env::var("HOME").unwrap_or_default();
+    // `main()` already checked `$HOME` is set before any subcommand runs.
+    let home = std::env::var("HOME").expect("HOME must be set");
     let log_dir = format!("{home}/Library/Logs/tili");
     let _ = std::fs::create_dir_all(&log_dir);
 
@@ -728,7 +760,14 @@ fn start_daemon() {
 fn stop_daemon() {
     let daemon_plist = launch_agent_path(LAUNCH_AGENT_LABEL);
     let menubar_plist = launch_agent_path(MENUBAR_LAUNCH_AGENT_LABEL);
-    if !daemon_plist.exists() && !menubar_plist.exists() {
+    // Checked via `launchctl`, not just whether the plist file exists on
+    // disk: launchd caches a loaded job's definition independent of that
+    // file (see `install_launch_agent`'s doc comment), so a plist deleted
+    // out from under an already-loaded job would otherwise make this guard
+    // report "not running" while the daemon (and/or badge) keeps running.
+    let daemon_loaded = launch_agent_is_loaded(LAUNCH_AGENT_LABEL);
+    let menubar_loaded = launch_agent_is_loaded(MENUBAR_LAUNCH_AGENT_LABEL);
+    if !daemon_plist.exists() && !menubar_plist.exists() && !daemon_loaded && !menubar_loaded {
         println!("tili: daemon is not running");
         return;
     }
@@ -736,19 +775,23 @@ fn stop_daemon() {
         (LAUNCH_AGENT_LABEL, &daemon_plist),
         (MENUBAR_LAUNCH_AGENT_LABEL, &menubar_plist),
     ] {
-        if !plist_path.exists() {
-            continue;
-        }
-        // Only unload if launchd actually has the job loaded — e.g. a
-        // daemon that already self-stopped (see tili-daemon's
-        // `stop_self`) leaves its plist file behind but isn't loaded
-        // anymore, and `launchctl unload` on that prints its own noisy
-        // "Unload failed: 5: Input/output error" straight to stderr.
+        // Checked (and unloaded) before the plist-exists check below, not
+        // gated on it: a job can be loaded with its plist file already gone
+        // (see this function's opening comment) — skipping straight to
+        // `continue` in that case would leave it running. Only unload if
+        // launchd actually has the job loaded — e.g. a daemon that already
+        // self-stopped (see tili-daemon's `stop_self`) leaves its plist
+        // file behind but isn't loaded anymore, and `launchctl unload` on
+        // that prints its own noisy "Unload failed: 5: Input/output error"
+        // straight to stderr.
         if launch_agent_is_loaded(label) {
             let _ = std::process::Command::new("launchctl")
                 .args(["unload", "-w"])
                 .arg(plist_path)
                 .status();
+        }
+        if !plist_path.exists() {
+            continue;
         }
         if let Err(e) = std::fs::remove_file(plist_path) {
             eprintln!("tili: couldn't remove {}: {e}", plist_path.display());
@@ -794,6 +837,12 @@ fn symlinked_ancestor(path: &std::path::Path) -> Option<std::path::PathBuf> {
 fn uninstall() {
     stop_daemon();
 
+    // Tracked so a script wrapping `tili uninstall` has a reliable way to
+    // detect a leftover problem (a file that couldn't be removed) via exit
+    // status, instead of every path here always exiting 0 regardless of
+    // whether the `eprintln!`s below actually fired.
+    let mut had_error = false;
+
     let config_path = default_config_path();
     // `symlink_metadata` doesn't follow the link, unlike `Path::exists()` —
     // needed to tell "a real file" from "a symlink a dotfiles manager
@@ -817,17 +866,20 @@ fn uninstall() {
                 );
             } else if let Err(e) = std::fs::remove_file(&config_path) {
                 eprintln!("tili: couldn't remove {}: {e}", config_path.display());
+                had_error = true;
             }
         }
         Err(_) => {}
     }
 
-    let home = std::env::var("HOME").unwrap_or_default();
+    // `main()` already checked `$HOME` is set before any subcommand runs.
+    let home = std::env::var("HOME").expect("HOME must be set");
     let logs_dir = std::path::PathBuf::from(&home).join("Library/Logs/tili");
     if logs_dir.exists()
         && let Err(e) = std::fs::remove_dir_all(&logs_dir)
     {
         eprintln!("tili: couldn't remove {}: {e}", logs_dir.display());
+        had_error = true;
     }
 
     let socket_path = tili_ipc::default_socket_path();
@@ -835,6 +887,7 @@ fn uninstall() {
         && let Err(e) = std::fs::remove_file(&socket_path)
     {
         eprintln!("tili: couldn't remove {}: {e}", socket_path.display());
+        had_error = true;
     }
 
     // Best-effort, same as tili-daemon's own reset_accessibility_tcc — a
@@ -848,6 +901,10 @@ fn uninstall() {
     println!(
         "tili: if you installed via Homebrew, run `brew uninstall tili` to remove the binaries."
     );
+
+    if had_error {
+        std::process::exit(1);
+    }
 }
 
 fn print_monitors(payload: serde_json::Value) {
@@ -994,7 +1051,7 @@ fn doctor(fix: bool) {
     }
 
     let socket_path = tili_ipc::default_socket_path();
-    let reachable = daemon_is_reachable();
+    let reachable = daemon_is_reachable_retrying();
     if socket_path.exists() && !reachable {
         problems += 1;
         doctor_line(
@@ -1085,19 +1142,23 @@ fn doctor(fix: bool) {
     }
 
     println!();
+    // Captured before `fixes` is consumed below — how many of `problems`
+    // this run can actually resolve; the rest (a bad config file, a missing
+    // permission grant, ...) are report-only by design (see this function's
+    // own doc comment) and always remain, so they factor into the exit code
+    // even after every fixable problem gets applied.
+    let auto_fixable = fixes.len() as u32;
     if fixes.is_empty() {
         if problems == 0 {
             println!("tili doctor: no problems found.");
         } else {
             println!("tili doctor: found {problems} problem(s), none auto-fixable — see above.");
+            std::process::exit(1);
         }
         return;
     }
 
-    println!(
-        "tili doctor: found {problems} problem(s), {} auto-fixable:",
-        fixes.len()
-    );
+    println!("tili doctor: found {problems} problem(s), {auto_fixable} auto-fixable:");
     for (desc, _) in &fixes {
         println!("  - {desc}");
     }
@@ -1108,7 +1169,7 @@ fn doctor(fix: bool) {
         let mut input = String::new();
         if !matches!(io::stdin().read_line(&mut input), Ok(n) if n > 0) {
             println!("tili: cancelled — no changes made.");
-            return;
+            std::process::exit(1);
         }
     }
 
@@ -1116,6 +1177,14 @@ fn doctor(fix: bool) {
     for (desc, apply) in fixes {
         apply();
         println!("tili: fixed — {desc}");
+    }
+
+    // A problem left over after every auto-fixable one was just applied is
+    // one of the report-only kinds (bad config, missing permission grant)
+    // — still unresolved, so a script wrapping `tili doctor --fix` can tell
+    // via exit status.
+    if problems > auto_fixable {
+        std::process::exit(1);
     }
 }
 

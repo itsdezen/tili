@@ -66,6 +66,7 @@ pub fn list_windows_for_pid(pid: i32) -> Vec<AxWindow> {
     let Some(app) = AXUIElement::from_pid(pid) else {
         return Vec::new();
     };
+    crate::window::apply_call_timeout(&app);
     let ax_windows = match app.element_array_attribute(kAXWindowsAttribute) {
         Ok(w) => w,
         Err(_) => return Vec::new(),

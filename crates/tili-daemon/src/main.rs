@@ -61,6 +61,17 @@ fn main() {
     // below makes no AX call of its own.
     tili_ax::request_input_monitoring_permission();
 
+    // Every config/socket/log path this process resolves eventually goes
+    // through `$HOME` (`tili_config::default_config_path`,
+    // `tili_ipc::default_socket_path`, `stop_self`/`stop_menubar`, ...),
+    // each with a bare `.expect` — checking it once here, before any of
+    // that runs, turns a raw panic (a stripped launchd environment, `env
+    // -i`, ...) into a clear message and a clean exit instead.
+    if std::env::var("HOME").is_err() {
+        eprintln!("tili-daemon: $HOME is not set — can't locate config, socket, or log files.");
+        std::process::exit(1);
+    }
+
     let mtm =
         MainThreadMarker::new().expect("tili-daemon must start on the real process main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -74,11 +85,27 @@ fn main() {
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to build tokio runtime");
-        let result = rt.block_on(async_daemon_main(app_event_rx));
-        if let Err(e) = &result {
-            eprintln!("tili-daemon: fatal error: {e}");
-        }
-        std::process::exit(if result.is_ok() { 0 } else { 1 });
+        // Catches a panic anywhere in the daemon body: without this, an
+        // unwind past this thread's boundary kills it silently while
+        // `app.run()` on the real main thread stays parked forever — a
+        // zombie process `launchd`'s `KeepAlive` never notices and never
+        // respawns. Exiting non-zero here instead lets `KeepAlive` restart
+        // a clean process the normal way.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rt.block_on(async_daemon_main(app_event_rx))
+        }));
+        let exit_code = match result {
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) => {
+                eprintln!("tili-daemon: fatal error: {e}");
+                1
+            }
+            Err(_) => {
+                eprintln!("tili-daemon: panicked — exiting so launchd can restart");
+                1
+            }
+        };
+        std::process::exit(exit_code);
     });
 
     app.run(); // never returns — parks the real main thread in Cocoa's event loop
@@ -580,7 +607,15 @@ async fn handle_wait_for_change(
     mut stream: tokio::net::UnixStream,
     notified: tokio::sync::futures::OwnedNotified,
 ) {
-    let _ = tokio::time::timeout(WAIT_FOR_CHANGE_TIMEOUT, notified).await;
+    // Races the real wait against the client closing its end early (a
+    // crash, a force-quit) — the protocol never sends anything more after
+    // the initial command, so any readability edge here means "gone,"
+    // letting this task (and its accepted `UnixStream`) end immediately
+    // instead of sitting held open for up to `WAIT_FOR_CHANGE_TIMEOUT`.
+    tokio::select! {
+        _ = tokio::time::timeout(WAIT_FOR_CHANGE_TIMEOUT, notified) => {}
+        _ = stream.readable() => return,
+    }
     let _ = socket::write_response(&mut stream, &Response::Ok).await;
 }
 

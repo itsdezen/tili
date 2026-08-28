@@ -93,6 +93,24 @@ unsafe extern "C" {
 /// the purposes of skipping a redundant AX write — see `AxWindow::set_frame`.
 const FRAME_EPSILON: f64 = 0.5;
 
+/// Messaging timeout applied to every `AXUIElement` app connection this
+/// crate opens (`AXUIElementSetMessagingTimeout`, `AXUIElement::set_timeout`)
+/// — without it, a call into an unresponsive/hung app's AX connection blocks
+/// its calling thread indefinitely, which for the synchronous calls made
+/// directly from `tili-daemon`'s single event loop (`enumerate::list_windows_for_pid`
+/// in particular) means one hung app freezes the entire daemon. Short enough
+/// that a genuinely hung app doesn't stall the daemon noticeably, long
+/// enough not to false-positive on an app that's merely doing legitimate
+/// slow work when queried.
+pub(crate) const AX_CALL_TIMEOUT_SECS: f32 = 1.0;
+
+/// Best-effort: a failure to set the timeout just means this connection
+/// keeps the (effectively unbounded) default — not worth failing the whole
+/// lookup over.
+pub(crate) fn apply_call_timeout(app: &AXUIElement) {
+    let _ = app.set_timeout(AX_CALL_TIMEOUT_SECS);
+}
+
 pub(crate) fn frame_matches(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < FRAME_EPSILON
         && (a.y - b.y).abs() < FRAME_EPSILON
@@ -182,6 +200,7 @@ impl AxWindow {
     /// actually looking at.
     pub fn focused_id_for_pid(pid: i32) -> Option<WindowId> {
         let app = AXUIElement::from_pid(pid)?;
+        apply_call_timeout(&app);
         let focused = app
             .element_attribute(axuielement::ffi::kAXFocusedWindowAttribute)
             .ok()

@@ -86,8 +86,11 @@ signing.**
   layout sizing), and a `placements` index for O(1) window→workspace
   lookup plus disposition. `dispatch.rs` has the single
   `dispatch(&mut WmState, Command) -> Response` both the socket and hotkey
-  paths call (`Command::Shutdown` is the one documented exception — it's
-  process lifecycle, handled in `main.rs`'s loop). `dispatch()` syncs
+  paths call, with two documented exceptions handled directly in `main.rs`'s
+  loop instead: `Command::Shutdown` (process lifecycle, not a `WmState`
+  mutation) and `Command::WaitForChange` (spawned into its own task that
+  never touches `WmState` — see that command's doc comment in `tili-ipc`).
+  `dispatch()` syncs
   focus from real macOS frontmost state synchronously before every
   command — deliberately not a reactive background sync (race-prone;
   see docs/architecture/tili-daemon.md). `main.rs`'s real `fn main()` sets
