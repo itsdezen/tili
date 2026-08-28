@@ -231,11 +231,8 @@ fn workspace_label(ws: &tili_ipc::WorkspaceInfo, checked: bool) -> String {
     } else {
         String::new()
     };
-    if checked {
-        format!("\u{2022} {}{}", ws.name, count_suffix)
-    } else {
-        format!("{}{}", ws.name, count_suffix)
-    }
+    let check_suffix = if checked { " \u{2713}" } else { "" };
+    format!("{}{}{}", ws.name, count_suffix, check_suffix)
 }
 
 fn build_menu(
