@@ -6,6 +6,80 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [0.8.0] - 2026-08-28
+
+### Added
+
+- **The menu bar dropdown now shows each workspace's window count**, and
+  the current workspace is marked with a trailing "✓" instead of a
+  leading "•".
+- **The menu bar badge switches to an animated "connecting" spinner
+  instead of hiding when the daemon is unreachable** — clearer than a
+  badge that silently vanishes, whether the daemon crashed, is between
+  `tili stop`/`tili start`, or is just slow to come up.
+- **New `menubar { }` config block styles the badge**: `style`
+  (`"filled"`/`"outlined"`), `shape` (`"pill"`/`"rounded"`), and
+  `uppercase`. Applies live over the same channel the badge already
+  polls — no restart needed. The connecting-spinner state always ignores
+  it, so a custom style can't be mistaken for "everything's fine."
+
+### Fixed
+
+- **`Command::WaitForChange` — the long-poll every menu bar badge depends
+  on to stay in sync — could return instantly with nothing written, on
+  literally every single call**, breaking the badge's sync entirely (it
+  would sit "connecting" forever and eventually stop itself).
+  `handle_wait_for_change`'s early-disconnect check raced
+  `stream.readable()`, which can resolve spuriously with nothing actually
+  to read (a documented tokio caveat) — now confirms genuine EOF via a
+  non-blocking `try_read` before treating it as a real disconnect.
+- **A stray panic anywhere in the daemon's main loop could leave the
+  process running as a zombie** — no listener, but still alive, so
+  launchd never restarted it. `async_daemon_main`'s body now runs inside
+  `catch_unwind`.
+- **A single hung/unresponsive app could block the daemon's entire event
+  loop indefinitely** ahead of every hotkey/socket command, since
+  window-listing runs synchronously first. Every `AXUIElement` app
+  connection now carries a messaging timeout, with a second timeout layer
+  on top.
+- **Swapping monitors mid-tween could let an old animation resume and
+  visibly snap a window back afterward** — `switch_workspace`'s
+  swap-monitor branch now suppresses `frame_setter` for its entire
+  duration, not just part of it.
+- **Moving the focused window to another workspace could permanently
+  freeze the source workspace's layout.** `move_focused_to_workspace`
+  bypassed the normal removal path, leaking a stale fullscreen-focus
+  entry; it now goes through the same one every other placement change
+  uses.
+- **Restoring a floating window from a special state could place it with
+  a real on-screen frame even when its workspace wasn't visible.** Same
+  visibility gate `place_new_window` already had, now applied here too.
+- **A resize could crush a smaller sibling down to a sliver of a pixel**
+  even though the aggregate shrink limit looked fine —
+  `tili-tree`'s `resize_weight` now bounds off the smallest sibling
+  instead of the aggregate, which doesn't hold once weights are uneven.
+- **`tili doctor`'s stale-socket check could misdiagnose a live-but-slow
+  daemon as dead and delete its still-in-use socket** — a single 300ms
+  probe wasn't enough headroom for a daemon that syncs AX focus before
+  every command; now retries.
+- **`tili stop` could report success while the daemon kept running**, if
+  its LaunchAgent plist had been deleted by hand — it only checked
+  whether the plist file existed, not whether launchd actually had it
+  loaded.
+- **`tili uninstall`/`doctor` always exited 0, even with a leftover
+  problem**, so a wrapping script had no way to detect failure via exit
+  status.
+- **A missing `$HOME` crashed with a raw panic** instead of a clear
+  message, in either binary.
+- **A config file read failure (e.g. a permissions problem) was reported
+  as a KDL syntax error.** `ConfigError::Io` is now distinct from
+  `::Parse`.
+- **`gaps`'s `outer` only accepted 1 or 4 values**, silently dropping
+  CSS's 2-value (`vertical horizontal`) and 3-value
+  (`top horizontal bottom`) shorthand.
+- **An unrecognized command string's error message didn't say which verb
+  was unrecognized.**
+
 ## [0.7.3] - 2026-08-28
 
 ### Fixed

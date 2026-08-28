@@ -72,7 +72,7 @@ gaps {
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `inner` | integer (points) | `0` | Spacing between sibling tiled windows. |
-| `outer` | 1 or 4 integers (points) | `0 0 0 0` | Padding around the tiled area. One value applies to all 4 sides; four values are CSS-ordered `top right bottom left`. Any other count of values is ignored and `outer` falls back to `0 0 0 0`. |
+| `outer` | 1, 2, 3, or 4 integers (points) | `0 0 0 0` | Padding around the tiled area, CSS shorthand: one value applies to all 4 sides; two are `vertical horizontal`; three are `top horizontal bottom`; four are `top right bottom left`. Any other count of values is ignored and `outer` falls back to `0 0 0 0`. |
 | `accordion` | integer (points) | `30` | How many points of a non-visible Accordion sibling peek out from behind the active one. `0` collapses every child to the same full frame. |
 | `ignore-notch` | boolean | `#false` | On a display with a notch, `#false` starts the effective top gap below the notch instead of overlapping it. `#true` ignores the notch and uses `outer`'s top value as-is. |
 
