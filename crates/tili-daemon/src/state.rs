@@ -3723,6 +3723,9 @@ impl WmState {
             .unwrap_or(self.ignore_notch);
         if !ignore_notch {
             gaps.outer.0 += monitor.notch;
+            if let Some(outer_solo) = gaps.outer_solo.as_mut() {
+                outer_solo.0 += monitor.notch;
+            }
         }
         Some((name, monitor.frame, gaps))
     }
@@ -4251,6 +4254,14 @@ fn to_tree_gaps(gaps: tili_config::Gaps) -> Gaps {
             f64::from(bottom),
             f64::from(left),
         ),
+        outer_solo: gaps.outer_solo.map(|(top, right, bottom, left)| {
+            (
+                f64::from(top),
+                f64::from(right),
+                f64::from(bottom),
+                f64::from(left),
+            )
+        }),
         accordion: f64::from(gaps.accordion),
     }
 }

@@ -18,7 +18,11 @@ direction `navigate`, `move`'s window-identity `swap_windows`, proportional
 - `layout(area, gaps)` takes a `Gaps` (outer padding around the whole area,
   inner spacing between siblings, both `f64` — `tili-config`'s parsed `u32`
   gaps get converted at the `tili-daemon` boundary since this crate can't
-  depend on `tili-config`).
+  depend on `tili-config`). `Gaps.outer_solo` (`Option<(f64,f64,f64,f64)>`)
+  overrides `outer` when `tiled_window_ids().len() == 1` — resolved by
+  `effective_outer`, shared by `layout` and `resize_handle_at` so the two
+  stay geometrically consistent. `None` (the default) is a no-op, always
+  falling back to `outer`.
 - `toggle_layout(from)` (M7) converts `from`'s parent container between
   `Split` and `Accordion` in place — converting *to* Accordion sets `active`
   to `from`'s own position so the currently-visible window doesn't change.

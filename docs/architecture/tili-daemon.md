@@ -786,9 +786,13 @@ place `Monitor` geometry and gap config already converge for every tiled-
 layout caller (`relayout_monitor`, `capture_resize_snapshot`/
 `apply_mouse_resize`) — folds the resolved monitor's `notch` height (see
 [tili-ax.md](tili-ax.md)'s `display.rs` section) into the effective top gap
-there, unless the effective `ignore_notch` is `true`. `Tree::layout`/
-`resize_handle_at` never see the notch directly — they only ever get the
-already-adjusted `Gaps.outer`.
+there, unless the effective `ignore_notch` is `true`. The fold applies to
+both `Gaps.outer.0` and `Gaps.outer_solo.0` (if set) — `tiled_layout_inputs`
+doesn't know yet which one `Tree::layout` will end up using for a given
+workspace (that depends on live tile count, resolved inside the tree —
+see `tili-tree.md`'s `effective_outer`), so both are kept notch-correct.
+`Tree::layout`/`resize_handle_at` never see the notch directly — they only
+ever get the already-adjusted `Gaps.outer`/`Gaps.outer_solo`.
 `Command::ModeEnter`/`ModeExit` switch `current_mode`;
 `resolve_hotkey(combo)` looks a press up in the current mode's table, and
 `active_key_combos()` returns just the keys (for syncing the `Mutex` the

@@ -59,6 +59,7 @@ today. It's part of the schema ahead of the behavior that will consume it.
 gaps {
     inner 4
     outer 8 16 16 16
+    outer-solo 40
     accordion 32
     ignore-notch #false
 
@@ -73,18 +74,19 @@ gaps {
 |---|---|---|---|
 | `inner` | integer (points) | `0` | Spacing between sibling tiled windows. |
 | `outer` | 1, 2, 3, or 4 integers (points) | `0 0 0 0` | Padding around the tiled area, CSS shorthand: one value applies to all 4 sides; two are `vertical horizontal`; three are `top horizontal bottom`; four are `top right bottom left`. Any other count of values is ignored and `outer` falls back to `0 0 0 0`. |
+| `outer-solo` | 1, 2, 3, or 4 integers (points) | unset | Overrides `outer` when a workspace has exactly one tile (floating windows don't count) — same CSS shorthand as `outer`. Unset (the default) falls back to `outer`, so leaving it out changes nothing. |
 | `accordion` | integer (points) | `30` | How many points of a non-visible Accordion sibling peek out from behind the active one. `0` collapses every child to the same full frame. |
 | `ignore-notch` | boolean | `#false` | On a display with a notch, `#false` starts the effective top gap below the notch instead of overlapping it. `#true` ignores the notch and uses `outer`'s top value as-is. |
 
 ### Per-workspace overrides
 
 A `workspace "<name>"` block nested inside `gaps` overrides `inner`/
-`outer`/`accordion`/`ignore-notch` just for that workspace. Any of the four
-keys *not* listed inside the override block falls back to **that block's
-own built-in defaults** (`inner 0`, `outer 0 0 0 0`, `accordion 30`,
-`ignore-notch #false`) — not to whatever the top-level `gaps` block above
-it set. An override for a workspace not declared in `workspaces` is parsed
-but never matched against anything.
+`outer`/`outer-solo`/`accordion`/`ignore-notch` just for that workspace. Any
+of these keys *not* listed inside the override block falls back to **that
+block's own built-in defaults** (`inner 0`, `outer 0 0 0 0`, `outer-solo`
+unset, `accordion 30`, `ignore-notch #false`) — not to whatever the
+top-level `gaps` block above it set. An override for a workspace not
+declared in `workspaces` is parsed but never matched against anything.
 
 ## `settings`
 

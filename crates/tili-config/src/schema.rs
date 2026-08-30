@@ -14,6 +14,10 @@ pub struct Gaps {
     pub inner: u32,
     /// CSS-shorthand ordered: (top, right, bottom, left).
     pub outer: (u32, u32, u32, u32),
+    /// Overrides `outer` when a workspace has exactly one tile (floating
+    /// windows don't count). `None` (default) falls back to `outer`, so
+    /// leaving it unset changes nothing.
+    pub outer_solo: Option<(u32, u32, u32, u32)>,
     /// How many points of a non-visible `Accordion` sibling peek out from
     /// behind the active one, on the side(s) where a sibling exists — `0`
     /// collapses every child to the exact same full frame.
@@ -30,6 +34,7 @@ impl Default for Gaps {
         Self {
             inner: 0,
             outer: (0, 0, 0, 0),
+            outer_solo: None,
             accordion: 30,
             ignore_notch: false,
         }
@@ -448,19 +453,10 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
         gaps.inner = v;
     }
     if let Some(outer_node) = children.get("outer") {
-        let values: Vec<u32> = (0..4).filter_map(|i| as_u32(outer_node.get(i))).collect();
-        gaps.outer = match values.as_slice() {
-            [all] => (*all, *all, *all, *all),
-            // CSS shorthand's 2- and 3-value forms — `outer` is documented
-            // as CSS-shorthand-ordered, so accepting only 1 or 4 values
-            // silently drops a natural thing to try (e.g. `outer 8 8` for
-            // "8 vertical, 8 horizontal") down to `(0, 0, 0, 0)` with no
-            // warning.
-            [vert, horiz] => (*vert, *horiz, *vert, *horiz),
-            [top, horiz, bottom] => (*top, *horiz, *bottom, *horiz),
-            [top, right, bottom, left] => (*top, *right, *bottom, *left),
-            _ => gaps.outer,
-        };
+        gaps.outer = parse_css_shorthand(outer_node).unwrap_or(gaps.outer);
+    }
+    if let Some(outer_solo_node) = children.get("outer-solo") {
+        gaps.outer_solo = parse_css_shorthand(outer_solo_node);
     }
     if let Some(v) = as_u32(children.get_arg("accordion")) {
         gaps.accordion = v;
@@ -469,6 +465,20 @@ fn parse_gap_values(node: &KdlNode) -> Gaps {
         gaps.ignore_notch = v;
     }
     gaps
+}
+
+/// CSS shorthand for a 4-sided value (top, right, bottom, left): 1, 2, 3,
+/// or 4 numbers accepted, same as `outer` — a natural thing to try (e.g.
+/// `8 8` for "8 vertical, 8 horizontal") shouldn't silently fail.
+fn parse_css_shorthand(node: &KdlNode) -> Option<(u32, u32, u32, u32)> {
+    let values: Vec<u32> = (0..4).filter_map(|i| as_u32(node.get(i))).collect();
+    match values.as_slice() {
+        [all] => Some((*all, *all, *all, *all)),
+        [vert, horiz] => Some((*vert, *horiz, *vert, *horiz)),
+        [top, horiz, bottom] => Some((*top, *horiz, *bottom, *horiz)),
+        [top, right, bottom, left] => Some((*top, *right, *bottom, *left)),
+        _ => None,
+    }
 }
 
 /// `workspace-rules { rule app-id="..." workspace="..." ... }`. Both
@@ -677,6 +687,54 @@ mod tests {
         let override_gaps = config.workspace_gaps.get("entertain").unwrap();
         assert_eq!(override_gaps.inner, 0);
         assert_eq!(override_gaps.outer, (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn outer_solo_defaults_to_none() {
+        let source = r#"
+            gaps {
+                outer 8
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.gaps.outer_solo, None);
+    }
+
+    #[test]
+    fn parses_outer_solo_css_shorthand() {
+        let source = r#"
+            gaps {
+                outer 8
+                outer-solo 40
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.gaps.outer, (8, 8, 8, 8));
+        assert_eq!(config.gaps.outer_solo, Some((40, 40, 40, 40)));
+
+        let source = r#"
+            gaps {
+                outer-solo 8 12 16 20
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.gaps.outer_solo, Some((8, 12, 16, 20)));
+    }
+
+    #[test]
+    fn parses_per_workspace_outer_solo_override() {
+        let source = r#"
+            gaps {
+                outer-solo 40
+                workspace "entertain" {
+                    outer-solo 12
+                }
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.gaps.outer_solo, Some((40, 40, 40, 40)));
+        let override_gaps = config.workspace_gaps.get("entertain").unwrap();
+        assert_eq!(override_gaps.outer_solo, Some((12, 12, 12, 12)));
     }
 
     #[test]

@@ -27,6 +27,12 @@ gaps {
     // bottom, left.
     outer 8 16 16 16
 
+    // Overrides `outer` when a workspace has exactly one tile (floating
+    // windows don't count) — e.g. wider breathing room for a single
+    // full-screen-ish window. Unset (default) just falls back to `outer`,
+    // so leaving this out changes nothing. Same 1- or 4-value CSS shorthand.
+    // outer-solo 40
+
     // How many points of a non-visible accordion sibling peek out from
     // behind the active one. 0 collapses every child to the same full frame.
     accordion 32

@@ -65,6 +65,9 @@ pub enum Layout {
 pub struct Gaps {
     pub inner: f64,
     pub outer: (f64, f64, f64, f64),
+    /// Overrides `outer` when a workspace has exactly one tile (floating
+    /// windows don't count). `None` falls back to `outer`.
+    pub outer_solo: Option<(f64, f64, f64, f64)>,
     pub accordion: f64,
 }
 
@@ -1001,10 +1004,21 @@ impl Tree {
     pub fn layout(&self, area: Rect, gaps: Gaps) -> Vec<(WindowId, Rect)> {
         let mut out = Vec::new();
         if let Some(root) = self.root {
-            let padded = apply_outer_gaps(area, gaps.outer);
+            let padded = apply_outer_gaps(area, self.effective_outer(&gaps));
             self.layout_node(root, padded, gaps.inner, gaps.accordion, &mut out);
         }
         out
+    }
+
+    /// `gaps.outer_solo` in place of `gaps.outer` when the workspace has
+    /// exactly one tile (floating windows don't count), else `gaps.outer`
+    /// unchanged. Shared by `layout` and `resize_handle_at` so hit-testing
+    /// geometry never diverges from what was actually drawn.
+    fn effective_outer(&self, gaps: &Gaps) -> (f64, f64, f64, f64) {
+        match gaps.outer_solo {
+            Some(outer_solo) if self.tiled_window_ids().len() == 1 => outer_solo,
+            _ => gaps.outer,
+        }
     }
 
     /// Shared by `layout_node` and `resize_handle_node`'s `Tiles` branches:
@@ -1122,7 +1136,7 @@ impl Tree {
         point: (f64, f64),
     ) -> Option<ResizeHandle> {
         let root = self.root?;
-        let padded = apply_outer_gaps(area, gaps.outer);
+        let padded = apply_outer_gaps(area, self.effective_outer(&gaps));
         self.resize_handle_node(root, padded, gaps.inner, gaps.accordion, point)
     }
 
@@ -1608,6 +1622,7 @@ mod tests {
         let gaps = Gaps {
             inner: 10.0,
             outer: (20.0, 20.0, 20.0, 20.0),
+            outer_solo: None,
             accordion: 0.0,
         };
         let layout = tree.layout(area(), gaps);
@@ -1624,6 +1639,105 @@ mod tests {
         let total_width: f64 = layout.iter().map(|(_, r)| r.width).sum();
         let padded_width = area().width - 40.0;
         assert!((total_width + gaps.inner - padded_width).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn outer_solo_applies_when_exactly_one_tile() {
+        let mut tree = Tree::new();
+        insert(&mut tree, 1, None);
+
+        let gaps = Gaps {
+            outer: (20.0, 20.0, 20.0, 20.0),
+            outer_solo: Some((40.0, 40.0, 40.0, 40.0)),
+            ..Gaps::default()
+        };
+        let layout = tree.layout(area(), gaps);
+        assert_eq!(
+            layout,
+            vec![(
+                1,
+                Rect {
+                    x: 40.0,
+                    y: 40.0,
+                    width: area().width - 80.0,
+                    height: area().height - 80.0,
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn outer_solo_unset_falls_back_to_outer_for_a_single_tile() {
+        let mut tree = Tree::new();
+        insert(&mut tree, 1, None);
+
+        let gaps = Gaps {
+            outer: (20.0, 20.0, 20.0, 20.0),
+            outer_solo: None,
+            ..Gaps::default()
+        };
+        let layout = tree.layout(area(), gaps);
+        assert_eq!(
+            layout,
+            vec![(
+                1,
+                Rect {
+                    x: 20.0,
+                    y: 20.0,
+                    width: area().width - 40.0,
+                    height: area().height - 40.0,
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn outer_solo_is_ignored_once_a_second_tile_exists() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
+
+        let gaps = Gaps {
+            outer: (20.0, 20.0, 20.0, 20.0),
+            outer_solo: Some((40.0, 40.0, 40.0, 40.0)),
+            ..Gaps::default()
+        };
+        let layout = tree.layout(area(), gaps);
+        let leftmost = layout
+            .iter()
+            .min_by(|a, b| a.1.x.total_cmp(&b.1.x))
+            .unwrap();
+        assert_eq!(leftmost.1.x, 20.0);
+        assert_eq!(leftmost.1.y, 20.0);
+    }
+
+    #[test]
+    fn outer_solo_still_applies_with_a_floating_sibling_present() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        tree.insert_floating(2, Some(w1), Orientation::Horizontal);
+
+        let gaps = Gaps {
+            outer: (20.0, 20.0, 20.0, 20.0),
+            outer_solo: Some((40.0, 40.0, 40.0, 40.0)),
+            ..Gaps::default()
+        };
+        // The floating window still gets no rect, and the lone tile still
+        // counts as "solo" — floating windows don't count toward the tile
+        // count that picks `outer` vs `outer_solo`.
+        let layout = tree.layout(area(), gaps);
+        assert_eq!(
+            layout,
+            vec![(
+                1,
+                Rect {
+                    x: 40.0,
+                    y: 40.0,
+                    width: area().width - 80.0,
+                    height: area().height - 80.0,
+                }
+            )]
+        );
     }
 
     #[test]
