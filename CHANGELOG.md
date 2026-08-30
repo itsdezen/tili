@@ -6,6 +6,17 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [0.9.0] - 2026-08-30
+
+### Added
+
+- **New `gaps.outer-solo` config key overrides `outer` when a workspace has
+  exactly one tile** (floating windows don't count) — e.g. wider breathing
+  room for a lone full-screen-ish window, while multi-tile workspaces keep
+  using `outer` unchanged. Same CSS shorthand as `outer`, overridable
+  per-workspace alongside it. Unset (the default) falls back to `outer`,
+  so existing configs are unaffected.
+
 ## [0.8.0] - 2026-08-28
 
 ### Added

@@ -17,6 +17,17 @@ full below, earlier ones collapsed further down.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-30
+
+### Added
+
+- **New `gaps.outer-solo` config key overrides `outer` when a workspace has
+  exactly one tile** (floating windows don't count) — e.g. wider breathing
+  room for a lone full-screen-ish window, while multi-tile workspaces keep
+  using `outer` unchanged. Same CSS shorthand as `outer`, overridable
+  per-workspace alongside it. Unset (the default) falls back to `outer`,
+  so existing configs are unaffected.
+
 ## [0.8.0] - 2026-08-28
 
 ### Added
