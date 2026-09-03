@@ -58,17 +58,24 @@ pub struct KeybindingMode {
     pub auto_exit: bool,
 }
 
-/// `workspace-rules { rule app-id="..." workspace="..." ... }` — always
-/// creates a matching window on the named workspace, independent of
-/// `floating-rules` and applying regardless of whether the window ends up
-/// tiled or floating. `workspace` isn't validated here — this crate never
-/// cross-checks between sections (see `settings.default_workspace`'s own
-/// doc comment for the same reasoning) — that's `tili-daemon`'s job at
-/// `apply_config` time.
+/// `workspace-rules { rule app-id="..." workspace="..." ... }` — routes a
+/// matching app onto the named workspace, independent of `floating-rules`
+/// and applying regardless of whether the window ends up tiled or
+/// floating. By default only the app's *first* window (the one that shows
+/// up when it has no other tracked window yet) auto-routes this way — a
+/// later window from an already-running instance just opens on whatever
+/// workspace is currently active, like an app with no matching rule.
+/// `always` opts a rule back into auto-routing every new window, matching
+/// this rule's previous, unconditional behavior. `workspace` isn't validated here — this
+/// crate never cross-checks between sections (see
+/// `settings.default_workspace`'s own doc comment for the same
+/// reasoning) — that's `tili-daemon`'s job at `apply_config` time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceRule {
     pub app_id: String,
     pub workspace: String,
+    /// Defaults to `#false` when omitted — see this struct's doc comment.
+    pub always: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,11 +488,13 @@ fn parse_css_shorthand(node: &KdlNode) -> Option<(u32, u32, u32, u32)> {
     }
 }
 
-/// `workspace-rules { rule app-id="..." workspace="..." ... }`. Both
-/// fields are required — a rule with no workspace has no purpose — so a
-/// malformed entry is silently skipped, matching how `floating-rules`
-/// already treats a missing `app-id`. Rules are returned in document
-/// order — callers should match first-wins.
+/// `workspace-rules { rule app-id="..." workspace="..." always=#bool }`.
+/// `app-id`/`workspace` are required — a rule with no workspace has no
+/// purpose — so a malformed entry is silently skipped, matching how
+/// `floating-rules` already treats a missing `app-id`. `always` is
+/// optional, defaulting to `#false` (see `WorkspaceRule`'s doc comment).
+/// Rules are returned in document order — callers should match
+/// first-wins.
 fn parse_workspace_rules(doc: &KdlDocument) -> Vec<WorkspaceRule> {
     let Some(children) = doc.get("workspace-rules").and_then(KdlNode::children) else {
         return Vec::new();
@@ -498,7 +507,12 @@ fn parse_workspace_rules(doc: &KdlDocument) -> Vec<WorkspaceRule> {
         .filter_map(|n| {
             let app_id = n.get("app-id")?.as_string()?.to_string();
             let workspace = n.get("workspace")?.as_string()?.to_string();
-            Some(WorkspaceRule { app_id, workspace })
+            let always = n.get("always").and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(WorkspaceRule {
+                app_id,
+                workspace,
+                always,
+            })
         })
         .collect()
 }
@@ -981,8 +995,23 @@ mod tests {
         assert_eq!(config.workspace_rules.len(), 2);
         assert_eq!(config.workspace_rules[0].app_id, "com.mitchellh.ghostty");
         assert_eq!(config.workspace_rules[0].workspace, "work");
+        assert!(!config.workspace_rules[0].always);
         assert_eq!(config.workspace_rules[1].app_id, "com.apple.finder");
         assert_eq!(config.workspace_rules[1].workspace, "personal");
+        assert!(!config.workspace_rules[1].always);
+    }
+
+    #[test]
+    fn workspace_rule_parses_the_always_flag_when_present() {
+        let source = r#"
+            workspace-rules {
+                rule app-id="com.mitchellh.ghostty" workspace="work" always=#true
+                rule app-id="com.apple.finder" workspace="personal" always=#false
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert!(config.workspace_rules[0].always);
+        assert!(!config.workspace_rules[1].always);
     }
 
     #[test]

@@ -247,16 +247,21 @@ keybindings mode="manage" auto-exit=#true {
     bind "alt-shift-l" "join right"
 }
 
-// Auto-assigns a matching app's windows to a specific declared workspace on
-// creation, regardless of whatever workspace is currently active — and
-// regardless of whether that app ends up tiled or floating (see
-// `floating-rules` below for that separate concern). Matched in order,
-// first match wins. If the target workspace isn't visible on any monitor
-// right now, the window is parked until you switch to it.
+// Auto-assigns a matching app's first window to a specific declared
+// workspace on creation, regardless of whatever workspace is currently
+// active — and regardless of whether that app ends up tiled or floating
+// (see `floating-rules` below for that separate concern). A later window
+// from an already-running instance of the app just opens on whatever
+// workspace is currently active instead, like an app with no matching
+// rule — unless `always` is set. Matched in order, first match wins. If
+// the target workspace isn't visible on any monitor right now, the window
+// is parked until you switch to it.
 //   app-id     required. The target app's bundle identifier (find one with
 //              `osascript -e 'id of app "Finder"'` or `mdls -name
 //              kMDItemCFBundleIdentifier /Applications/Finder.app`).
 //   workspace  required. Must name a workspace declared above.
+//   always     optional, defaults to #false. Auto-routes every new window
+//              from this app, not just its first — the old behavior.
 workspace-rules {
     // rule app-id="com.mitchellh.ghostty" workspace="work"
 }

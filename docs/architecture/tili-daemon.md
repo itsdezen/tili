@@ -169,16 +169,44 @@ this one is deliberately not scoped to a bundle id — the same shape (an
 Electron app spinning up an unresizable auxiliary window detached from its
 main one) is common across many apps, not just TradingView.
 
+`should_ignore_new_window` ORs all seven predicates above into one shared
+signal: a window any of them flags is meaningless to tili's actual job
+(tiling/floating real windows), so every decision built on "what windows
+does this app have" treats it as if it doesn't exist — not just the
+`rule_mode`/disposition decision the predicates were each individually
+written for. `apply_windows_changed` also records its `WindowId` in
+`force_ignored_window_ids` for as long as it stays placed (cleared in
+`remove_placement`), so `pid_has_existing_window` (below) can exclude it
+too, without having to infer "was this ignored" from `PlacementKind` after
+the fact — see that function's doc comment for why a bare
+`!= PlacementKind::Popup` check isn't equivalent (`classify_new_window`'s
+hidden/minimized/fullscreen precedence can land a force-ignored window in
+`HiddenApplication`/`Minimized`/`NativeFullscreen` instead of `Popup`).
+
 `workspace_focus` remembers each workspace's last-focused node — tiled or
 floating — so switching back restores where you left off. A new window
 joins the active workspace next to the current focus (as a `Node::Window`
 if tiled, a `Node::Floating` if floating — either way inserted into the
-tree the same way) *unless* it matches a `workspace-rules` entry
-(`matching_workspace_rule`, checked via `AxWindow::bundle_id()` — kept
-entirely separate from `matching_floating_rule`, since which workspace a
-window lands on has nothing to do with whether it tiles or floats).
-`apply_windows_changed` resolves that into a `target_workspace` and hands
-off to `place_new_window`, which inserts into that workspace's own `Tree`
+tree the same way) *unless* it matches a `workspace-rules` entry AND
+either that rule sets `always` or the window is its app's first tracked
+one (`matching_workspace_rule`, checked via `AxWindow::bundle_id()`, gated
+by `pid_has_existing_window(pid)` — a private `WmState` method that scans
+`self.windows` for any other live, non-`force_ignored_window_ids`,
+non-`pending_removal` window of the same pid, the same "does this pid
+still count as alive" idiom `reveal_frontmost`'s `suppress` check already
+uses). This first-window default exists so opening a second/third window
+of an already-running app doesn't yank the active workspace away — only
+genuinely launching the app (or a rule with `always=#true`) does that.
+Snapshotted once per `apply_windows_changed` call, before its loop, not
+re-checked per window inside it — the loop inserts each window into
+`self.windows` as it's processed, so a live per-window check would
+wrongly see an earlier window from the same launch burst as proof the app
+"already" has one. `matching_workspace_rule`/`matching_floating_rule`
+remain independent lookups past the shared `should_ignore_new_window`
+gate — which workspace a window lands on still has nothing to do with
+whether it tiles or floats. `apply_windows_changed` resolves the
+workspace-rule result into a `target_workspace` and hands off to
+`place_new_window`, which inserts into that workspace's own `Tree`
 (keying its focus-hint lookup off `target_workspace`, not whatever's
 active, so it still respects where focus was last left there) — a floating
 window additionally gets its initial frame computed/written there too, but
@@ -632,6 +660,25 @@ click case's old ~0-30ms or the `FrontmostAppChanged` case's old 0ms, for
 an unconfirmed reliability benefit against the launch race — an accepted
 trade given `pending_launch_pids` costs little either way, not a value
 tuned to be imperceptible.
+
+`note_app_launched` also snapshots the active workspace into
+`launch_active_workspace: HashMap<i32, String>` — a longer-lived cousin of
+`pending_launch_pids` for a different problem: an app with a splash/loading
+screen (that screen itself force-`Ignore`d by `should_ignore_new_window`,
+so it never touches this) can take long enough for the user to switch
+workspaces before the real main window appears, and without this, that
+real window would silently land on wherever the user switched to instead
+of where they launched the app from. `apply_windows_changed` consumes it
+(`remove`, one-shot) as the `target_workspace` fallback for that pid's
+first genuinely real window, only when no `workspace-rules` entry already
+claimed it — an explicit rule still wins. Cleared the same way as
+`pending_launch_pids` on `remove_app`, but deliberately has no
+`LAUNCH_GRACE_PERIOD`-style expiry: a stale-but-unconsumed entry can't
+cause a wrong switch on its own (it only ever applies once, to a window
+that hasn't appeared yet), so there's nothing a grace period would guard
+against here. Same best-effort caveat as everything else keyed off
+`AppLaunched`: absent that event, this silently falls back to today's
+"wherever's active right now" behavior.
 
 A third race lives in the same debounce window: rapid, deliberate
 workspace-switch hotkey presses landing on an empty target workspace.

@@ -9,15 +9,19 @@ Part of the [architecture notes](../ARCHITECTURE.md).
 `Regex`, so this crate doesn't need a regex dependency just to hold a
 pattern; `tili-daemon` compiles it.
 
-`workspace-rules { rule app-id="..." workspace="name" ... }` is a separate,
-independent section — both fields required, no `title`/sizing/`mode`, since
-it's a purely event-driven "which workspace does this app land on" rule
-with nothing to do with tile-vs-float — parsed by its own
-`parse_workspace_rules`, not folded into `parse_floating_rules`. Neither
-section validates `workspace` names here (this crate has no cross-section
-validation anywhere, and no error-reporting path for semantic issues, only
-KDL-syntax ones) — `tili-daemon` checks it names a declared workspace, the
-same way it already resolves `settings.default-workspace`.
+`workspace-rules { rule app-id="..." workspace="name" always=#bool? ... }`
+is a separate, independent section — `app-id`/`workspace` required, no
+`title`/sizing/`mode`, since it's a purely event-driven "which workspace
+does this app land on" rule with nothing to do with tile-vs-float — parsed
+by its own `parse_workspace_rules`, not folded into `parse_floating_rules`.
+`always` is optional (defaults to `#false`): by default `tili-daemon` only
+auto-routes an app's first window this way, not every window it opens —
+`always` opts a rule back into the older, unconditional "route every new
+window" behavior. Neither section validates `workspace` names here (this
+crate has no cross-section validation anywhere, and no error-reporting
+path for semantic issues, only KDL-syntax ones) — `tili-daemon` checks it
+names a declared workspace, the same way it already resolves
+`settings.default-workspace`.
 
 Unrecognized top-level sections are still silently ignored, not rejected,
 so a config can be written against the full target schema before the parser

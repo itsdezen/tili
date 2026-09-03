@@ -621,6 +621,32 @@ fn is_non_resizable_window(is_resizable: bool) -> bool {
     !is_resizable
 }
 
+/// Combines every "this brand-new window is fake/transient system chrome,
+/// not a real one" predicate above into one shared signal — used to force
+/// `rule_mode` to `Ignore` (see `resolve_disposition`) and, via
+/// `WmState::force_ignored_window_ids`, to also keep such a window from
+/// ever counting as proof its app already has a real window (see
+/// `WmState::pid_has_existing_window`). A window this flags is meaningless
+/// to tili's actual job (tiling/floating real windows), so every decision
+/// built on "what windows does this app have" should treat it as if it
+/// doesn't exist, not just the one this predicate was originally written
+/// for.
+fn should_ignore_new_window(
+    bundle_id: Option<&str>,
+    kind: tili_ax::WindowKind,
+    title: &str,
+    has_zoom_button: bool,
+    is_resizable: bool,
+) -> bool {
+    is_system_ui_bundle(bundle_id)
+        || is_protected_finder_dialog(bundle_id, title)
+        || is_transient_empty_dialog(kind, title, has_zoom_button)
+        || is_system_settings_suggestion_popup(bundle_id, kind, title)
+        || is_finder_quick_look_window(bundle_id, kind, title)
+        || is_finder_get_info_window(bundle_id, kind, title)
+        || is_non_resizable_window(is_resizable)
+}
+
 /// What a brand-new window's placement disposition should be: an explicit
 /// floating-rule `mode` match always wins; otherwise falls back to the
 /// kind-based default that predates per-rule modes — `Popup`
@@ -685,11 +711,12 @@ fn placement_info(kind: &PlacementKind) -> tili_ipc::PlacementInfo {
 /// A `tili_config::WorkspaceRule` with its `workspace` pre-validated
 /// against the reloaded config's own declared workspaces — done once in
 /// `apply_config`, not on every window creation. An undeclared target
-/// drops the whole rule (see `apply_config`'s rebuild), since `workspace`
-/// is this rule's only meaningful field.
+/// drops the whole rule (see `apply_config`'s rebuild).
 struct CompiledWorkspaceRule {
     app_id: String,
     workspace: String,
+    /// See `tili_config::WorkspaceRule::always`'s doc comment.
+    always: bool,
 }
 
 /// A `tili_config::FloatingRule` with its title pattern pre-compiled —
@@ -736,6 +763,20 @@ pub struct WmState {
     /// so far — see `MAX_BUNDLE_ID_RETRIES`. Cleared once the window is
     /// actually placed (bundle id resolved, or retries exhausted).
     pending_bundle_retries: HashMap<WindowId, u8>,
+    /// WindowIds whose disposition `should_ignore_new_window` forced to
+    /// `Ignore` at creation — tracked directly rather than inferred from
+    /// `PlacementKind::Popup`, since `classify_new_window`'s hidden/
+    /// minimized/fullscreen precedence (checked before disposition) can
+    /// land a force-ignored window in `HiddenApplication`/`Minimized`/
+    /// `NativeFullscreen` instead of `Popup`. Read by
+    /// `pid_has_existing_window` so a splash/welcome window (or any other
+    /// force-ignored window, e.g. a genuinely non-resizable real app
+    /// window) never counts as proof its app already has a real window —
+    /// consistent either way, since tili never treats a force-ignored
+    /// window as tiled/floated/trackable regardless of which `PlacementKind`
+    /// it landed in. Cleaned up in `remove_placement`, alongside
+    /// `floating_placed`/`floating_centered`.
+    force_ignored_window_ids: HashSet<WindowId>,
     /// How long a pending removal waits before being finalized — starts at
     /// `REMOVAL_GRACE_PERIOD`; a field rather than using the constant
     /// directly so tests can shrink it to zero instead of sleeping for real.
@@ -859,6 +900,21 @@ pub struct WmState {
     /// (`apply_windows_changed`), it terminates (`remove_app`), or
     /// `LAUNCH_GRACE_PERIOD` elapses (`finalize_expired_launches`).
     pending_launch_pids: HashMap<i32, Instant>,
+    /// pid -> the workspace active when `AppLaunched` was recorded for it
+    /// — a longer-lived cousin of `pending_launch_pids` (which clears on
+    /// the *first* window, even a force-ignored splash one). Consumed
+    /// exactly once, by `apply_windows_changed`, as the fallback
+    /// `target_workspace` for that pid's first genuinely real (non-
+    /// ignored) window when no `workspace-rules` entry matches — so
+    /// switching workspaces while a splash/loading screen is up doesn't
+    /// silently steal the real window that opens once it's done. Cleared
+    /// on that consumption or `remove_app` (pid quits before ever getting
+    /// a real window); unlike `pending_removal`/`pending_launch_pids`,
+    /// deliberately has no time-based expiry — a stale-but-unconsumed
+    /// entry is harmless (it only ever applies to a window that hasn't
+    /// appeared yet), so there's nothing a grace period would protect
+    /// against here.
+    launch_active_workspace: HashMap<i32, String>,
     /// Bumped once per real (non-no-op, non-error) `switch_workspace`
     /// call. `main.rs` snapshots this when arming a deferred
     /// `reveal_current_frontmost` check (`pending_reveal_deadline`) and
@@ -948,6 +1004,7 @@ impl Default for WmState {
             placements: HashMap::new(),
             pending_removal: HashMap::new(),
             pending_bundle_retries: HashMap::new(),
+            force_ignored_window_ids: HashSet::new(),
             removal_grace: REMOVAL_GRACE_PERIOD,
             launch_grace: LAUNCH_GRACE_PERIOD,
             #[cfg(test)]
@@ -981,6 +1038,7 @@ impl Default for WmState {
             previous_workspace: None,
             last_frontmost_pid: None,
             pending_launch_pids: HashMap::new(),
+            launch_active_workspace: HashMap::new(),
             switch_epoch: 0,
             floating_placed: HashSet::new(),
             floating_centered: HashSet::new(),
@@ -1052,9 +1110,12 @@ impl WmState {
 
     /// Records that `pid` just launched (`WmEvent::AppLaunched`) — see
     /// `pending_launch_pids`'s doc comment for why `reveal_current_frontmost`
-    /// needs to know this.
+    /// needs to know this, and `launch_active_workspace`'s doc comment for
+    /// why its first real window's workspace fallback needs it too.
     pub fn note_app_launched(&mut self, pid: i32) {
         self.pending_launch_pids.insert(pid, Instant::now());
+        self.launch_active_workspace
+            .insert(pid, self.active_workspace_name());
     }
 
     /// Records that the system just woke from sleep
@@ -1336,6 +1397,15 @@ impl WmState {
 
         let active_workspace = self.active_workspace_name();
         let app_hidden = tili_ax::is_app_hidden(pid);
+        // Snapshotted once per call, not re-checked per window inside the
+        // loop below — the loop inserts each window into `self.windows` as
+        // it processes it (see `self.windows.insert(id, window)` below), so
+        // a live check would see an earlier window from this same batch
+        // already present and wrongly conclude "not first" for a later one
+        // in the same launch burst (e.g. an app restoring several windows
+        // at once). Snapshotting keeps every window from one burst treated
+        // as part of the same "first open."
+        let pid_is_first_window = !self.pid_has_existing_window(pid);
         // Set when a brand-new window actually gets placed this pass — lets
         // the post-loop re-sync below skip the extra AX query on every
         // ordinary reconciliation call, not just window-creation ones.
@@ -1378,31 +1448,37 @@ impl WmState {
 
             // Only resolved for brand-new windows — an existing placement's
             // disposition is never re-derived on a later scan or config
-            // reload (see `resolve_disposition`'s doc comment). The two
-            // matchers are deliberately independent: which workspace a
+            // reload (see `resolve_disposition`'s doc comment). Past the
+            // shared `should_ignore_new_window` gate, `rule_mode` and
+            // `rule_workspace` are still independent: which workspace a
             // window lands on has nothing to do with whether it tiles or
             // floats.
-            let rule_mode = if is_new {
-                if is_system_ui_bundle(window.bundle_id())
-                    || is_protected_finder_dialog(window.bundle_id(), window.title())
-                    || is_transient_empty_dialog(kind, window.title(), window.has_zoom_button())
-                    || is_system_settings_suggestion_popup(window.bundle_id(), kind, window.title())
-                    || is_finder_quick_look_window(window.bundle_id(), kind, window.title())
-                    || is_finder_get_info_window(window.bundle_id(), kind, window.title())
-                    || is_non_resizable_window(window.is_resizable())
-                {
+            let (rule_mode, rule_workspace, ignore) = if is_new {
+                let ignore = should_ignore_new_window(
+                    window.bundle_id(),
+                    kind,
+                    window.title(),
+                    window.has_zoom_button(),
+                    window.is_resizable(),
+                );
+                if ignore {
+                    self.force_ignored_window_ids.insert(id);
+                }
+                let mode = if ignore {
                     Some(tili_config::FloatingRuleMode::Ignore)
                 } else {
                     self.matching_floating_rule(&window).map(|r| r.mode)
-                }
+                };
+                let workspace = if ignore {
+                    None
+                } else {
+                    self.matching_workspace_rule(&window).and_then(|rule| {
+                        (rule.always || pid_is_first_window).then(|| rule.workspace.clone())
+                    })
+                };
+                (mode, workspace, ignore)
             } else {
-                None
-            };
-            let rule_workspace = if is_new {
-                self.matching_workspace_rule(&window)
-                    .map(|r| r.workspace.clone())
-            } else {
-                None
+                (None, None, false)
             };
 
             self.windows.insert(id, window);
@@ -1415,7 +1491,29 @@ impl WmState {
                 continue;
             }
 
-            let target_workspace = rule_workspace.unwrap_or_else(|| active_workspace.clone());
+            // A real (non-ignored) window with no `workspace-rules` match
+            // falls back to wherever was active when `pid` launched
+            // (`AppLaunched`, before even a splash screen showed up) rather
+            // than wherever's active right now — otherwise switching
+            // workspaces while a splash/loading screen is up (itself
+            // force-`Ignore`d, so it never consumes this) silently steals
+            // the real window that opens once it's done. One-shot: `remove`
+            // both consumes it (a later window from the same still-running
+            // app must use the plain "wherever's active now" fallback
+            // instead, same as any other subsequent window) and means an
+            // ignored splash's own bookkeeping-only `target_workspace`
+            // never touches it. Best-effort — `AppLaunched` doesn't
+            // reliably fire for every launch (see `note_app_launched`), so
+            // this silently degrades to today's behavior when it's absent.
+            let target_workspace = rule_workspace.unwrap_or_else(|| {
+                if ignore {
+                    active_workspace.clone()
+                } else {
+                    self.launch_active_workspace
+                        .remove(&pid)
+                        .unwrap_or_else(|| active_workspace.clone())
+                }
+            });
             let disposition = resolve_disposition(kind, rule_mode);
             let placement_kind =
                 classify_new_window(disposition, app_hidden, minimized, fullscreen);
@@ -1755,6 +1853,23 @@ impl WmState {
     /// and unconditional, unlike a single missing window in
     /// `apply_windows_changed`; the whole process is gone, so there's
     /// nothing to wait out a grace period for.
+    /// Whether `pid` currently owns a real, trackable window — excludes a
+    /// window still sitting out `pending_removal`'s grace period (matches
+    /// `reveal_frontmost`'s `suppress` check, which uses the same idiom for
+    /// "does this pid still count as alive") and anything in
+    /// `force_ignored_window_ids` (see that field's doc comment). Used by
+    /// `apply_windows_changed` to decide whether a new window is this app's
+    /// first — a splash/welcome screen or any other force-ignored window
+    /// never counts, so it can't itself block the real first window from
+    /// getting routed.
+    fn pid_has_existing_window(&self, pid: i32) -> bool {
+        self.windows.iter().any(|(wid, w)| {
+            w.pid() == pid
+                && !self.pending_removal.contains_key(wid)
+                && !self.force_ignored_window_ids.contains(wid)
+        })
+    }
+
     pub fn remove_app(&mut self, pid: i32) {
         let ids: Vec<WindowId> = self
             .windows
@@ -1769,6 +1884,7 @@ impl WmState {
             self.pending_bundle_retries.remove(&id);
         }
         self.pending_launch_pids.remove(&pid);
+        self.launch_active_workspace.remove(&pid);
         self.relayout_all_visible();
     }
 
@@ -1963,6 +2079,7 @@ impl WmState {
                     Some(CompiledWorkspaceRule {
                         app_id: rule.app_id.clone(),
                         workspace: rule.workspace.clone(),
+                        always: rule.always,
                     })
                 } else {
                     let warning = format!(
@@ -3427,10 +3544,15 @@ impl WmState {
     /// Drops a window's placement entirely — from its workspace's `Tree`
     /// if it was `Tiled` or `Floating` (see `remove_from_tree`), or just
     /// from `placements` otherwise (every other kind never sat in a
-    /// `Tree`).
+    /// `Tree`). Also clears every other per-`WindowId` auxiliary set this
+    /// window may be in (`floating_placed`/`floating_centered`/
+    /// `force_ignored_window_ids`) — the single spot both of this
+    /// function's callers (`finalize_expired_removals`, `remove_app`) go
+    /// through, so neither needs its own copy of this cleanup.
     fn remove_placement(&mut self, id: WindowId) {
         self.floating_placed.remove(&id);
         self.floating_centered.remove(&id);
+        self.force_ignored_window_ids.remove(&id);
         let Some(placement) = self.placements.remove(&id) else {
             return;
         };
@@ -4527,6 +4649,50 @@ mod tests {
     fn is_non_resizable_window_matches_only_non_resizable() {
         assert!(is_non_resizable_window(false));
         assert!(!is_non_resizable_window(true));
+    }
+
+    #[test]
+    fn should_ignore_new_window_is_false_for_an_ordinary_window() {
+        assert!(!should_ignore_new_window(
+            Some("com.example.SomeApp"),
+            tili_ax::WindowKind::Standard,
+            "Untitled",
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn should_ignore_new_window_matches_a_system_ui_bundle_regardless_of_shape() {
+        assert!(should_ignore_new_window(
+            Some("com.apple.dock"),
+            tili_ax::WindowKind::Standard,
+            "Untitled",
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn should_ignore_new_window_matches_a_non_resizable_window_regardless_of_bundle() {
+        assert!(should_ignore_new_window(
+            Some("com.example.SomeApp"),
+            tili_ax::WindowKind::Standard,
+            "Untitled",
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_ignore_new_window_matches_a_transient_empty_dialog() {
+        assert!(should_ignore_new_window(
+            Some("com.example.SomeApp"),
+            tili_ax::WindowKind::Dialog,
+            "",
+            false,
+            true,
+        ));
     }
 
     #[test]
@@ -5875,6 +6041,26 @@ mod tests {
     }
 
     #[test]
+    fn note_app_launched_records_the_active_workspace() {
+        let mut state = floating_test_state();
+        state.note_app_launched(1234);
+        assert_eq!(
+            state.launch_active_workspace.get(&1234),
+            Some(&state.active_workspace_name())
+        );
+    }
+
+    #[test]
+    fn remove_app_clears_launch_active_workspace() {
+        let mut state = floating_test_state();
+        state.note_app_launched(1234);
+
+        state.remove_app(1234);
+
+        assert!(!state.launch_active_workspace.contains_key(&1234));
+    }
+
+    #[test]
     fn toggle_orientation_flips_between_horizontal_and_vertical() {
         let mut state = floating_test_state();
         let root_orientation = state.root_orientation_hint();
@@ -6361,6 +6547,25 @@ mod tests {
         assert_eq!(state.workspace_rules.len(), 1);
         assert_eq!(state.workspace_rules[0].app_id, "com.mitchellh.ghostty");
         assert_eq!(state.workspace_rules[0].workspace, "work");
+        assert!(!state.workspace_rules[0].always);
+    }
+
+    #[test]
+    fn apply_config_threads_the_always_flag_through_to_the_compiled_rule() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            workspaces {
+                workspace "work"
+            }
+            workspace-rules {
+                rule app-id="com.mitchellh.ghostty" workspace="work" always=#true
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+        assert!(state.workspace_rules[0].always);
     }
 
     #[test]

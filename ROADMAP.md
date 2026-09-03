@@ -13,8 +13,10 @@ feature set:
 - Built-in global hotkeys, with switchable keybinding modes.
 - Floating rules (auto-center/size on creation, runtime tile/float
   toggle, per-rule mode override).
-- Workspace rules — auto-assign an app to a specific workspace on
-  creation, independent of whether it tiles or floats.
+- Workspace rules — auto-assign an app's first window to a specific
+  workspace on creation, independent of whether it tiles or floats; a
+  later window from an already-running instance opens wherever the active
+  workspace already is, unless the rule sets `always`.
 - Mouse-follows-focus and focus-follows-monitor.
 - Native and tiled fullscreen, window close, and `summon` (find-and-raise
   by title/bundle id).
