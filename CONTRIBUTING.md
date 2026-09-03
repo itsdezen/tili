@@ -77,7 +77,7 @@ com.tili.daemon` (or your dev bundle id), then run `tili start`/`tili-dev
 start` again.
 
 With the cert in place, build/bundle/sign/run with the same commands
-`build-dev.sh` runs internally:
+`dev.sh` runs internally:
 
 ```sh
 tili stop 2>/dev/null || true # avoid a signing-prompt race with a running daemon
@@ -94,10 +94,9 @@ cargo run -p xtask -- codesign \
 "target/$target/release/tili.app/Contents/MacOS/tili" start
 ```
 
-Once you're comfortable with these steps, `sh build-dev.sh` runs all of them
-for you (plus installing a `tili-dev` wrapper on PATH at
-`/opt/homebrew/bin`) — after that, every test cycle is just `sh
-build-dev.sh` followed by `tili-dev start`.
+Once you're comfortable with these steps, `sh dev.sh` runs all of them for
+you (plus installing a `tili-dev` wrapper on PATH at `/opt/homebrew/bin`
+and starting it) — after that, every test cycle is just `sh dev.sh`.
 
 ## Before opening a PR
 

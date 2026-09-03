@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Builds, bundles, and signs tili from this checkout — for on-device
-# testing without a real `brew install`, without re-granting Accessibility,
-# and without racing whatever's currently installed (e.g. the Homebrew
-# release).
+# Builds, bundles, signs, and starts tili from this checkout — for
+# on-device testing without a real `brew install`, without re-granting
+# Accessibility, and without racing whatever's currently installed (e.g.
+# the Homebrew release).
 #
-# Fully automated — just run it, then:
-#   tili-dev start
+# Fully automated — just run it; the freshly built `tili-dev` is left
+# running when it finishes.
 #
 # Stops whatever's currently running *first*, before anything else: signing
 # below can trigger a macOS Keychain "always allow" password prompt
@@ -66,10 +66,11 @@ exec "$app/Contents/MacOS/tili" "\$@"
 WRAPPER
 chmod +x "$wrapper"
 
+echo "==> starting tili-dev"
+"$wrapper" start
+
 cat <<MSG
 
-==> build ready — same signing identity as before, so Accessibility
-    permission carries over (no re-grant needed). Now run:
-
-    tili-dev start
+==> tili-dev is running — same signing identity as before, so
+    Accessibility permission carried over (no re-grant needed).
 MSG
