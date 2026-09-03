@@ -6,6 +6,41 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [0.10.0] - 2026-09-03
+
+### Changed
+
+- **`workspace-rules` now only auto-routes an app's *first* window by
+  default**, not every new window it opens — opening a second/third window
+  of an already-running app (e.g. Cmd-N) no longer yanks the active
+  workspace away; it just opens wherever you already are. New per-rule
+  `always=#true` flag restores the previous, unconditional "route every
+  new window" behavior.
+
+### Fixed
+
+- **A transient system panel misattributed to a real app's own pid could
+  still trigger that app's `workspace-rules` entry**, auto-switching the
+  active workspace for a window that closes moments later — e.g. macOS
+  26/27's Siri/Apple-Intelligence text-selection popup, which (like the
+  input-source-switch HUD glyph fixed in v0.5.0) isn't owned by a distinct
+  process at all and gets attributed to whichever app is frontmost when it
+  appears. The seven existing shape/bundle-id guards that already kept
+  this class of window from being wrongly tiled or floated
+  (`is_system_ui_bundle`, `is_transient_empty_dialog`, and friends) never
+  applied to workspace-routing at all — that lookup matched purely on
+  bundle id, independent of tiling disposition. Both now share one gate
+  (`should_ignore_new_window`), so a window any of them flags is invisible
+  to every placement decision, not just tiling.
+- **An app with a splash/loading screen (TradingView, and Electron apps in
+  general) could open its real main window on the wrong workspace** if the
+  user switched workspaces while the splash was still up — the splash
+  itself is correctly ignored, but the real window's fallback placement
+  used whatever workspace was active *when it finally appeared*, not
+  where the app was actually launched from. Now falls back to the
+  workspace active at launch (`AppLaunched`) instead, for that app's first
+  real window only, when no `workspace-rules` entry already claims it.
+
 ## [0.9.0] - 2026-08-30
 
 ### Added
