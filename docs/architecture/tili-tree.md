@@ -26,6 +26,10 @@ direction `navigate`, `move`'s window-identity `swap_windows`, proportional
 - `toggle_layout(from)` (M7) converts `from`'s parent container between
   `Split` and `Accordion` in place — converting *to* Accordion sets `active`
   to `from`'s own position so the currently-visible window doesn't change.
+- A perpendicular `move` at a two-child workspace root replaces that root
+  along the requested axis while preserving its layout kind. Larger trees
+  still gain a `Tiles` outer container so the move does not implicitly nest
+  the existing layout inside a new Accordion.
 - `focus_in_direction(from, dir)` is the Accordion-aware navigation entry
   point `WmState` actually calls (not plain `navigate`): if `from`'s parent
   is an `Accordion`, `dir` cycles (and wraps at the ends) which child is

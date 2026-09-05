@@ -933,7 +933,9 @@ impl Tree {
     }
 
     /// Wraps the entire tree in a fresh root container along `axis`,
-    /// placing `from` on the side of the old root that `forward` faces.
+    /// placing `from` on the side of the old root that `forward` faces. If
+    /// detaching `from` collapses the old root, the replacement preserves
+    /// its layout; otherwise the new outer container uses `Tiles`.
     /// Returns `false` if `from` is already the whole tree (the lone root
     /// window — nothing to wrap it against).
     fn wrap_root(&mut self, from: NodeId, axis: Orientation, forward: bool) -> bool {
@@ -946,6 +948,12 @@ impl Tree {
         let Some(&from_parent) = self.parents.get(&from) else {
             return false;
         };
+        let layout = match self.nodes.get(old_root) {
+            Some(Node::Container {
+                layout, children, ..
+            }) if from_parent == old_root && children.len() == 2 => *layout,
+            _ => Layout::Tiles,
+        };
         self.detach(from, from_parent);
 
         let children = if forward {
@@ -954,7 +962,7 @@ impl Tree {
             vec![from, old_root]
         };
         let new_root = self.nodes.insert(Node::Container {
-            layout: Layout::Tiles,
+            layout,
             orientation: axis,
             children,
             weights: vec![1.0, 1.0],
@@ -1982,6 +1990,31 @@ mod tests {
         assert!(tree.move_in_direction(w2, Direction::Down));
         assert_eq!(tree.root_orientation(), Some(Orientation::Vertical));
         assert_eq!(tree.window_ids().len(), 2);
+    }
+
+    #[test]
+    fn move_perpendicular_to_two_window_accordion_preserves_layout() {
+        let mut tree = Tree::new();
+        let top = insert(&mut tree, 1, None);
+        let bottom = insert(&mut tree, 2, Some(top));
+        assert!(tree.set_root_orientation(Orientation::Vertical));
+        assert!(tree.toggle_root_layout());
+
+        assert!(tree.move_in_direction(bottom, Direction::Left));
+        assert!(tree.is_root_accordion());
+        assert_eq!(tree.root_orientation(), Some(Orientation::Horizontal));
+
+        let layout = tree.layout(
+            area(),
+            Gaps {
+                accordion: 20.0,
+                ..Gaps::default()
+            },
+        );
+        assert!(
+            layout.iter().find(|(w, _)| *w == 2).unwrap().1.x
+                < layout.iter().find(|(w, _)| *w == 1).unwrap().1.x
+        );
     }
 
     #[test]
