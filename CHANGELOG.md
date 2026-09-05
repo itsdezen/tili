@@ -6,6 +6,15 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [0.10.1] - 2026-09-05
+
+### Fixed
+
+- **Moving a window perpendicular to a two-window Accordion root changed
+  the layout to Tiles.** The replacement root now preserves the Accordion
+  layout while changing its orientation and placing the moved window on the
+  requested side.
+
 ## [0.10.0] - 2026-09-03
 
 ### Changed
