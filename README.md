@@ -139,7 +139,7 @@ copy-pasteable version:
 ```kdl
 workspaces {
     workspace "work"
-    workspace "entertain"
+    workspace "entertain" layout="accordion"
     workspace "random"
 }
 

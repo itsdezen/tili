@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 pub struct WorkspaceConfig {
     pub name: String,
     pub monitor: Option<String>,
+    /// Overrides the top-level `default-layout` for this workspace only.
+    /// Raw, unvalidated string — `tili-daemon` resolves it against
+    /// `"tiles"`/`"accordion"` (this crate does no cross-section semantic
+    /// validation).
+    pub layout: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -326,7 +331,15 @@ fn parse_workspaces(doc: &KdlDocument) -> Vec<WorkspaceConfig> {
                 .get("monitor")
                 .and_then(|v| v.as_string())
                 .map(str::to_string);
-            Some(WorkspaceConfig { name, monitor })
+            let layout = n
+                .get("layout")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
+            Some(WorkspaceConfig {
+                name,
+                monitor,
+                layout,
+            })
         })
         .collect()
 }
@@ -649,6 +662,19 @@ mod tests {
         assert_eq!(config.workspaces[0].monitor.as_deref(), Some("main"));
         assert_eq!(config.workspaces[1].name, "random");
         assert_eq!(config.workspaces[1].monitor, None);
+    }
+
+    #[test]
+    fn parses_workspaces_with_layout_attribute() {
+        let source = r#"
+            workspaces {
+                workspace "entertain" layout="accordion"
+                workspace "work"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.workspaces[0].layout.as_deref(), Some("accordion"));
+        assert_eq!(config.workspaces[1].layout, None);
     }
 
     #[test]

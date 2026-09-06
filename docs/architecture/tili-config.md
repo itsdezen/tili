@@ -23,6 +23,14 @@ path for semantic issues, only KDL-syntax ones) — `tili-daemon` checks it
 names a declared workspace, the same way it already resolves
 `settings.default-workspace`.
 
+The top-level `default-layout "..."` and a workspace's own
+`layout="..."` attribute (`workspace "name" layout="accordion"`) are both
+parsed as raw, unvalidated `String`s too — same reasoning as above.
+`tili-daemon`'s `apply_config` resolves the two-level fallback (workspace
+`layout` → top-level `default-layout` → `Tiles`) and validates against
+`"tiles"`/`"accordion"`, warning (via `config_warnings`) rather than
+silently discarding an unrecognized value.
+
 Unrecognized top-level sections are still silently ignored, not rejected,
 so a config can be written against the full target schema before the parser
 catches up — see README.md's config preview vs. `example/tili.kdl` for

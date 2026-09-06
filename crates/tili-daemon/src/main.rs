@@ -574,11 +574,12 @@ fn stop_menubar() {
 /// `example/tili.kdl` so the daemon still starts fine even if this write
 /// fails for some reason (permissions, read-only home, etc.) — this is a
 /// convenience, not a requirement to run.
+const STARTER_CONFIG: &str = include_str!("../../../example/tili.kdl");
+
 fn ensure_starter_config_exists(path: &std::path::Path) {
     if path.exists() {
         return;
     }
-    const STARTER_CONFIG: &str = include_str!("../../../example/tili.kdl");
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -840,6 +841,18 @@ mod tests {
         assert!(command_is_read_only(&Command::Doctor));
         assert!(command_is_read_only(&Command::CurrentMode));
         assert!(command_is_read_only(&Command::MenubarStyle));
+    }
+
+    #[test]
+    fn starter_config_parses_and_declares_expected_layouts() {
+        let config = tili_config::parse(STARTER_CONFIG).unwrap();
+        assert_eq!(config.default_layout.as_deref(), Some("tiles"));
+        let entertain = config
+            .workspaces
+            .iter()
+            .find(|w| w.name == "entertain")
+            .unwrap();
+        assert_eq!(entertain.layout.as_deref(), Some("accordion"));
     }
 
     #[test]

@@ -50,8 +50,9 @@ pub struct ResizeHandle {
 /// Which of a container's two rendering modes is active — orthogonal to
 /// `Orientation` (a container has both, independently: layout and
 /// orientation vary separately).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Layout {
+    #[default]
     Tiles,
     Accordion,
 }
@@ -129,6 +130,10 @@ pub struct Tree {
     nodes: SlotMap<NodeId, Node>,
     parents: HashMap<NodeId, NodeId>,
     root: Option<NodeId>,
+    /// Layout a workspace's very first container is created with — set
+    /// from config before any window lands, read once by `insert_leaf`.
+    /// Has no effect once a container already exists.
+    default_layout: Layout,
 }
 
 /// `tiles_layout_inputs`'s return shape: sizeable children with their
@@ -146,6 +151,10 @@ impl Tree {
 
     pub fn is_empty(&self) -> bool {
         self.root.is_none()
+    }
+
+    pub fn set_default_layout(&mut self, layout: Layout) {
+        self.default_layout = layout;
     }
 
     /// A reasonable node to focus when this tree becomes the active
@@ -286,7 +295,7 @@ impl Tree {
                 // lone window root. This insert is what creates the very
                 // first container.
                 let new_root = self.nodes.insert(Node::Container {
-                    layout: Layout::Tiles,
+                    layout: self.default_layout,
                     orientation: root_orientation,
                     children: vec![target, new_leaf],
                     weights: vec![1.0, 1.0],
@@ -1579,6 +1588,23 @@ mod tests {
             assert_eq!(rect.height, area().height);
             assert_eq!(rect.y, 0.0);
         }
+    }
+
+    #[test]
+    fn second_window_uses_tiles_by_default() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
+        assert!(!tree.is_root_accordion());
+    }
+
+    #[test]
+    fn set_default_layout_applies_to_first_container_only() {
+        let mut tree = Tree::new();
+        tree.set_default_layout(Layout::Accordion);
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
+        assert!(tree.is_root_accordion());
     }
 
     #[test]

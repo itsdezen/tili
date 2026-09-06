@@ -1966,12 +1966,17 @@ impl WmState {
     /// Applies a freshly-loaded (or hot-reloaded) config: updates gaps
     /// (global + per-workspace overrides), rebuilds the keybinding table,
     /// recompiles floating rules (M8 — an invalid title regex logs a
-    /// warning and drops just that rule, not the whole config), and
-    /// ensures every workspace it declares exists (creating empty ones as
-    /// needed) — without switching to any of them, so a config edit never
-    /// yanks focus away from whatever workspace the user is actually
-    /// looking at. Re-lays-out the active workspace afterward so a gap
-    /// change is visible immediately.
+    /// warning and drops just that rule, not the whole config), primes
+    /// each workspace's `default_layout` (top-level `default-layout`,
+    /// overridden per-workspace by `workspace "name" layout="..."`; an
+    /// unrecognized value warns and falls back — see `resolve_layout` —
+    /// this only affects a workspace's *next* first-container creation,
+    /// never relayouts windows already tiled), and ensures every workspace
+    /// it declares exists (creating empty ones as needed) — without
+    /// switching to any of them, so a config edit never yanks focus away
+    /// from whatever workspace the user is actually looking at. Re-lays-out
+    /// the active workspace afterward so a gap change is visible
+    /// immediately.
     ///
     /// Floating rules only apply to windows created *after* this call —
     /// an already-tiled window that a newly-added rule would now match
@@ -2006,8 +2011,21 @@ impl WmState {
             .map(|(name, gaps)| (name.clone(), gaps.ignore_notch))
             .collect();
 
+        let global_layout = resolve_layout(
+            config.default_layout.as_deref(),
+            &mut self.config_warnings,
+            "default-layout",
+            tili_tree::Layout::Tiles,
+        );
         for workspace in &config.workspaces {
-            self.workspaces.entry(workspace.name.clone()).or_default();
+            let layout = resolve_layout(
+                workspace.layout.as_deref(),
+                &mut self.config_warnings,
+                &format!("workspace '{}' layout", workspace.name),
+                global_layout,
+            );
+            let tree = self.workspaces.entry(workspace.name.clone()).or_default();
+            tree.set_default_layout(layout);
         }
 
         // Only on the very first load (daemon startup, before any real
@@ -4366,6 +4384,33 @@ fn resolve_default_workspace(config: &tili_config::Config) -> Option<String> {
     config.workspaces.iter().map(|w| &w.name).min().cloned()
 }
 
+/// Resolves a raw `layout="..."` config string against `"tiles"`/
+/// `"accordion"`, falling back to `fallback` when unset — and, unlike
+/// `default_root_orientation`'s silent fallback, warning via
+/// `config_warnings` when it's set to something else entirely, so a typo
+/// doesn't silently do nothing.
+fn resolve_layout(
+    raw: Option<&str>,
+    warnings: &mut Vec<String>,
+    context: &str,
+    fallback: tili_tree::Layout,
+) -> tili_tree::Layout {
+    match raw {
+        None => fallback,
+        Some("tiles") => tili_tree::Layout::Tiles,
+        Some("accordion") => tili_tree::Layout::Accordion,
+        Some(other) => {
+            let warning = format!(
+                "{context}: invalid layout '{other}' (expected \"tiles\" or \"accordion\") — \
+                 falling back to {fallback:?}"
+            );
+            eprintln!("tili-daemon: {warning}");
+            warnings.push(warning);
+            fallback
+        }
+    }
+}
+
 fn to_tree_gaps(gaps: tili_config::Gaps) -> Gaps {
     let (top, right, bottom, left) = gaps.outer;
     Gaps {
@@ -6148,6 +6193,97 @@ mod tests {
 
         state.enter_mode("resize").unwrap();
         assert!(!state.current_mode_auto_exits());
+    }
+
+    #[test]
+    fn apply_config_applies_global_default_layout_to_new_workspace() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            default-layout "accordion"
+            workspaces {
+                workspace "work"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut("work").unwrap();
+        let first = tree.insert_window(1, None, root_orientation);
+        tree.insert_window(2, Some(first), root_orientation);
+        assert!(tree.is_root_accordion());
+    }
+
+    #[test]
+    fn apply_config_workspace_layout_overrides_global_default() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            default-layout "accordion"
+            workspaces {
+                workspace "work" layout="tiles"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut("work").unwrap();
+        let first = tree.insert_window(1, None, root_orientation);
+        tree.insert_window(2, Some(first), root_orientation);
+        assert!(!tree.is_root_accordion());
+    }
+
+    #[test]
+    fn apply_config_defaults_to_tiles_when_layout_is_unset() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            workspaces {
+                workspace "work"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut("work").unwrap();
+        let first = tree.insert_window(1, None, root_orientation);
+        tree.insert_window(2, Some(first), root_orientation);
+        assert!(!tree.is_root_accordion());
+    }
+
+    #[test]
+    fn apply_config_warns_and_falls_back_on_invalid_layout() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            default-layout "bogus"
+            workspaces {
+                workspace "work" layout="also-bogus"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+
+        let warnings = state.config_warnings();
+        assert!(warnings.iter().any(|w| w.contains("default-layout")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("workspace 'work' layout"))
+        );
+
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut("work").unwrap();
+        let first = tree.insert_window(1, None, root_orientation);
+        tree.insert_window(2, Some(first), root_orientation);
+        assert!(!tree.is_root_accordion());
     }
 
     #[test]

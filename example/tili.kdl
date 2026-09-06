@@ -6,9 +6,19 @@
 // means a section that "does nothing" after a reload is worth
 // double-checking for a typo in its name.
 
+// Layout a newly-created workspace's first two windows start in —
+// "tiles" (default) or "accordion". Per-workspace `layout=` below
+// overrides this just for that workspace.
+default-layout "tiles"
+
 workspaces {
     workspace "work"
-    workspace "entertain"
+
+    // Overrides `default-layout` for this workspace only — its first
+    // container is created as Accordion instead of Tiles. Only affects
+    // future windows; doesn't relayout ones already tiled.
+    workspace "entertain" layout="accordion"
+
     workspace "random"
 
     // Workspace names are arbitrary strings — nothing stops you from

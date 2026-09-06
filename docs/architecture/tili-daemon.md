@@ -824,6 +824,16 @@ hot-reloaded `tili_config::Config`, creates any workspace it declares
 screen), and rebuilds `mode_bindings` (M6: `HashMap<mode name,
 HashMap<KeyCombo, Command>>`) from `config.keybindings`.
 
+It also resolves each workspace's `Tree::default_layout` — the layout its
+*first* container gets created with, via `resolve_layout` (a free
+function, not a `&mut self` method, since it needs `&mut
+self.config_warnings` while `self.workspaces` is borrowed separately):
+`workspace "name" layout="..."` if set, else the top-level
+`default-layout "..."`, else `Tiles`. This runs on every load including
+hot-reloads, but only primes *future* first-container creation — it never
+relayouts a workspace that already has one, so a reload can't yank an
+existing tiling arrangement out from under the user.
+
 `ignore_notch`/`workspace_ignore_notch` mirror `gaps`/`workspace_gaps`'
 global-plus-per-workspace-override shape, populated the same way in
 `apply_config` from each `Gaps.ignore_notch`. They stay a separate pair of
@@ -845,10 +855,13 @@ ever get the already-adjusted `Gaps.outer`/`Gaps.outer_solo`.
 `active_key_combos()` returns just the keys (for syncing the `Mutex` the
 hotkey tap reads — see [tili-ax.md](tili-ax.md)'s hotkey section).
 
-A `workspace-rules` entry naming an undeclared workspace, or a
-`floating-rules` entry with a title regex that fails to compile, is skipped
-rather than rejecting the whole config — both sites `eprintln!` (for the
-log file) *and* push the same message into `WmState::config_warnings`,
+A `workspace-rules` entry naming an undeclared workspace, a
+`floating-rules` entry with a title regex that fails to compile, or a
+`default-layout`/workspace `layout` value that isn't `"tiles"` or
+`"accordion"`, is skipped (the layout case falls back per the two-level
+rule above) rather than rejecting the whole config — all three sites
+`eprintln!` (for the log file) *and* push the same message into
+`WmState::config_warnings`,
 cleared and rebuilt on every `apply_config` call so it always reflects only
 the *last* load. `Command::Doctor` (below) is what makes this reachable
 from outside the log file.
