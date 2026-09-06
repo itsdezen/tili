@@ -6,6 +6,22 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [0.11.0] - 2026-09-06
+
+### Added
+
+- **Workspaces can override the global starting layout** with
+  `workspace "name" layout="tiles"` or `layout="accordion"`. The override
+  applies when the workspace creates its first container and does not
+  relayout existing windows during a config reload.
+
+### Fixed
+
+- **The top-level `default-layout` setting was parsed but never applied.**
+  It now controls each workspace's initial container layout, falling back
+  to `tiles` when unset. Invalid global or per-workspace values are reported
+  by `tili doctor` and use the appropriate fallback.
+
 ## [0.10.1] - 2026-09-05
 
 ### Fixed
