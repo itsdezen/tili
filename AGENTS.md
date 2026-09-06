@@ -194,7 +194,7 @@ The project ships continuously — a feature/fix set becomes a release when
 it reaches a working, verifiable state. To cut one: update
 [CHANGELOG.md](CHANGELOG.md) (`Unreleased` → dated version section), bump
 `[workspace.package] version` in `Cargo.toml` to match, tag `vX.Y.Z`, and
-push the tag — `release.yml` re-runs the full gate, builds signed
-aarch64/x86_64 binaries, and opens a **draft** GitHub release for manual
-review. Never hand-sign or ad-hoc-sign a release binary outside that
-pipeline (see CONTRIBUTING.md's Release engineering for why).
+push the tag — `release.yml` waits for that commit's successful CI gate,
+builds signed aarch64/x86_64 binaries, and opens a **draft** GitHub release
+for manual review. Never hand-sign or ad-hoc-sign a release binary outside
+that pipeline (see CONTRIBUTING.md's Release engineering for why).

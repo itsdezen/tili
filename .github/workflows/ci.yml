@@ -15,11 +15,34 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Formula sync PRs and their merge commits only update release
+      # checksums. Keep the required check present, but don't rebuild an
+      # unchanged Rust workspace twice after every release.
+      - name: Detect formula-only change
+        id: changes
+        env:
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base="$PUSH_BASE_SHA"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE_SHA"
+          fi
+          if git diff --quiet "$base" "$GITHUB_SHA" -- . ':(exclude)Formula/tili.rb'; then
+            echo "formula_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "formula_only=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install Rust
+        if: steps.changes.outputs.formula_only != 'true'
         run: rustup update stable && rustup default stable
 
       - name: Cache cargo
+        if: steps.changes.outputs.formula_only != 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -31,13 +54,17 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Check formatting
+        if: steps.changes.outputs.formula_only != 'true'
         run: cargo fmt --all --check
 
       - name: Clippy (warnings are errors)
+        if: steps.changes.outputs.formula_only != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
+        if: steps.changes.outputs.formula_only != 'true'
         run: cargo test --workspace
 
       - name: Build (release profile)
+        if: steps.changes.outputs.formula_only != 'true'
         run: cargo build --workspace --release
