@@ -36,6 +36,13 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   made at runtime. The root container's layout is now carried across that
   collapse. Still reset by a config reload declaring a new default, and by
   the workspace emptying out completely.
+- **Exiting a fullscreen video no longer leaves an unrelated window
+  focused and stacked on top of the browser.** The throwaway window a
+  browser opens for a native-fullscreen video is destroyed a moment after
+  the exit, and tili reacted by raising whichever window happened to sit
+  next to it in the tree — over the browser macOS had just correctly
+  refocused. When the removed window's own app still has a window in that
+  workspace, macOS refocuses it itself, so tili no longer raises anything.
 - **Closing a window while a natively-fullscreened window is showing no
   longer pulls the user out of fullscreen.** `remove_placement` skips its
   reassigned-focus raise while the workspace holds a native-fullscreen

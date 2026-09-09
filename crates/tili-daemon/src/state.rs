@@ -1096,8 +1096,8 @@ impl WmState {
         }
         for id in expired {
             self.pending_removal.remove(&id);
-            self.windows.remove(&id);
-            self.remove_placement(id);
+            let pid = self.windows.remove(&id).map(|w| w.pid());
+            self.remove_placement(id, pid);
             self.pending_bundle_retries.remove(&id);
         }
         // A finalized removal changes which windows the tree lays out —
@@ -1902,7 +1902,7 @@ impl WmState {
             .collect();
         for id in ids {
             self.windows.remove(&id);
-            self.remove_placement(id);
+            self.remove_placement(id, Some(pid));
             self.pending_removal.remove(&id);
             self.pending_bundle_retries.remove(&id);
         }
@@ -3590,7 +3590,12 @@ impl WmState {
     /// `force_ignored_window_ids`) — the single spot both of this
     /// function's callers (`finalize_expired_removals`, `remove_app`) go
     /// through, so neither needs its own copy of this cleanup.
-    fn remove_placement(&mut self, id: WindowId) {
+    ///
+    /// `pid` is the removed window's owning process, which both callers
+    /// already have to drop it from `self.windows` — passed in rather than
+    /// looked up here, since by this point that lookup would fail. See
+    /// `same_app_window_in` for what it decides.
+    fn remove_placement(&mut self, id: WindowId, pid: Option<i32>) {
         self.floating_placed.remove(&id);
         self.floating_centered.remove(&id);
         self.force_ignored_window_ids.remove(&id);
@@ -3618,8 +3623,14 @@ impl WmState {
             // bookkeeping still happens; only the real-focus assertion is
             // skipped, since there's no sibling on screen to assert it onto
             // in the first place.
+            //
+            // And except when the removed window's own app still has a
+            // window here — see `same_app_window_in`.
             let node = self.remove_from_tree(id, &placement.workspace);
-            if !self.has_native_fullscreen_window(&placement.workspace)
+            let same_app = pid.and_then(|pid| self.same_app_window_in(&placement.workspace, pid));
+            if let Some(same_app) = same_app {
+                self.sync_focus_to_window(same_app);
+            } else if !self.has_native_fullscreen_window(&placement.workspace)
                 && let Some(node) = node
                 && let Some(raise_id) = self
                     .workspaces
@@ -3629,6 +3640,57 @@ impl WmState {
                 self.raise_focused_window(raise_id);
             }
         }
+    }
+
+    /// Another window of `pid`'s still living in `workspace`, if any — the
+    /// signal that `remove_placement` must neither raise anything nor trust
+    /// its own structural guess about where focus went.
+    ///
+    /// That guess (`Tree::remove_window`'s nearest-MRU-leaf) and the raise
+    /// built on it exist for one case: the removed window's app is gone
+    /// from this workspace entirely, so macOS is free to reactivate
+    /// whatever its own history points at — commonly an app on a
+    /// different, possibly-parked workspace. When the app still owns a
+    /// window here, none of that applies: macOS keeps it frontmost and
+    /// focuses that remaining window itself, so raising a *different*
+    /// window fights an OS decision that was already correct.
+    ///
+    /// The confirmed case is the throwaway window a browser opens for a
+    /// native-fullscreen video. On exit it's promoted back into the tree as
+    /// an ordinary `Floating` leaf (so the `NativeFullscreen` guard below
+    /// no longer applies) and destroyed moments later. `remove_child`'s MRU
+    /// fixup is purely positional — it has no memory of which sibling was
+    /// focused before the removed one — so it landed on whichever leaf
+    /// happened to be adjacent, a floating Finder window in the report,
+    /// which then got raised over the browser macOS had just refocused and
+    /// left stacked on top of it. Asking macOS directly at that moment
+    /// doesn't work either: the window is mid-destruction and system-wide
+    /// focus hasn't resolved to its successor yet (confirmed on real
+    /// hardware — an `AxWindow::system_focused_id` check placed here
+    /// declined every time). This is decided from state tili already
+    /// holds, so no timing is involved.
+    ///
+    /// Restricted to `Tiled`/`Floating` placements: a minimized or hidden
+    /// window is not something macOS can hand focus to. Which one is
+    /// returned when the app has several here is deliberately unimportant —
+    /// macOS picks its own, and `dispatch()`'s `sync_focus_from_frontmost`
+    /// corrects the bookkeeping before the user's very next command.
+    fn same_app_window_in(&self, workspace: &str, pid: i32) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .filter(|(wid, w)| {
+                w.pid() == pid
+                    && !self.pending_removal.contains_key(wid)
+                    && self.placements.get(wid).is_some_and(|p| {
+                        p.workspace == workspace
+                            && matches!(
+                                p.kind,
+                                PlacementKind::Tiled | PlacementKind::Floating { .. }
+                            )
+                    })
+            })
+            .map(|(&wid, _)| wid)
+            .min()
     }
 
     /// Whether `workspace` currently holds a window macOS has put into its
@@ -5013,7 +5075,7 @@ mod tests {
             );
         }
 
-        state.remove_placement(closed_id);
+        state.remove_placement(closed_id, None);
 
         assert!(!state.placements.contains_key(&closed_id));
         assert!(
@@ -6493,7 +6555,7 @@ mod tests {
             },
         );
 
-        state.remove_placement(1);
+        state.remove_placement(1, None);
 
         assert!(!state.fullscreen_focus.contains_key(DEFAULT_WORKSPACE));
     }

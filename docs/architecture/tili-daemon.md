@@ -252,9 +252,10 @@ after, so raising a sibling mid-flight there would just be a spurious
 flash (and would be outright wrong for native fullscreen, where the same
 window legitimately keeps real focus on its own Space).
 
-`remove_placement` has one exception of its own: it skips that raise (but
-still does the tree bookkeeping) when `has_native_fullscreen_window` says
-the workspace holds a `PlacementKind::NativeFullscreen` window. macOS is
+`remove_placement` has two exceptions of its own, both skipping the raise
+while still doing the tree bookkeeping. The first: when
+`has_native_fullscreen_window` says the workspace holds a
+`PlacementKind::NativeFullscreen` window. macOS is
 then showing *that window's own Space*, not the workspace as a whole, so
 there's no sibling on screen to hand focus to — and `AxWindow::focus()`
 activates its target's app, which drops the user out of fullscreen with no
@@ -262,6 +263,31 @@ action of their own. That was the visible half of the native-fullscreen
 bug described under `pending_removal` below; this guard keeps it from
 reappearing via a window that genuinely closes while a fullscreen Space is
 showing, which the liveness fix alone wouldn't cover.
+
+The second: when `same_app_window_in` finds the removed window's own app
+still owns a `Tiled`/`Floating` window in that workspace. The raise (and
+the nearest-MRU-leaf guess it acts on) exists for the case where the app
+is gone from the workspace entirely and macOS is free to reactivate
+whatever its own history points at; when the app still has a window here,
+macOS keeps it frontmost and refocuses that window itself, so raising a
+different one fights a decision that was already right. The confirmed case
+is again the browser's throwaway native-fullscreen video window: on exit
+it's promoted back into the tree as an ordinary `Floating` leaf — so the
+`NativeFullscreen` exception above no longer applies — and destroyed
+moments later. `Tree`'s `remove_child` MRU fixup is purely positional, with
+no memory of which sibling was focused before the removed one, so it landed
+on whichever leaf happened to be adjacent (a floating Finder window in the
+report), which then got raised over the browser macOS had just refocused
+and left stacked on top of it. Asking macOS directly at that moment is not
+an option: the window is mid-destruction and system-wide focus hasn't
+resolved to its successor yet — an `AxWindow::system_focused_id` check
+placed here was tried on real hardware and declined every time. The pid
+check needs no AX call and no timing at all, and the sibling it records via
+`sync_focus_to_window` only has to be reasonable: `dispatch()`'s
+`sync_focus_from_frontmost` corrects the bookkeeping before the user's very
+next command. Both this and the liveness check above read `self.windows`
+(real `AxWindow` handles), so neither is unit-testable — `WmState`'s tests
+never have one; they're verified on hardware.
 
 A window missing from a scan is not evidence it closed. `AXWindows` only
 reports windows on the currently-active macOS Space (see
