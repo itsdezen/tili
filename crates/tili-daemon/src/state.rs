@@ -2647,32 +2647,66 @@ impl WmState {
     /// the tree, just laid out at the monitor's full frame until toggled
     /// off (see `fullscreen_focus` and `relayout_monitor`'s special case).
     pub fn toggle_fullscreen(&mut self, native: bool) -> Result<(), String> {
-        let current = self.focused_node().ok_or("no window is focused")?;
         if native {
-            let id = self
-                .active_tree()
-                .window_at(current)
-                .ok_or("focused window not found")?;
+            let id = self.native_fullscreen_target(AxWindow::system_focused_id())?;
             let window = self
                 .windows
                 .get_mut(&id)
                 .ok_or("focused window not found")?;
             let next = !window.fullscreen();
             window.set_native_fullscreen(next);
-            Ok(())
-        } else {
-            if self.focused_window_is_floating(current) {
-                return Err("no tiled window is focused".to_string());
-            }
-            let workspace = self.active_workspace_name();
-            if self.fullscreen_focus.get(&workspace) == Some(&current) {
-                self.fullscreen_focus.remove(&workspace);
-            } else {
-                self.fullscreen_focus.insert(workspace, current);
-            }
-            self.relayout_active();
-            Ok(())
+            return Ok(());
         }
+        let current = self.focused_node().ok_or("no window is focused")?;
+        if self.focused_window_is_floating(current) {
+            return Err("no tiled window is focused".to_string());
+        }
+        let workspace = self.active_workspace_name();
+        if self.fullscreen_focus.get(&workspace) == Some(&current) {
+            self.fullscreen_focus.remove(&workspace);
+        } else {
+            self.fullscreen_focus.insert(workspace, current);
+        }
+        self.relayout_active();
+        Ok(())
+    }
+
+    /// Which window native `toggle_fullscreen` acts on, given whatever
+    /// window macOS itself reports as focused right now (`real_focus`,
+    /// resolved by the caller via `AxWindow::system_focused_id` — split out
+    /// so the decision is unit-testable without a live `AXUIElement`).
+    ///
+    /// Deliberately not `focused_node()`. `demote_to_special` takes a window
+    /// out of its workspace tree the moment macOS reports `AXFullScreen`, so
+    /// a natively-fullscreened window can never be what `workspace_focus`
+    /// points at — which made the command strictly one-way. Confirmed on
+    /// real hardware, both shapes: with that window alone in its workspace
+    /// the tree was empty and the command failed outright ("no window is
+    /// focused"); with a sibling present, `workspace_focus` had already been
+    /// reassigned to the sibling and toggling fullscreened *that* instead of
+    /// exiting, leaving two fullscreen windows.
+    ///
+    /// `dispatch()`'s own focus sync can't close this from the other end:
+    /// `sync_focus_to_window` only records `Tiled`/`Floating` placements, so
+    /// the real focus it resolves is discarded for exactly the window this
+    /// command needs. Hence reading real focus directly here.
+    ///
+    /// Scoped to the active workspace so a stale read can't retarget some
+    /// unrelated window, and falls back to the tree node otherwise — for an
+    /// ordinary, not-currently-fullscreen window the two agree anyway.
+    fn native_fullscreen_target(&self, real_focus: Option<WindowId>) -> Result<WindowId, String> {
+        if let Some(id) = real_focus
+            && self
+                .placements
+                .get(&id)
+                .is_some_and(|p| p.workspace == self.active_workspace_name())
+        {
+            return Ok(id);
+        }
+        let current = self.focused_node().ok_or("no window is focused")?;
+        self.active_tree()
+            .window_at(current)
+            .ok_or_else(|| "focused window not found".to_string())
     }
 
     /// Sends the focused window an `AXCloseButton` press (best-effort) and
@@ -6523,6 +6557,85 @@ mod tests {
 
         assert!(state.toggle_fullscreen(false).is_ok());
         assert!(!state.fullscreen_focus.contains_key(DEFAULT_WORKSPACE));
+    }
+
+    #[test]
+    fn native_fullscreen_target_uses_real_focus_even_when_it_left_the_tree() {
+        // The whole point: a natively-fullscreened window has been demoted
+        // out of the tree, so `focused_node()` can never name it.
+        let mut state = WmState::default();
+        let sibling: WindowId = 1;
+        let fullscreened: WindowId = 2;
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let sibling_node = tree.insert_window(sibling, None, root_orientation);
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), sibling_node);
+        for (id, kind) in [
+            (sibling, PlacementKind::Tiled),
+            (
+                fullscreened,
+                PlacementKind::NativeFullscreen(Restore::Tiled),
+            ),
+        ] {
+            state.placements.insert(
+                id,
+                Placement {
+                    workspace: DEFAULT_WORKSPACE.to_string(),
+                    kind,
+                },
+            );
+        }
+
+        assert_eq!(
+            state.native_fullscreen_target(Some(fullscreened)),
+            Ok(fullscreened),
+            "toggling must exit the fullscreen window, not fullscreen its sibling"
+        );
+    }
+
+    #[test]
+    fn native_fullscreen_target_falls_back_to_the_tree_node() {
+        let mut state = WmState::default();
+        state.workspaces.insert("side".to_string(), Tree::new());
+        let focused: WindowId = 1;
+        let elsewhere: WindowId = 2;
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let node = tree.insert_window(focused, None, root_orientation);
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), node);
+        state.placements.insert(
+            elsewhere,
+            Placement {
+                workspace: "side".to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+
+        assert_eq!(
+            state.native_fullscreen_target(None),
+            Ok(focused),
+            "nothing focused system-wide"
+        );
+        assert_eq!(
+            state.native_fullscreen_target(Some(99)),
+            Ok(focused),
+            "a window tili doesn't track"
+        );
+        assert_eq!(
+            state.native_fullscreen_target(Some(elsewhere)),
+            Ok(focused),
+            "real focus is on another workspace's window"
+        );
+    }
+
+    #[test]
+    fn native_fullscreen_target_errors_with_nothing_to_act_on() {
+        let state = WmState::default();
+        assert!(state.native_fullscreen_target(None).is_err());
     }
 
     #[test]

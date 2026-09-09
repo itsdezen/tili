@@ -883,6 +883,24 @@ pre-existing gap this doesn't address.
 
 ## Layout commands, config, and dispatch
 
+`toggle_fullscreen`'s `native` branch resolves its target through
+`native_fullscreen_target`, from real OS focus (`AxWindow::system_focused_id`,
+scoped to the active workspace) rather than `focused_node()`, falling back to
+the tree node when that yields nothing usable. It has to:
+`demote_to_special` takes a window out of its workspace tree the moment macOS
+reports `AXFullScreen`, so a natively-fullscreened window can never be what
+`workspace_focus` points at, which made the command strictly one-way.
+Confirmed on real hardware in both shapes — alone in its workspace the tree
+was empty and the command failed outright ("no window is focused"); with a
+sibling present, `workspace_focus` had already been reassigned to the sibling
+and toggling fullscreened *that* instead of exiting, leaving two fullscreen
+windows. `dispatch()`'s own `sync_focus_from_frontmost` can't close it from
+the other end either, since `sync_focus_to_window` only records
+`Tiled`/`Floating` placements and so discards the real focus for exactly the
+window this command needs. `native_fullscreen_target` takes the resolved
+focus as a parameter so the decision is unit-testable without a live
+`AXUIElement`, the same seam `place_new_window` uses.
+
 `toggle_layout`/`set_layout` (M7) wrap `Tree::toggle_layout` for
 `Command::LayoutToggle`/`LayoutSet`; `set_layout` is a no-op if the
 container's already the requested kind, since there are only two kinds and

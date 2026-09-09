@@ -36,6 +36,14 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   made at runtime. The root container's layout is now carried across that
   collapse. Still reset by a config reload declaring a new default, and by
   the workspace emptying out completely.
+- **`tili fullscreen --native` can now actually exit native fullscreen.**
+  It was strictly one-way: entering worked, leaving never did. macOS reports
+  `AXFullScreen` and tili takes the window out of its workspace tree, so the
+  command's own "which window is focused" lookup — which only ever names
+  windows *in* the tree — could not name it. With that window alone in its
+  workspace the command failed with `no window is focused`; with a sibling
+  present it fullscreened the sibling instead, leaving two fullscreen
+  windows. The native branch now resolves its target from real OS focus.
 - **Exiting a fullscreen video no longer leaves an unrelated window
   focused and stacked on top of the browser.** The throwaway window a
   browser opens for a native-fullscreen video is destroyed a moment after
