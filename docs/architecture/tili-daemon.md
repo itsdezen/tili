@@ -252,6 +252,20 @@ after, so raising a sibling mid-flight there would just be a spurious
 flash (and would be outright wrong for native fullscreen, where the same
 window legitimately keeps real focus on its own Space).
 
+`promote_from_special` deliberately does not restore the window's original
+tree slot. It re-inserts through `insert_into_workspace_tree`, which lands
+the leaf immediately after whatever `workspace_focus` points at — so a
+window that was on the left of a two-window split comes back on the right
+after a native-fullscreen (or minimize/hide) round trip. Confirmed on real
+hardware and accepted: the layout *kind* is preserved (see
+[tili-tree.md](tili-tree.md)'s `collapsed_root_layout`), only the position
+isn't. Restoring the exact slot would mean `demote_to_special` recording a
+parent-plus-index breadcrumb and reconciling it against a tree that may have
+changed arbitrarily in the meantime; AeroSpace hits the identical wart for
+the identical reason (`unbindAndGetBindingDataForNewTilingWindow` rebinds
+next to the MRU window). Don't add the breadcrumb without a concrete
+complaint that the position, not the layout, is what actually hurts.
+
 `remove_placement` has two exceptions of its own, both skipping the raise
 while still doing the tree bookkeeping. The first: when
 `has_native_fullscreen_window` says the workspace holds a
