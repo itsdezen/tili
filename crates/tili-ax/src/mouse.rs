@@ -18,6 +18,12 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 /// it never meaningfully lags behind the cursor.
 const THROTTLE: Duration = Duration::from_millis(80);
 
+/// How long `spawn_mouse_watcher` waits before reinstalling its
+/// `CGEventTap` — same value and reasoning as `hotkey.rs`'s
+/// `HOTKEY_TAP_RETRY_INTERVAL`, kept per-module so neither tap depends on
+/// the other's constant.
+const MOUSE_TAP_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
 /// Moves the system cursor without generating a synthetic click — used for
 /// mouse-follows-focus. Best-effort: if this fails (e.g. permission
 /// revoked mid-session) the cursor just doesn't move, nothing else breaks.
@@ -47,49 +53,88 @@ pub enum MouseSignal {
 /// `tokio::sync::mpsc::UnboundedSender`, sent to directly from this thread
 /// (`send` is a plain synchronous call), so no separate bridge thread is
 /// needed to get these events into the daemon's Tokio runtime.
+///
+/// Wrapped in the same reinstall loop `spawn_hotkey_tap` uses, for the same
+/// reason: macOS can disable a working tap at any time, and neither the
+/// install failure nor the disable is otherwise recoverable without
+/// restarting the daemon.
 pub fn spawn_mouse_watcher() -> UnboundedReceiver<MouseSignal> {
     let (tx, rx) = unbounded_channel();
 
     std::thread::spawn(move || {
-        let last_sent: Cell<Option<Instant>> = Cell::new(None);
+        let mut warned = false;
+        loop {
+            let tx = tx.clone();
+            let last_sent: Cell<Option<Instant>> = Cell::new(None);
 
-        let result = CGEventTap::with_enabled(
-            CGEventTapLocation::Session,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::ListenOnly,
-            vec![
-                CGEventType::MouseMoved,
-                CGEventType::LeftMouseDown,
-                CGEventType::LeftMouseUp,
-            ],
-            move |_proxy, event_type, event| {
-                match event_type {
-                    CGEventType::LeftMouseDown => {
-                        let _ = tx.send(MouseSignal::ButtonDown);
-                    }
-                    CGEventType::LeftMouseUp => {
-                        let _ = tx.send(MouseSignal::ButtonUp);
-                    }
-                    CGEventType::MouseMoved => {
-                        let due = last_sent.get().is_none_or(|t| t.elapsed() >= THROTTLE);
-                        if due {
-                            let point = event.location();
-                            let _ = tx.send(MouseSignal::Moved(point.x, point.y));
-                            last_sent.set(Some(Instant::now()));
+            let result = CGEventTap::with_enabled(
+                CGEventTapLocation::Session,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::ListenOnly,
+                vec![
+                    CGEventType::MouseMoved,
+                    CGEventType::LeftMouseDown,
+                    CGEventType::LeftMouseUp,
+                ],
+                move |_proxy, event_type, event| {
+                    match event_type {
+                        // See `hotkey.rs`'s equivalent arm for why the tap is
+                        // reinstalled rather than re-enabled in place. The
+                        // extra `ButtonUp` matters here specifically: a tap
+                        // disabled between a real `LeftMouseDown` and its
+                        // `LeftMouseUp` never delivers that up event, and a
+                        // reinstalled tap can't replay it — which would leave
+                        // `WmState::mouse_button_down` stuck `true`, and with
+                        // it every `apply_windows_changed` skipping its
+                        // relayout for the rest of the session. Synthesizing
+                        // the release is safe when no drag was in flight:
+                        // `on_mouse_button_up` clears an already-clear flag
+                        // and re-runs a relayout that's already correct.
+                        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+                            eprintln!(
+                                "tili-ax: the system disabled the mouse event tap \
+                                 ({event_type:?}) — reinstalling it"
+                            );
+                            let _ = tx.send(MouseSignal::ButtonUp);
+                            CFRunLoop::get_current().stop();
                         }
+                        CGEventType::LeftMouseDown => {
+                            let _ = tx.send(MouseSignal::ButtonDown);
+                        }
+                        CGEventType::LeftMouseUp => {
+                            let _ = tx.send(MouseSignal::ButtonUp);
+                        }
+                        CGEventType::MouseMoved => {
+                            let due = last_sent.get().is_none_or(|t| t.elapsed() >= THROTTLE);
+                            if due {
+                                let point = event.location();
+                                let _ = tx.send(MouseSignal::Moved(point.x, point.y));
+                                last_sent.set(Some(Instant::now()));
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-                CallbackResult::Keep
-            },
-            CFRunLoop::run_current,
-        );
-
-        if result.is_err() {
-            eprintln!(
-                "tili-ax: failed to install the mouse event tap — \
-                 focus-follows-monitor and drag-resize debouncing will stay inactive"
+                    CallbackResult::Keep
+                },
+                CFRunLoop::run_current,
             );
+
+            // Same latch reset as `spawn_hotkey_tap`: a tap that installed
+            // and was later disabled must be able to report a genuine
+            // failure the next time round.
+            if result.is_ok() {
+                warned = false;
+            }
+            if result.is_err() && !warned {
+                warned = true;
+                eprintln!(
+                    "tili-ax: failed to install the mouse event tap — \
+                     focus-follows-monitor and drag-resize debouncing are inactive \
+                     until it succeeds. Will keep retrying."
+                );
+            }
+
+            std::thread::sleep(MOUSE_TAP_RETRY_INTERVAL);
         }
     });
 

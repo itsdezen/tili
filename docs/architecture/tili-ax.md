@@ -458,3 +458,16 @@ synchronize) so mouse activity in general can't flood the daemon's
 `select!` loop with one message per pixel of travel. Sends directly on a
 `tokio::sync::mpsc` channel from this thread, same as `spawn_hotkey_tap` —
 no separate bridge thread.
+
+Both taps sit inside the same reinstall loop (see
+[invariants.md](invariants.md)'s first polling exception): macOS can
+disable a working `CGEventTap` at any time, the callback can't re-enable
+its own tap, and neither module could otherwise recover without restarting
+the daemon. `spawn_mouse_watcher`'s disabled arm additionally synthesizes a
+`MouseSignal::ButtonUp` before stopping its run loop — a tap disabled
+between a real `LeftMouseDown` and its `LeftMouseUp` never delivers that up
+event and a reinstalled tap can't replay it, which would strand
+`WmState::mouse_button_down` at `true` and make every later
+`apply_windows_changed` skip its relayout for the rest of the session.
+Synthesizing it is safe when no drag was in flight: `on_mouse_button_up`
+clears an already-clear flag and re-runs a relayout that's already correct.

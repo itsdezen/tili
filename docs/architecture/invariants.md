@@ -16,15 +16,33 @@ The daemon reacts to AXObserver/NSWorkspace/display notifications
 (`tili-ax`'s `watch.rs`/`workspace.rs`), it doesn't loop and check state.
 Four sanctioned, narrowly-scoped exceptions:
 
-1. **`tili-ax/src/hotkey.rs`'s `spawn_hotkey_tap`** retries installing the
-   `CGEventTap` every few seconds for the process's whole lifetime.
-   `tili-daemon`'s `async_daemon_main` now hard-stops (mirroring its
-   Accessibility check) if Input Monitoring isn't already granted, so the
-   daemon never reaches this loop without it — this retry instead covers
-   Input Monitoring being revoked and re-granted while the daemon is
+1. **`tili-ax`'s event-tap reinstall loops** — `hotkey.rs`'s
+   `spawn_hotkey_tap` and `mouse.rs`'s `spawn_mouse_watcher` both retry
+   installing their `CGEventTap` every few seconds for the process's whole
+   lifetime. `tili-daemon`'s `async_daemon_main` now hard-stops (mirroring
+   its Accessibility check) if Input Monitoring isn't already granted, so
+   the daemon never reaches these loops without it — the retry instead
+   covers Input Monitoring being revoked and re-granted while the daemon is
    already running, or a `CGEventTap` install failing for an unrelated
    transient reason, neither of which has an accompanying event to react
    to.
+
+   The same loop is what recovers a tap macOS *disabled* after it was
+   working (`TapDisabledByTimeout`/`TapDisabledByUserInput`, classically
+   after a sleep/wake). That case does arrive as an event, delivered to the
+   tap's own callback — but re-enabling in place needs the tap's
+   `CFMachPort`, which `CGEventTap::with_enabled` owns and never exposes to
+   the callback (and `CGEventTapProxy` can't do it either). Each callback
+   therefore stops its thread's run loop, which makes `with_enabled` return
+   into this same loop; the retry interval doubles as the backoff keeping a
+   persistently-timing-out tap from reinstalling in a tight loop. Verified
+   against `core-graphics` 0.25 that the run-loop source `with_enabled`
+   leaves behind doesn't stop a later install from blocking normally — a
+   reinstall that returned immediately would have turned this into a hot
+   no-op loop. Left unhandled, a disabled hotkey tap means every hotkey
+   silently stops working until the daemon is restarted, and a disabled
+   mouse tap can strand `WmState::mouse_button_down` at `true` (see
+   `mouse.rs`'s synthesized `ButtonUp`).
 2. **`tili-ax/src/watch.rs`'s window/app-watcher resync backstop** — a
    `WATCHER_RESYNC_INTERVAL` (2s) tick running `resync_watchers` (attach/
    detach watchers, no relayout), plus a debounced-since-quiet full-window

@@ -23,9 +23,12 @@ const IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 0;
 /// `kIOHIDAccessTypeGranted`.
 const IOHID_ACCESS_TYPE_GRANTED: u32 = 0;
 
-/// How long `spawn_hotkey_tap` waits between retrying a failed
-/// `CGEventTap` install — e.g. Input Monitoring granted after the daemon
-/// already started. Bounded and infrequent enough not to be a busy-loop.
+/// How long `spawn_hotkey_tap` waits before reinstalling its `CGEventTap`
+/// — both after a failed install (e.g. Input Monitoring granted after the
+/// daemon already started) and after macOS disabled a working tap (see the
+/// `TapDisabled*` arm in the callback). Bounded and infrequent enough not
+/// to be a busy-loop, and it doubles as the backoff that keeps a
+/// persistently-timing-out tap from being reinstalled in a tight loop.
 const HOTKEY_TAP_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Checks Input Monitoring permission via the public (if under-documented)
@@ -104,16 +107,44 @@ pub fn spawn_hotkey_tap(
         loop {
             let active_bindings = active_bindings.clone();
             let tx = tx.clone();
-            // `with_enabled` only ever returns on failure — on success it
-            // calls `CFRunLoop::run_current`, which blocks this thread
-            // forever pumping events. So this loop only re-attempts after
-            // an install failure; there's no "it succeeded" moment to log.
+            // `with_enabled` returns either when the install failed, or
+            // when the callback below stopped this thread's run loop
+            // because macOS disabled the tap. Otherwise
+            // `CFRunLoop::run_current` blocks here forever pumping events.
             let result = CGEventTap::with_enabled(
                 CGEventTapLocation::Session,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions::Default,
                 vec![CGEventType::KeyDown],
-                move |_proxy, _event_type, event| {
+                move |_proxy, event_type, event| {
+                    // macOS disables an event tap outright if its callback
+                    // overruns the tap timeout (`TapDisabledByTimeout`;
+                    // classically after a real sleep/wake, since this is an
+                    // *active* tap — see `CGEventTapOptions::Default`
+                    // below) or if the user's own input disabled it. The
+                    // tap stays dead until something re-enables it, which
+                    // for a window manager means every hotkey silently
+                    // stops working until the daemon is restarted.
+                    //
+                    // Re-enabling in place would need the tap's own
+                    // `CFMachPort`, which `with_enabled` owns and doesn't
+                    // expose to the callback (and `CGEventTapProxy` can't
+                    // do it). Stopping this thread's run loop instead makes
+                    // `with_enabled` return, so the loop above reinstalls a
+                    // fresh tap — verified against `core-graphics` 0.25
+                    // that the run-loop source `with_enabled` leaves behind
+                    // doesn't stop a later install from blocking normally.
+                    if matches!(
+                        event_type,
+                        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+                    ) {
+                        eprintln!(
+                            "tili-ax: the system disabled the hotkey event tap \
+                             ({event_type:?}) — reinstalling it"
+                        );
+                        CFRunLoop::get_current().stop();
+                        return CallbackResult::Keep;
+                    }
                     let flags = event.get_flags();
                     let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
                     let combo = KeyCombo {
@@ -139,6 +170,12 @@ pub fn spawn_hotkey_tap(
                 CFRunLoop::run_current,
             );
 
+            // A successful install that later got disabled resets the
+            // latch, so a genuine failure *after* one still gets reported
+            // rather than being swallowed by a warning printed hours ago.
+            if result.is_ok() {
+                warned = false;
+            }
             if result.is_err() && !warned {
                 warned = true;
                 if has_input_monitoring_permission() {

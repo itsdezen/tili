@@ -175,9 +175,10 @@ rationale (and real-hardware evidence) behind each is in
   lets tili run without disabling SIP.
 - **No polling** — the daemon reacts to AXObserver/NSWorkspace/display
   notifications. Four sanctioned, narrowly-scoped exceptions:
-  `hotkey.rs`'s event-tap install retry (Input Monitoring can be granted
-  at any time, with no notification); `watch.rs`'s `WATCHER_RESYNC_INTERVAL`
-  (2s) watcher-resync backstop + capped full resync (both notification
+  `hotkey.rs`'s and `mouse.rs`'s event-tap reinstall loops (Input
+  Monitoring can be granted at any time with no notification, and a tap
+  macOS disabled can't be re-enabled from inside its own callback);
+  `watch.rs`'s `WATCHER_RESYNC_INTERVAL` (2s) watcher-resync backstop + capped full resync (both notification
   sources have been observed to occasionally never fire); `main.rs`'s
   30ms `maintenance_tick` (pure debounce/coalescing of already-pushed
   events, near-zero idle cost); and `main.rs`'s `animation_tick` (16ms or

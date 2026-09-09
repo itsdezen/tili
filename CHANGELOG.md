@@ -36,6 +36,15 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   made at runtime. The root container's layout is now carried across that
   collapse. Still reset by a config reload declaring a new default, and by
   the workspace emptying out completely.
+- **A macOS-disabled event tap no longer takes hotkeys (or
+  focus-follows-monitor) down for the rest of the session.** macOS disables
+  an event tap outright if its callback overruns the tap timeout —
+  classically after a sleep/wake — and neither tap handled the disable
+  notification it gets, so the tap stayed dead until the daemon was
+  restarted. Both taps now reinstall themselves. The mouse tap also
+  synthesizes the `LeftMouseUp` a disable can swallow, which would
+  otherwise leave tili believing a drag was still in progress and skipping
+  every relayout from then on.
 - **`tili fullscreen --native` can now actually exit native fullscreen.**
   It was strictly one-way: entering worked, leaving never did. macOS reports
   `AXFullScreen` and tili takes the window out of its workspace tree, so the
