@@ -32,6 +32,40 @@ not just CLT (see CONTRIBUTING.md). `tili-tree` has zero macOS
 dependencies by design; prefer adding logic there over `tili-ax` so it
 stays testable without a Mac.
 
+## On-device testing
+
+tili is a window manager: exercising it means taking over the machine
+someone is sitting at. Any sequence that moves real windows — `./dev.sh`
+(it stops and restarts the running daemon), opening or closing app
+windows, switching workspaces, toggling native fullscreen, or a script
+driving several of those — must be **confirmed with the user before it
+starts**, announced as finished when it ends, and leave the
+workspace/window state it found.
+
+These runs are effectively uninterruptible: they take minutes, and the
+user can't use their own machine while one is in flight. Worse, any
+action they *do* take mid-run silently contaminates the sample — a window
+they click or a workspace they switch is exactly the state under test.
+Both failure modes this guards against are confirmed, not hypothetical: a
+`toggle_fullscreen` defect first diagnosed from a workspace the user had
+been interacting with, and a reported ghost-window regression that turned
+out to be a broken harness rather than any code defect.
+
+So: state the scope and rough duration up front and wait for a yes; run
+the whole sequence in one block; drive only an empty scratch workspace and
+windows the run itself created, never the user's own; restore what you
+changed; and say when the machine is theirs again. When a result looks
+surprising, ask whether they touched anything during the run *before*
+treating it as a finding.
+
+Note also what on-device testing is for. `WmState`'s unit tests can never
+construct an `AxWindow` (it wraps a live `AXUIElement`), so anything
+reading `self.windows` — window liveness, focus handoff on removal — is
+only ever verifiable this way. Split the pure decision out into a
+seam that takes its AX-derived input as a parameter wherever possible
+(`place_new_window`, `reveal_startup_frontmost_window`,
+`native_fullscreen_target`) so the part that *can* be unit-tested is.
+
 ## Comments
 
 A comment stays scoped to the function/logic it sits next to: why *this*
