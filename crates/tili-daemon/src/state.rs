@@ -1378,10 +1378,25 @@ impl WmState {
             fresh.iter().map(AxWindow::id).collect();
 
         // A window missing from this scan isn't dropped immediately — it's
-        // only a candidate for removal until `finalize_expired_removals`
+        // only a candidate for removal once `AxWindow::still_exists` agrees
+        // it's really gone, and then only until `finalize_expired_removals`
         // confirms (on a later call) that it's stayed missing for
         // `removal_grace`, absorbing a transient AX hiccup rather than
         // treating every momentary gap as a real close.
+        //
+        // The liveness check is what makes absence meaningful at all:
+        // `kAXWindowsAttribute` (what `fresh` comes from) only reports
+        // windows on the macOS Space that's currently active, so every
+        // window tili tracks drops out of its own app's scan the moment
+        // something else — a native fullscreen transition, most commonly —
+        // makes a different Space active. Treating that as "closed" tore
+        // real, still-open windows out of their tree, which then
+        // re-collapsed the workspace to a single tile and (via
+        // `remove_placement`'s reassigned-focus raise) activated a sibling
+        // app, dragging macOS straight back out of the Space the user had
+        // just entered. `removal_grace` alone can't cover this: the window
+        // stays absent for as long as the other Space is showing, which is
+        // however long the user watches the video.
         let stale_ids: Vec<WindowId> = self
             .windows
             .iter()
@@ -1389,6 +1404,14 @@ impl WmState {
             .map(|(&id, _)| id)
             .collect();
         for id in stale_ids {
+            if self.windows.get(&id).is_some_and(AxWindow::still_exists) {
+                // Alive, just not enumerable from here right now. Clears any
+                // entry an earlier scan left pending too — the window has
+                // since proven itself, so the old clock shouldn't keep
+                // running toward a removal.
+                self.pending_removal.remove(&id);
+                continue;
+            }
             if let std::collections::hash_map::Entry::Vacant(entry) = self.pending_removal.entry(id)
             {
                 entry.insert(Instant::now());
@@ -3587,7 +3610,17 @@ impl WmState {
             // land when the quit app's process disappears — an app on a
             // completely different, possibly-parked workspace, oblivious to
             // this one still having another window.
-            if let Some(node) = self.remove_from_tree(id, &placement.workspace)
+            //
+            // Except while that workspace holds a natively-fullscreened
+            // window: macOS is then showing that window's own Space, and
+            // `raise_focused_window` activates its target's app, which
+            // yanks the user straight back out of fullscreen. The tree
+            // bookkeeping still happens; only the real-focus assertion is
+            // skipped, since there's no sibling on screen to assert it onto
+            // in the first place.
+            let node = self.remove_from_tree(id, &placement.workspace);
+            if !self.has_native_fullscreen_window(&placement.workspace)
+                && let Some(node) = node
                 && let Some(raise_id) = self
                     .workspaces
                     .get(&placement.workspace)
@@ -3596,6 +3629,19 @@ impl WmState {
                 self.raise_focused_window(raise_id);
             }
         }
+    }
+
+    /// Whether `workspace` currently holds a window macOS has put into its
+    /// own native-fullscreen Space. While that's true the workspace isn't
+    /// really "on screen" the way `active_workspace` implies — the Space
+    /// showing belongs to that one window — so anything that would assert
+    /// real macOS focus onto a *different* window there has to hold off:
+    /// `AxWindow::focus()` activates the target's app, which drops the user
+    /// out of fullscreen with no action of their own.
+    fn has_native_fullscreen_window(&self, workspace: &str) -> bool {
+        self.placements.values().any(|p| {
+            p.workspace == workspace && matches!(p.kind, PlacementKind::NativeFullscreen(_))
+        })
     }
 
     /// Removes `id` from `workspace`'s tiled tree, reassigning that
@@ -4904,6 +4950,84 @@ mod tests {
         let reassigned = state.remove_from_tree(other_id, DEFAULT_WORKSPACE);
 
         assert_eq!(reassigned, None);
+    }
+
+    #[test]
+    fn has_native_fullscreen_window_is_scoped_to_one_workspace() {
+        let mut state = WmState::default();
+        state.workspaces.insert("side".to_string(), Tree::new());
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        assert!(!state.has_native_fullscreen_window(DEFAULT_WORKSPACE));
+
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: "side".to_string(),
+                kind: PlacementKind::NativeFullscreen(Restore::Tiled),
+            },
+        );
+
+        assert!(state.has_native_fullscreen_window("side"));
+        assert!(
+            !state.has_native_fullscreen_window(DEFAULT_WORKSPACE),
+            "another workspace's fullscreen must not suppress this one's focus handoff"
+        );
+    }
+
+    #[test]
+    fn remove_placement_still_updates_the_tree_while_native_fullscreen_is_showing() {
+        // Only the real-focus assertion is skipped there — the tree
+        // bookkeeping has to happen either way, or the removed window would
+        // keep occupying a slot forever.
+        let mut state = WmState::default();
+        let closed_id: WindowId = 1;
+        let sibling_id: WindowId = 2;
+        let fullscreen_id: WindowId = 3;
+        let root_orientation = state.root_orientation_hint();
+        let tree = state.workspaces.get_mut(DEFAULT_WORKSPACE).unwrap();
+        let closed_node = tree.insert_window(closed_id, None, root_orientation);
+        let sibling_node = tree.insert_window(sibling_id, None, root_orientation);
+        state
+            .workspace_focus
+            .insert(DEFAULT_WORKSPACE.to_string(), closed_node);
+        for (id, kind) in [
+            (closed_id, PlacementKind::Tiled),
+            (sibling_id, PlacementKind::Tiled),
+            (
+                fullscreen_id,
+                PlacementKind::NativeFullscreen(Restore::Tiled),
+            ),
+        ] {
+            state.placements.insert(
+                id,
+                Placement {
+                    workspace: DEFAULT_WORKSPACE.to_string(),
+                    kind,
+                },
+            );
+        }
+
+        state.remove_placement(closed_id);
+
+        assert!(!state.placements.contains_key(&closed_id));
+        assert!(
+            state
+                .workspaces
+                .get(DEFAULT_WORKSPACE)
+                .unwrap()
+                .find_node(closed_id)
+                .is_none()
+        );
+        assert_eq!(
+            state.workspace_focus.get(DEFAULT_WORKSPACE),
+            Some(&sibling_node)
+        );
     }
 
     #[test]

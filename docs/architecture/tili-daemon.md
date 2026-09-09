@@ -252,6 +252,36 @@ after, so raising a sibling mid-flight there would just be a spurious
 flash (and would be outright wrong for native fullscreen, where the same
 window legitimately keeps real focus on its own Space).
 
+`remove_placement` has one exception of its own: it skips that raise (but
+still does the tree bookkeeping) when `has_native_fullscreen_window` says
+the workspace holds a `PlacementKind::NativeFullscreen` window. macOS is
+then showing *that window's own Space*, not the workspace as a whole, so
+there's no sibling on screen to hand focus to — and `AxWindow::focus()`
+activates its target's app, which drops the user out of fullscreen with no
+action of their own. That was the visible half of the native-fullscreen
+bug described under `pending_removal` below; this guard keeps it from
+reappearing via a window that genuinely closes while a fullscreen Space is
+showing, which the liveness fix alone wouldn't cover.
+
+A window missing from a scan is not evidence it closed. `AXWindows` only
+reports windows on the currently-active macOS Space (see
+[tili-ax.md](tili-ax.md)'s `still_exists`), so `apply_windows_changed`
+gates its `pending_removal` bookkeeping on `AxWindow::still_exists`: a
+window absent from `fresh` whose element still resolves a `CGWindowID` is
+alive and merely elsewhere, so it's dropped from `pending_removal`
+outright rather than pended (clearing any entry an earlier scan left, since
+the window has since proven itself). `removal_grace` could never have
+covered this on its own — the window stays absent for as long as the other
+Space is showing, which is however long the user watches the video. The
+check is deliberately here, at the single place `pending_removal` entries
+are created, rather than in `finalize_expired_removals`: it costs one
+`_AXUIElementGetWindow` per genuinely-missing window per scan (zero at
+idle, since nothing is missing), whereas checking at finalization time
+would re-probe on every 30ms `maintenance_tick` and leave a live window
+parked in `pending_removal`, where `reveal_frontmost`'s `suppress` check,
+`pid_has_existing_window` and `floating_cascade_index` all treat it as
+already half-gone.
+
 ## Multi-monitor (M9)
 
 `active_workspace: HashMap<u32, String>` maps each connected monitor's id

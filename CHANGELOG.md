@@ -6,6 +6,42 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **A macOS native fullscreen (a browser video, or the green button) no
+  longer yanks the display back to the previous Space and steals focus.**
+  `kAXWindowsAttribute` — the AX attribute tili enumerates windows with —
+  only reports windows on the Space that's currently active, so entering a
+  fullscreen Space made every other window of that app vanish from its own
+  scan. tili read that as "closed", tore the still-open window out of its
+  workspace tree after the 100ms removal grace, and then real-focused a
+  sibling window — which activates that sibling's app and drops macOS
+  straight back out of fullscreen. Absence from a scan is no longer
+  evidence of a close: it now has to be confirmed by
+  `_AXUIElementGetWindow` on the window's own element, which answers
+  correctly across Spaces (and when the `AXWindows` read itself times out).
+- **A workspace no longer collapses to single-tile (`gaps.outer-solo`)
+  geometry, with both windows stacked exactly on top of each other, after a
+  fullscreen round trip.** Same root cause: the falsely-removed window left
+  the survivor alone in the tree, so it got the solo rect; the returning
+  window later got the same solo rect for itself. A quiet app isn't
+  rescanned until something makes it emit an AX notification, which is why
+  resizing a window by hand appeared to "fix" it.
+- **A workspace's layout no longer silently reverts to its configured
+  `layout=` after a window leaves and rejoins the tree.** Dropping to one
+  tiled window destroys the root container, and the next insert rebuilt it
+  from the config default — discarding a `layout`/`layout --root` toggle
+  made at runtime. The root container's layout is now carried across that
+  collapse. Still reset by a config reload declaring a new default, and by
+  the workspace emptying out completely.
+- **Closing a window while a natively-fullscreened window is showing no
+  longer pulls the user out of fullscreen.** `remove_placement` skips its
+  reassigned-focus raise while the workspace holds a native-fullscreen
+  window: macOS is showing that window's own Space, so there is no sibling
+  on screen to hand focus to.
+
 ## [0.11.0] - 2026-09-06
 
 ### Added

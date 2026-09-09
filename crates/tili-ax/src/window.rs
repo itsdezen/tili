@@ -365,6 +365,24 @@ impl AxWindow {
         self.frame
     }
 
+    /// Whether this window still exists at all, asked of the WindowServer
+    /// directly (`_AXUIElementGetWindow` on the cached element) rather than
+    /// inferred from an `AXWindows` scan.
+    ///
+    /// `kAXWindowsAttribute` only reports the windows on the macOS Space
+    /// that's currently active, so a window absent from
+    /// `enumerate::list_windows_for_pid`'s result is not proof it closed —
+    /// it may simply have been left behind when something (a native
+    /// fullscreen transition, most commonly) made a different Space active.
+    /// The same goes for that function returning an empty `Vec` because the
+    /// `AXWindows` read itself failed or timed out. `_AXUIElementGetWindow`
+    /// resolves a `CGWindowID` for any live window regardless of which Space
+    /// it's on, and fails once the element is genuinely destroyed, so it's
+    /// the one signal that actually distinguishes the two.
+    pub fn still_exists(&self) -> bool {
+        Self::resolve_window_id(&self.element).is_some()
+    }
+
     /// A `Send`, cheaply-cloneable (a CFType retain) handle for probing
     /// this window's AX responsiveness from another thread — see
     /// `WindowProbeHandle`. Exists because `AxWindow` itself borrows into

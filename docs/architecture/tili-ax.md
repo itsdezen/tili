@@ -35,6 +35,29 @@ belt-and-suspenders bundle-id denylist forcing `FloatingRuleMode::Ignore`
 for a few specific confirmed cases, in case the general signal above
 doesn't apply to some future process.
 
+`AxWindow::still_exists` asks the WindowServer directly
+(`_AXUIElementGetWindow` on the cached element) whether a window is still
+alive, and is the *only* trustworthy answer to that question.
+`kAXWindowsAttribute` — what `enumerate::list_windows_for_pid` reads, and
+so what `tili-daemon`'s `apply_windows_changed` diffs against — only
+reports the windows on the macOS Space that's currently **active**. Every
+window tili tracks therefore drops out of its own app's scan the moment
+something makes a different Space active, a native fullscreen transition
+(the green button, or a browser video going fullscreen) being by far the
+most common trigger. Treating that absence as a close is wrong and was the
+root cause of a long-standing bug: the still-open window got torn out of
+its workspace tree, which collapsed the workspace to a single tile
+(`outer_solo` gaps, and a rebuilt root container — see
+[tili-tree.md](tili-tree.md)'s `collapsed_root_layout`) and, via
+`tili-daemon`'s `remove_placement` reassigning focus, activated a sibling
+app — dragging macOS straight back out of the Space the user had just
+entered. `AXWindows` is now only allowed to *add* windows; removing one
+requires `still_exists` to agree, the same rule AeroSpace arrived at. As a
+free side effect this also covers `list_windows_for_pid` returning an empty
+`Vec` because the `AXWindows` read itself failed or timed out —
+`_AXUIElementGetWindow` doesn't message the owning app, so it still answers
+correctly for a busy one.
+
 `AxWindow::is_resizable` (populated in `from_element` from
 `AXUIElement::is_attribute_settable(kAXSizeAttribute)`) is a deliberately
 separate signal from `WindowKind` — subrole/chrome-button shape says what

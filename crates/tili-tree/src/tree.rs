@@ -134,6 +134,20 @@ pub struct Tree {
     /// from config before any window lands, read once by `insert_leaf`.
     /// Has no effect once a container already exists.
     default_layout: Layout,
+    /// The layout the root container was carrying when it last collapsed
+    /// down to a bare `Window` leaf (`flatten`'s root branch), so the next
+    /// `insert_leaf` that rebuilds a root container restores it instead of
+    /// falling back to `default_layout`.
+    ///
+    /// Without this, any moment where a workspace transits through exactly
+    /// one tiled window silently discards a runtime `toggle_layout` and
+    /// reverts the workspace to whatever its config declared — and a macOS
+    /// native-fullscreen round trip does exactly that, since the
+    /// fullscreened window leaves the tree while it's on its own Space.
+    /// Deliberately layout only: `orientation` is re-derived from the
+    /// monitor's aspect ratio by the caller (so restoring a stale one would
+    /// be wrong after a monitor change) and even weights are meant to reset.
+    collapsed_root_layout: Option<Layout>,
 }
 
 /// `tiles_layout_inputs`'s return shape: sizeable children with their
@@ -153,8 +167,13 @@ impl Tree {
         self.root.is_none()
     }
 
+    /// Also drops any `collapsed_root_layout` kept from a previous root
+    /// container: a config reload declaring a new default is an explicit
+    /// instruction about what the *next* container should be, and letting a
+    /// remembered layout outrank it would make the new setting look inert.
     pub fn set_default_layout(&mut self, layout: Layout) {
         self.default_layout = layout;
+        self.collapsed_root_layout = None;
     }
 
     /// A reasonable node to focus when this tree becomes the active
@@ -294,8 +313,12 @@ impl Tree {
                 // `target` (== root) has no parent container yet — it's a
                 // lone window root. This insert is what creates the very
                 // first container.
+                let layout = self
+                    .collapsed_root_layout
+                    .take()
+                    .unwrap_or(self.default_layout);
                 let new_root = self.nodes.insert(Node::Container {
-                    layout: self.default_layout,
+                    layout,
                     orientation: root_orientation,
                     children: vec![target, new_leaf],
                     weights: vec![1.0, 1.0],
@@ -321,6 +344,10 @@ impl Tree {
             // The removed leaf was the lone root window.
             self.nodes.remove(leaf);
             self.root = None;
+            // An emptied-out workspace has no layout left to preserve —
+            // whatever repopulates it starts fresh from `default_layout`
+            // (see `collapsed_root_layout`).
+            self.collapsed_root_layout = None;
             return None;
         };
         self.nodes.remove(leaf);
@@ -343,6 +370,7 @@ impl Tree {
                 }
                 None => {
                     self.root = None;
+                    self.collapsed_root_layout = None;
                     return None;
                 }
             }
@@ -1278,10 +1306,12 @@ impl Tree {
     fn flatten(&mut self) {
         loop {
             let target = self.nodes.iter().find_map(|(id, node)| match node {
-                Node::Container { children, .. } if children.len() == 1 => Some((id, children[0])),
+                Node::Container {
+                    children, layout, ..
+                } if children.len() == 1 => Some((id, children[0], *layout)),
                 _ => None,
             });
-            let Some((container_id, only_child)) = target else {
+            let Some((container_id, only_child, layout)) = target else {
                 break;
             };
             let parent = self.parents.remove(&container_id);
@@ -1292,6 +1322,10 @@ impl Tree {
                     self.parents.insert(only_child, p);
                 }
                 None => {
+                    // The workspace just lost its root container. Remember
+                    // what it was so the next insert rebuilds the same kind
+                    // — see `collapsed_root_layout`.
+                    self.collapsed_root_layout = Some(layout);
                     self.root = Some(only_child);
                     self.parents.remove(&only_child);
                 }
@@ -1595,6 +1629,80 @@ mod tests {
         let mut tree = Tree::new();
         let first = insert(&mut tree, 1, None);
         insert(&mut tree, 2, Some(first));
+        assert!(!tree.is_root_accordion());
+    }
+
+    #[test]
+    fn root_layout_survives_the_workspace_transiting_through_one_window() {
+        // A macOS native-fullscreen round trip takes the fullscreened
+        // window out of the tree and puts it back, so the workspace passes
+        // through a single tile — which used to destroy the root container
+        // and rebuild it from `default_layout`, silently undoing a runtime
+        // `toggle_layout`.
+        let mut tree = Tree::new();
+        tree.set_default_layout(Layout::Accordion);
+        let first = insert(&mut tree, 1, None);
+        let second = insert(&mut tree, 2, Some(first));
+        tree.toggle_layout(second);
+        assert!(!tree.is_root_accordion(), "toggled to Tiles");
+
+        tree.remove_window(2);
+        insert(&mut tree, 2, Some(first));
+
+        assert!(
+            !tree.is_root_accordion(),
+            "the toggled-to Tiles root must come back, not the Accordion default"
+        );
+    }
+
+    #[test]
+    fn root_layout_survives_in_the_other_direction_too() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        let second = insert(&mut tree, 2, Some(first));
+        tree.toggle_layout(second);
+        assert!(tree.is_root_accordion());
+
+        tree.remove_window(2);
+        insert(&mut tree, 2, Some(first));
+
+        assert!(tree.is_root_accordion());
+    }
+
+    #[test]
+    fn emptying_the_workspace_forgets_the_remembered_root_layout() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        let second = insert(&mut tree, 2, Some(first));
+        tree.toggle_layout(second);
+        assert!(tree.is_root_accordion());
+
+        tree.remove_window(2);
+        tree.remove_window(1);
+        assert!(tree.is_empty());
+
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
+        assert!(
+            !tree.is_root_accordion(),
+            "a workspace repopulated from empty starts from default_layout"
+        );
+    }
+
+    #[test]
+    fn set_default_layout_outranks_a_remembered_root_layout() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        let second = insert(&mut tree, 2, Some(first));
+        tree.toggle_layout(second);
+        assert!(tree.is_root_accordion());
+        tree.remove_window(2);
+
+        // A config reload declaring a new default must not be shadowed by
+        // whatever the previous root container happened to be.
+        tree.set_default_layout(Layout::Tiles);
+        insert(&mut tree, 2, Some(first));
+
         assert!(!tree.is_root_accordion());
     }
 

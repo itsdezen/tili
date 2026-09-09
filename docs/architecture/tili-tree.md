@@ -23,6 +23,22 @@ direction `navigate`, `move`'s window-identity `swap_windows`, proportional
   `effective_outer`, shared by `layout` and `resize_handle_at` so the two
   stay geometrically consistent. `None` (the default) is a no-op, always
   falling back to `outer`.
+- `Tree::collapsed_root_layout` remembers the layout the *root* container
+  was carrying when `flatten` collapsed it away to a bare `Window` leaf,
+  and `insert_leaf` restores it (one-shot, via `take`) instead of falling
+  back to `default_layout` when it rebuilds a root container. Without it,
+  any moment where a workspace transits through exactly one tiled window
+  silently discarded a runtime `toggle_layout` and reverted the workspace
+  to whatever its config declared — and a macOS native-fullscreen round
+  trip does exactly that, since the fullscreened window leaves the tree
+  while it's on its own Space. Layout only, deliberately: `orientation` is
+  re-derived from the monitor's aspect ratio by the caller
+  (`tili-daemon`'s `root_orientation_hint`), so restoring a stale one would
+  be wrong after a monitor change, and resetting weights to even is the
+  intended behavior. Cleared by `set_default_layout` (a config reload
+  declaring a new default must not be shadowed) and whenever the tree
+  empties out entirely (nothing left to preserve — the next repopulation
+  starts fresh).
 - `toggle_layout(from)` (M7) converts `from`'s parent container between
   `Split` and `Accordion` in place — converting *to* Accordion sets `active`
   to `from`'s own position so the currently-visible window doesn't change.
