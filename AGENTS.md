@@ -58,6 +58,13 @@ changed; and say when the machine is theirs again. When a result looks
 surprising, ask whether they touched anything during the run *before*
 treating it as a finding.
 
+One practical trap: `./dev.sh` restarts the daemon, which re-places every
+window and can leave the active workspace somewhere other than the one
+holding the terminal the conversation is in — so a question asked right
+after it is invisible, and the run stalls waiting on an answer the user
+never saw. Bring that terminal's workspace back into view (e.g. `tili
+summon <terminal>`) before asking for anything or announcing completion.
+
 Note also what on-device testing is for. `WmState`'s unit tests can never
 construct an `AxWindow` (it wraps a live `AXUIElement`), so anything
 reading `self.windows` — window liveness, focus handoff on removal — is
