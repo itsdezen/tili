@@ -5,3 +5,14 @@ edition.workspace = true
 
 [dependencies]
 slotmap = "1"
+
+[dev-dependencies]
+# Plots and the parallel harness aren't needed for a CI-runnable timing
+# baseline; `cargo_bench_support` is what keeps plain `cargo bench` working.
+criterion = { version = "0.8", default-features = false, features = [
+    "cargo_bench_support",
+] }
+
+[[bench]]
+name = "layout"
+harness = false

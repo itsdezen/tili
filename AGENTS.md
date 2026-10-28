@@ -13,6 +13,27 @@ cargo run --bin tili-daemon          # run the daemon directly (not via `cargo i
 cargo run --bin tili -- ping         # run the CLI directly
 ```
 
+```sh
+cargo bench -p tili-tree --bench layout
+```
+
+```sh
+scripts/perf/collect.sh                 # read-only 60s CPU/RSS/thread sample
+scripts/perf/collect.sh --switch N      # opt-in: moves real windows, asks first
+scripts/perf/verify.sh --save scope0    # CI gate + bench, cache the baseline
+scripts/perf/verify.sh --compare scope0 # CI gate + bench, fail on regression
+```
+
+`scripts/perf/verify.sh` is the automated gate for a perf scope: it runs
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace`, then the layout bench, and exits
+non-zero when any bench id regresses past `--max-regression` (10% default).
+Bench ids and metric definitions are in
+[docs/perf/baseline.md](docs/perf/baseline.md).
+`collect.sh --switch` follows the on-device testing rules below: it warns
+loudly, needs an interactive `yes` or `TILI_PERF_CONFIRM=1`, and restores
+the previously active workspace when it finishes.
+
 Before committing, run the exact gate CI enforces (a red PR blocks merge):
 
 ```sh
