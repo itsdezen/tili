@@ -71,17 +71,12 @@ pub fn list_windows_for_pid(pid: i32) -> Vec<AxWindow> {
         Ok(w) => w,
         Err(_) => return Vec::new(),
     };
-    // Both resolved once per process, not once per window — floating-rule
-    // matching (M8) needs the bundle id on every `AxWindow` and
-    // classification needs the activation policy on every window, but a
-    // `NSRunningApplication` lookup per window would be redundant work for
-    // multi-window apps.
+    // Resolved once per process, not once per window — floating-rule
+    // matching (M8) needs it on every `AxWindow`, but a `NSRunningApplication`
+    // lookup per window would be redundant work for multi-window apps.
     let bundle_id = crate::workspace::bundle_id_for_pid(pid);
-    let is_regular_app = crate::workspace::is_regular_app(pid);
     ax_windows
         .into_iter()
-        .filter_map(|element| {
-            AxWindow::from_element(element, pid, bundle_id.clone(), is_regular_app)
-        })
+        .filter_map(|element| AxWindow::from_element(element, pid, bundle_id.clone()))
         .collect()
 }

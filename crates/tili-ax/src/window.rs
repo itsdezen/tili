@@ -12,7 +12,7 @@ use axuielement::ffi::{
     AXUIElementRef, kAXFocusedAttribute, kAXPositionAttribute, kAXPressAction, kAXRaiseAction,
     kAXSizeAttribute, kAXTitleAttribute,
 };
-use axuielement::{AXCopyMultipleAttributeOptions, AXPoint, AXSize, AXValue};
+use axuielement::{AXPoint, AXSize};
 use tili_tree::{Rect, WindowId};
 
 /// The window's own fullscreen state (distinct from `AX_FULL_SCREEN_BUTTON_ATTRIBUTE`,
@@ -79,173 +79,6 @@ fn classify_window_kind(
     }
 }
 
-/// The attributes `from_element` asks for in one
-/// `AXUIElementCopyMultipleAttributeValues` call, listed in the exact order
-/// the returned array carries them: 0 `AXRole`, 1 `AXSubrole`, 2
-/// `AXFullScreenButton`, 3 `AXCloseButton`, 4 `AXZoomButton`, 5
-/// `AXMinimizeButton`, 6 `AXTitle`, 7 `AXPosition`, 8 `AXSize`, 9
-/// `AXMinimized`, 10 `AXFullScreen`. The reply carries no names, only
-/// values, so `WindowAttributes::from_batched_values` destructures it
-/// positionally — the two have to stay in lockstep.
-///
-/// `AXCopyMultipleAttributeOptions::NONE` rather than `::STOP_ON_ERROR` is
-/// deliberate: a window that simply doesn't have one of the optional
-/// attributes comes back with a null/error placeholder in that slot instead
-/// of failing the whole batch.
-const BATCHED_ATTRIBUTE_NAMES: [&str; 11] = [
-    AX_ROLE_ATTRIBUTE,
-    AX_SUBROLE_ATTRIBUTE,
-    AX_FULL_SCREEN_BUTTON_ATTRIBUTE,
-    AX_CLOSE_BUTTON_ATTRIBUTE,
-    AX_ZOOM_BUTTON_ATTRIBUTE,
-    AX_MINIMIZE_BUTTON_ATTRIBUTE,
-    kAXTitleAttribute,
-    kAXPositionAttribute,
-    kAXSizeAttribute,
-    AX_MINIMIZED_ATTRIBUTE,
-    AX_FULL_SCREEN_ATTRIBUTE,
-];
-
-/// What a window's unreadable frame falls back to — `read_frame` needs both
-/// position and size, so either one missing means "no frame" rather than a
-/// half-filled rect.
-const ZERO_RECT: Rect = Rect {
-    x: 0.0,
-    y: 0.0,
-    width: 0.0,
-    height: 0.0,
-};
-
-/// Everything `from_element` needs from a window's attributes, read either
-/// as one batch (`from_batched_values`) or one attribute at a time
-/// (`read_individually`, the fallback). Both paths must agree attribute for
-/// attribute — the classification downstream reads this struct, not AX.
-#[derive(Debug, PartialEq)]
-struct WindowAttributes {
-    role: Option<String>,
-    subrole: Option<String>,
-    title: String,
-    frame: Rect,
-    minimized: bool,
-    fullscreen: bool,
-    has_fullscreen_button: bool,
-    has_close_button: bool,
-    has_zoom_button: bool,
-    has_minimize_button: bool,
-}
-
-impl WindowAttributes {
-    /// Maps one batched read's positional values (see
-    /// `BATCHED_ATTRIBUTE_NAMES`) onto a `WindowAttributes`. `None` means the
-    /// batch can't be trusted and the caller must fall back to
-    /// `read_individually`.
-    ///
-    /// A length check comes before anything else: the reply is positional,
-    /// so a short or long array would silently shift every field into the
-    /// wrong slot. There's no way to detect that after the fact, which is
-    /// why anything but an exact match is a hard `None` rather than a
-    /// best-effort map.
-    fn from_batched_values(values: &[AXValue]) -> Option<Self> {
-        if values.len() != BATCHED_ATTRIBUTE_NAMES.len() {
-            return None;
-        }
-        let [
-            role,
-            subrole,
-            fullscreen_button,
-            close_button,
-            zoom_button,
-            minimize_button,
-            title,
-            position,
-            size,
-            minimized,
-            fullscreen,
-        ] = values
-        else {
-            return None;
-        };
-        // Position and size both have to be readable, matching `read_frame`:
-        // one without the other is the same "frame unavailable" case as a
-        // window that answers neither.
-        let frame = match (position.as_point(), size.as_size()) {
-            (Some(position), Some(size)) => Rect {
-                x: position.x,
-                y: position.y,
-                width: size.width,
-                height: size.height,
-            },
-            _ => ZERO_RECT,
-        };
-        Some(Self {
-            role: role.as_string(),
-            subrole: subrole.as_string(),
-            title: title.as_string().unwrap_or_default(),
-            frame,
-            minimized: minimized.as_bool().unwrap_or(false),
-            fullscreen: fullscreen.as_bool().unwrap_or(false),
-            // A chrome button counts as present only when its slot holds a
-            // real element. An unsupported attribute comes back as a
-            // null/error placeholder, whose `as_element` is `None` — the
-            // same answer the old per-attribute read gave when it failed.
-            has_fullscreen_button: fullscreen_button.as_element().is_some(),
-            has_close_button: close_button.as_element().is_some(),
-            has_zoom_button: zoom_button.as_element().is_some(),
-            has_minimize_button: minimize_button.as_element().is_some(),
-        })
-    }
-
-    /// The one-attribute-at-a-time path, used whenever the batch call fails
-    /// outright or comes back the wrong shape. Kept because a batch failure
-    /// must not turn into a dropped window: this reads exactly what
-    /// `from_element` read before the batched path existed.
-    fn read_individually(element: &AXUIElement) -> Self {
-        Self {
-            role: element.string_attribute(AX_ROLE_ATTRIBUTE).ok().flatten(),
-            subrole: element
-                .string_attribute(AX_SUBROLE_ATTRIBUTE)
-                .ok()
-                .flatten(),
-            title: element
-                .string_attribute(kAXTitleAttribute)
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
-            frame: read_frame(element).unwrap_or(ZERO_RECT),
-            minimized: element
-                .bool_attribute(AX_MINIMIZED_ATTRIBUTE)
-                .ok()
-                .flatten()
-                .unwrap_or(false),
-            fullscreen: element
-                .bool_attribute(AX_FULL_SCREEN_ATTRIBUTE)
-                .ok()
-                .flatten()
-                .unwrap_or(false),
-            has_fullscreen_button: has_attribute(element, AX_FULL_SCREEN_BUTTON_ATTRIBUTE),
-            has_close_button: has_attribute(element, AX_CLOSE_BUTTON_ATTRIBUTE),
-            has_zoom_button: has_attribute(element, AX_ZOOM_BUTTON_ATTRIBUTE),
-            has_minimize_button: has_attribute(element, AX_MINIMIZE_BUTTON_ATTRIBUTE),
-        }
-    }
-
-    /// Whether any of the four window-chrome buttons exists — the ambiguity
-    /// tie-break `classify_window_kind` uses for a missing subrole.
-    fn has_any_chrome_button(&self) -> bool {
-        self.has_fullscreen_button
-            || self.has_close_button
-            || self.has_zoom_button
-            || self.has_minimize_button
-    }
-
-    /// Whether `AXRole` was readable and isn't `AXWindow` — a genuinely
-    /// non-window element, which `from_element` drops rather than
-    /// classifies. An unreadable role stays, same as before.
-    fn is_foreign_role(&self) -> bool {
-        self.role.as_deref().is_some_and(|r| r != AX_WINDOW_ROLE)
-    }
-}
-
 // `_AXUIElementGetWindow` is undocumented but stable and widely relied upon
 // by macOS window managers — it's the only way to resolve the real
 // `CGWindowID` behind an `AXUIElement`, which the public Accessibility API
@@ -303,9 +136,9 @@ fn log_write_failure(what: &str, title: &str, err: AXError) {
 }
 
 /// Reads a window's current position/size straight from AX — `None` if
-/// either attribute is unreadable. Shared by `WindowAttributes::read_individually`
-/// (the batch-read fallback) and `AxWindow::live_frame` (a post-write check),
-/// so both agree on exactly what "the real frame" means.
+/// either attribute is unreadable. Shared by `from_element` (initial
+/// construction) and `AxWindow::live_frame` (a post-write check), so both
+/// agree on exactly what "the real frame" means.
 fn read_frame(element: &AXUIElement) -> Option<Rect> {
     let position = element
         .point_attribute(kAXPositionAttribute)
@@ -426,46 +259,38 @@ impl AxWindow {
 
     /// Builds an `AxWindow` from an `AXUIElement` known to be a window
     /// (typically an entry from an application's `AXWindows` attribute).
-    /// `bundle_id` and `is_regular_app` are both resolved once per process by
-    /// the caller (see `enumerate::list_windows_for_pid`) rather than once
-    /// per window, to avoid redundant `NSRunningApplication` lookups for apps
-    /// with multiple windows. Returns `None` if the private call can't resolve
-    /// a window id, or if `AXRole` is present and isn't `AXWindow` at all
+    /// `bundle_id` is resolved once per process by the caller (see
+    /// `enumerate::list_windows_for_pid`) rather than once per window, to
+    /// avoid redundant `NSRunningApplication` lookups for apps with
+    /// multiple windows. Returns `None` if the private call can't resolve a
+    /// window id, or if `AXRole` is present and isn't `AXWindow` at all
     /// (genuinely not a window) — anything else is kept and classified via
     /// `classify_window_kind` (`Dialog`/`Popup` are tracked too, never
     /// dropped, unlike the old binary `looks_like_a_real_window` check).
-    ///
-    /// Every attribute read is one batched
-    /// `AXUIElementCopyMultipleAttributeValues` call (see
-    /// `BATCHED_ATTRIBUTE_NAMES`), with the window-id resolution and the
-    /// `kAXSizeAttribute` settability query kept separate — those aren't
-    /// attribute values. A batch read that fails or returns the wrong shape
-    /// falls back to `WindowAttributes::read_individually`, so a window is
-    /// never lost to a failed batch.
-    pub fn from_element(
-        element: AXUIElement,
-        pid: i32,
-        bundle_id: Option<String>,
-        is_regular_app: bool,
-    ) -> Option<Self> {
-        let attributes = element
-            .copy_multiple_attribute_values(
-                &BATCHED_ATTRIBUTE_NAMES,
-                AXCopyMultipleAttributeOptions::NONE,
-            )
-            .ok()
-            .and_then(|values| WindowAttributes::from_batched_values(&values))
-            .unwrap_or_else(|| WindowAttributes::read_individually(&element));
-        if attributes.is_foreign_role() {
+    pub fn from_element(element: AXUIElement, pid: i32, bundle_id: Option<String>) -> Option<Self> {
+        let role = element.string_attribute(AX_ROLE_ATTRIBUTE).ok().flatten();
+        if role.as_deref().is_some_and(|r| r != AX_WINDOW_ROLE) {
             return None;
         }
+        let subrole = element
+            .string_attribute(AX_SUBROLE_ATTRIBUTE)
+            .ok()
+            .flatten();
+        let has_fullscreen_button = has_attribute(&element, AX_FULL_SCREEN_BUTTON_ATTRIBUTE);
+        let has_close_button = has_attribute(&element, AX_CLOSE_BUTTON_ATTRIBUTE);
+        let has_zoom_button = has_attribute(&element, AX_ZOOM_BUTTON_ATTRIBUTE);
+        let has_any_chrome_button = has_fullscreen_button
+            || has_close_button
+            || has_zoom_button
+            || has_attribute(&element, AX_MINIMIZE_BUTTON_ATTRIBUTE);
+        let is_regular_app = crate::workspace::is_regular_app(pid);
         let kind = classify_window_kind(
-            attributes.subrole.as_deref(),
-            attributes.has_any_chrome_button(),
-            attributes.has_close_button,
+            subrole.as_deref(),
+            has_any_chrome_button,
+            has_close_button,
             is_regular_app,
-            attributes.has_zoom_button,
-            attributes.has_fullscreen_button,
+            has_zoom_button,
+            has_fullscreen_button,
         );
         // Deliberately independent of `kind`: subrole/chrome-button shape
         // says what *category* of window this claims to be, not whether it
@@ -483,19 +308,40 @@ impl AxWindow {
             .unwrap_or(true);
 
         let id = Self::resolve_window_id(&element)?;
+        let title = element
+            .string_attribute(kAXTitleAttribute)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let frame = read_frame(&element).unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        });
+        let minimized = element
+            .bool_attribute(AX_MINIMIZED_ATTRIBUTE)
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        let fullscreen = element
+            .bool_attribute(AX_FULL_SCREEN_ATTRIBUTE)
+            .ok()
+            .flatten()
+            .unwrap_or(false);
 
         Some(Self {
             id,
             pid,
             bundle_id,
-            title: attributes.title,
-            frame: attributes.frame,
+            title,
+            frame,
             element,
             kind,
-            has_zoom_button: attributes.has_zoom_button,
+            has_zoom_button,
             is_resizable,
-            minimized: attributes.minimized,
-            fullscreen: attributes.fullscreen,
+            minimized,
+            fullscreen,
         })
     }
 
@@ -909,182 +755,5 @@ mod tests {
             ),
             WindowKind::Standard
         );
-    }
-
-    /// A batched-value slice with the shape a
-    /// `AXCopyMultipleAttributeOptions::NONE` read produces for a window that
-    /// has none of the optional attributes: an error placeholder in every
-    /// slot.
-    fn placeholder_values() -> Vec<AXValue> {
-        BATCHED_ATTRIBUTE_NAMES
-            .iter()
-            .map(|_| AXValue::from_error(AXError::NoValue).expect("error placeholder"))
-            .collect()
-    }
-
-    /// Overwrites the slot `name` occupies, found through
-    /// `BATCHED_ATTRIBUTE_NAMES` so a test never hardcodes an index that
-    /// could drift from the real attribute order.
-    fn set(values: &mut [AXValue], name: &str, value: AXValue) {
-        let index = BATCHED_ATTRIBUTE_NAMES
-            .iter()
-            .position(|candidate| *candidate == name)
-            .expect("attribute name is part of the batch");
-        values[index] = value;
-    }
-
-    #[test]
-    fn batched_values_map_a_full_window() {
-        let mut values = placeholder_values();
-        set(
-            &mut values,
-            AX_ROLE_ATTRIBUTE,
-            AXValue::from_string(AX_WINDOW_ROLE).unwrap(),
-        );
-        set(
-            &mut values,
-            AX_SUBROLE_ATTRIBUTE,
-            AXValue::from_string(AX_STANDARD_WINDOW_SUBROLE).unwrap(),
-        );
-        set(
-            &mut values,
-            kAXTitleAttribute,
-            AXValue::from_string("Inbox").unwrap(),
-        );
-        set(
-            &mut values,
-            kAXPositionAttribute,
-            AXValue::from_point(AXPoint { x: 120.0, y: 48.0 }).unwrap(),
-        );
-        set(
-            &mut values,
-            kAXSizeAttribute,
-            AXValue::from_size(AXSize {
-                width: 800.0,
-                height: 600.0,
-            })
-            .unwrap(),
-        );
-        set(
-            &mut values,
-            AX_MINIMIZED_ATTRIBUTE,
-            AXValue::from_bool(true),
-        );
-        set(
-            &mut values,
-            AX_FULL_SCREEN_ATTRIBUTE,
-            AXValue::from_bool(true),
-        );
-
-        let attributes = WindowAttributes::from_batched_values(&values).expect("well-formed batch");
-
-        assert_eq!(attributes.role.as_deref(), Some(AX_WINDOW_ROLE));
-        assert_eq!(
-            attributes.subrole.as_deref(),
-            Some(AX_STANDARD_WINDOW_SUBROLE)
-        );
-        assert_eq!(attributes.title, "Inbox");
-        assert_eq!(
-            attributes.frame,
-            Rect {
-                x: 120.0,
-                y: 48.0,
-                width: 800.0,
-                height: 600.0,
-            }
-        );
-        assert!(attributes.minimized);
-        assert!(attributes.fullscreen);
-        assert!(!attributes.is_foreign_role());
-        // A present chrome button is an `AXValue` of kind `Element`, which
-        // only `AXValue::from_element` can create — and that needs a live
-        // `AXUIElement`, so it isn't reachable from a unit test. The
-        // present case is covered by the real AX path; absent is covered
-        // here and by `batched_error_placeholders_map_to_defaults`.
-        assert!(!attributes.has_any_chrome_button());
-    }
-
-    #[test]
-    fn batched_error_placeholders_map_to_defaults() {
-        // Every optional attribute missing: the batch still maps, with the
-        // same defaults the per-attribute path produced (`""` title, zero
-        // frame, `false` booleans, no chrome buttons) rather than a dropped
-        // window.
-        let attributes = WindowAttributes::from_batched_values(&placeholder_values())
-            .expect("well-formed batch");
-
-        assert_eq!(attributes.role, None);
-        assert_eq!(attributes.subrole, None);
-        assert_eq!(attributes.title, "");
-        assert_eq!(attributes.frame, ZERO_RECT);
-        assert!(!attributes.minimized);
-        assert!(!attributes.fullscreen);
-        assert!(!attributes.has_fullscreen_button);
-        assert!(!attributes.has_close_button);
-        assert!(!attributes.has_zoom_button);
-        assert!(!attributes.has_minimize_button);
-        assert!(!attributes.has_any_chrome_button());
-        assert!(!attributes.is_foreign_role());
-    }
-
-    #[test]
-    fn batched_position_without_size_yields_zero_frame() {
-        // `read_frame` requires both halves, so a batch carrying only one is
-        // "no frame", not a rect with a zero width/height — either way round.
-        let mut position_only = placeholder_values();
-        set(
-            &mut position_only,
-            kAXPositionAttribute,
-            AXValue::from_point(AXPoint { x: 120.0, y: 48.0 }).unwrap(),
-        );
-        let attributes =
-            WindowAttributes::from_batched_values(&position_only).expect("well-formed batch");
-        assert_eq!(attributes.frame, ZERO_RECT);
-
-        let mut size_only = placeholder_values();
-        set(
-            &mut size_only,
-            kAXSizeAttribute,
-            AXValue::from_size(AXSize {
-                width: 800.0,
-                height: 600.0,
-            })
-            .unwrap(),
-        );
-        let attributes =
-            WindowAttributes::from_batched_values(&size_only).expect("well-formed batch");
-        assert_eq!(attributes.frame, ZERO_RECT);
-    }
-
-    #[test]
-    fn batched_values_of_the_wrong_length_are_rejected() {
-        // Not a best-effort map: the reply is positional, so a shifted array
-        // would put every value in the wrong field. `None` is what sends
-        // `from_element` down `read_individually`, which is why a rejected
-        // batch can never change classification.
-        let mut short = placeholder_values();
-        short.pop();
-        assert_eq!(WindowAttributes::from_batched_values(&short), None);
-
-        let mut long = placeholder_values();
-        long.push(AXValue::from_bool(false));
-        assert_eq!(WindowAttributes::from_batched_values(&long), None);
-
-        assert_eq!(WindowAttributes::from_batched_values(&[]), None);
-    }
-
-    #[test]
-    fn batched_non_window_role_is_foreign() {
-        let mut values = placeholder_values();
-        set(
-            &mut values,
-            AX_ROLE_ATTRIBUTE,
-            AXValue::from_string("AXButton").unwrap(),
-        );
-
-        let attributes = WindowAttributes::from_batched_values(&values).expect("well-formed batch");
-
-        // The one role outcome `from_element` drops instead of classifying.
-        assert!(attributes.is_foreign_role());
     }
 }

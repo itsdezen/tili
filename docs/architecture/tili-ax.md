@@ -13,34 +13,6 @@ that call isolated there; don't add other private API usage without a
 strong reason, since staying public-API-only is what lets tili run without
 disabling SIP.
 
-`AxWindow::from_element` reads everything it classifies on in **one**
-`AXUIElementCopyMultipleAttributeValues` call — 11 attributes, in the fixed
-order documented next to `BATCHED_ATTRIBUTE_NAMES` and destructured
-positionally by `WindowAttributes::from_batched_values`, since the reply
-carries values only, no names. It passes
-`AXCopyMultipleAttributeOptions::NONE`, not `::STOP_ON_ERROR`: an attribute
-this window simply doesn't have (a minimize button, `AXFullScreen`, ...)
-comes back as a null/error placeholder in its slot instead of failing the
-whole batch, which is what makes one call safe for windows of every shape.
-The two reads that stay separate are the ones that aren't attribute values:
-the private window-id call, and
-`AXUIElementIsAttributeSettable(kAXSizeAttribute)` (see `is_resizable`
-below) — 3 round trips per window instead of ~13. That matters because
-each one is IPC into the target app, and a `WindowsChanged` notification
-re-reads every window of the process that fired it.
-
-A batch that fails outright, or comes back with a different number of
-values than names requested, is **not** interpreted best-effort: the reply
-is positional, so a short array would silently shift every field into the
-wrong slot and change classification. `from_element` instead falls back to
-`WindowAttributes::read_individually`, which reads the same attributes one
-at a time (the pre-batching path) and must keep agreeing with the batched
-mapping attribute for attribute — a rejected batch is a latency
-regression, never a classification change. Chrome-button presence is
-`as_element().is_some()` on its slot in both paths: a null/error
-placeholder is "absent", the same answer the old failed `has_attribute`
-read gave.
-
 `WindowKind` (`Standard`/`Dialog`/`Popup`) via `classify_window_kind` —
 checked before subrole matching (M-fix 0.1.1): a non-regular-activation-
 policy process (`workspace::is_regular_app`, i.e. no Dock icon/Cmd-Tab
@@ -48,9 +20,7 @@ entry — the Dock itself, `SecurityAgent`, the screenshot toolbar, ...)
 presenting a window with no close button is always `Popup` regardless of AX
 role/subrole, after live-hardware testing showed system-UI chrome
 occasionally slipping through the old subrole-only check and getting
-tiled/re-centered. `is_regular_app` is resolved once per pid by
-`enumerate::list_windows_for_pid` and passed in, alongside the bundle id —
-one `NSRunningApplication` lookup per process, not per window.
+tiled/re-centered.
 A standard subrole with a zoom button but no full-screen button is also
 `Dialog` — real content windows are fullscreen-capable
 (`AXFullScreenButton`), while AppKit gives non-fullscreenable utility
@@ -89,10 +59,8 @@ free side effect this also covers `list_windows_for_pid` returning an empty
 correctly for a busy one.
 
 `AxWindow::is_resizable` (populated in `from_element` from
-`AXUIElement::is_attribute_settable(kAXSizeAttribute)` — one of the two reads
-that stays outside the batched attribute batch, since settability isn't an
-attribute value) is a deliberately separate signal from `WindowKind` —
-subrole/chrome-button shape says what
+`AXUIElement::is_attribute_settable(kAXSizeAttribute)`) is a deliberately
+separate signal from `WindowKind` — subrole/chrome-button shape says what
 *category* a window claims to be, not whether it can actually be resized.
 Reported non-real, e.g. for a splash screen or a popup window torn off an
 app's main window (`WindowKind::Standard` by chrome, but AX-refuses a
@@ -276,10 +244,9 @@ Bridges `NSWorkspace` app-launch/quit notifications, plus
 `WmEvent::SystemDidWake` → `WmState::note_system_wake`, see
 [tili-daemon.md](tili-daemon.md) for what that does), via
 `objc2`/`objc2-app-kit`. Also has `bundle_id_for_pid` (M8, via
-`NSRunningApplication`) and `is_regular_app` — `enumerate.rs` resolves both
-once per process and passes them to every one of that process's `AxWindow`s,
-rather than once per window, since they're used to match floating rules and
-to classify `WindowKind` respectively.
+`NSRunningApplication`) — `enumerate.rs` resolves this once per process and
+shares it across all of that process's `AxWindow`s, rather than once per
+window, since it's used to match floating rules.
 
 `register_on_main(mtm: MainThreadMarker)` registers the three `NSWorkspace`
 observers directly on the real process main thread, with `queue: .main`
