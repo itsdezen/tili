@@ -1007,8 +1007,11 @@ after a sustained run of unreachable-daemon retries (see
 `src/trace.rs` owns the opt-in timing/diagnostic log switch
 (`TILI_TRACE_TIMING=1|true|yes`, parsed once into a `OnceLock`): `dispatch`'s
 per-command duration, `switch_workspace`'s phase timings,
-`write_windows_concurrently`'s per-window writes, and `main.rs`'s per-event
-NSWorkspace lines all go through `trace::log(format_args!(...))`, so an
+`write_windows_concurrently`'s per-window writes, `drain_pending_windows`'s
+per-pid AX scan cost (the `list_windows_for_pid` call plus
+`apply_windows_changed`, which is what a `WindowsChanged` notification
+actually costs), and `main.rs`'s per-event NSWorkspace lines all go through
+`trace::log(format_args!(...))`, so an
 argument's formatting/allocation happens only when the flag is on. Real
 failures and warnings stay unconditional `eprintln!` — config-load errors and
 `config_warnings`, socket read/write failures, the hotkey-command failure

@@ -271,6 +271,29 @@ stops writing ~1 KB of phase timings per switch; the daemon's thread count
 drops because the tokio worker pool is sized to two instead of one per core.
 Switch latency and RSS show no clear change at this sample size.
 
+## Rejected: batched AX attribute reads
+
+`AxWindow::from_element` used to read ~13 attributes one call at a time.
+A batched `AXUIElementCopyMultipleAttributeValues` read (11 values in one
+call, 12 -> 2 app IPC per window) was implemented, tested, and measured on
+device, then reverted: it did not move a benchmark.
+
+Method: build with `TILI_TRACE_TIMING=1` (injected into the launch agent's
+`EnvironmentVariables`, since `launchctl setenv` is not inherited by a
+`LaunchAgent`), drive 100 `tili workspace` switches, and read the gated
+`scan pid=... windows=... took ...` line plus the daemon's CPU time.
+
+| Metric (100 switches) | one-at-a-time | batched |
+| --- | ---: | ---: |
+| daemon CPU time | 0.26 s | 0.24 s |
+
+Per-scan wall time was 1-40 ms in both builds with the tail dominated by the
+target app's own AX responsiveness, so the round-trip count is not what the
+user waits on. The ~8% CPU difference is inside run-to-run noise at load
+~3.4, and the change added a positional wire contract plus a fallback path,
+so it was not worth the risk. The gated scan trace stayed in, because it is
+what made this measurable.
+
 ## Deliberately not measured
 
 - AX/window-server work: frame reads/writes, classification, observer
