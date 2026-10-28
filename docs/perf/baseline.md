@@ -245,6 +245,32 @@ workspace now inlines across crate boundaries. Codegen changed for every
 crate, so `scope0` (saved before this) is not comparable to later runs —
 use `scope-lto`, saved from the commit that introduced the profile.
 
+## On-device before/after (0.11.1 vs the perf scopes)
+
+Same machine, same `scripts/perf/collect.sh`, same Homebrew `tili` CLI on
+both sides; the "after" build was installed with `./dev.sh` and the Homebrew
+launch agents were restored afterwards. Single run per row — treat
+differences under ~15% as noise, and RSS as uptime-dependent.
+
+| Metric | 0.11.1 | after (through `f26e882`) |
+| --- | ---: | ---: |
+| `tili ping` p50 | 5.581 ms | 4.205 ms |
+| `tili ping` p95 | 8.538 ms | 4.611 ms |
+| stderr per command | 42.8 B | 0 B |
+| `tili workspace` p50 (10 switches) | 12.918 ms | 14.084 ms |
+| `tili workspace` p95 | 46.274 ms | 44.488 ms |
+| stderr per 10 switches | 10,395 B | 0 B |
+| `tili-daemon` threads | 24-25 | 17 |
+| `tili-menubar` threads | 5-6 | 5 |
+| `tili-daemon` RSS | 33.4-38.9 MB | 35.2 MB |
+| `tili-menubar` RSS | 47.5-53.8 MB | 51.1 MB |
+
+What moved, and why: the ping round trip loses the per-command stderr write
+and (for read-only queries) the system-wide AX focus query; the switch phase
+stops writing ~1 KB of phase timings per switch; the daemon's thread count
+drops because the tokio worker pool is sized to two instead of one per core.
+Switch latency and RSS show no clear change at this sample size.
+
 ## Deliberately not measured
 
 - AX/window-server work: frame reads/writes, classification, observer
