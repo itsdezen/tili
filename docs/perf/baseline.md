@@ -85,9 +85,9 @@ regression threshold. Baselines are cached outside the repo
 (`~/.cache/tili-perf/criterion`) because `target/` is per-worktree:
 
 ```sh
-scripts/perf/verify.sh --save scope0      # gate + bench, cache baseline
-scripts/perf/verify.sh --compare scope0   # gate + bench, exit 1 on >10% regression
-scripts/perf/verify.sh --compare scope0 --report docs/perf/runs/s1.md
+scripts/perf/verify.sh --save scope-lto      # gate + bench, cache baseline
+scripts/perf/verify.sh --compare scope-lto   # gate + bench, fail on a regression
+scripts/perf/verify.sh --compare scope-lto --report docs/perf/runs/s1.md
 ```
 
 ## What each metric means
@@ -227,6 +227,23 @@ roughly 20% on the `insert`/`remove` ids as noise without a repeat run.
 Layout is sub-microsecond even at 64 windows, while one AX round trip costs
 milliseconds — so a tree-level allocation change is not worth a scope on its
 own. The numbers exist to prove that and to catch an accidental regression.
+
+## Release profile (thin LTO)
+
+`[profile.release]` sets `lto = "thin"`, `codegen-units = 1`, and
+`strip = "symbols"`; `panic` stays `unwind` because `tili-daemon` relies on
+`catch_unwind` to exit cleanly for launchd. Release sizes on arm64:
+
+| binary | before | after |
+| --- | ---: | ---: |
+| `tili` | 1.88 MB | 1.25 MB |
+| `tili-daemon` | 4.47 MB | 2.85 MB |
+| `tili-menubar` | 1.28 MB | 0.88 MB |
+
+The layout bench improved on 18 of 22 ids (2-11%, none slower) because the
+workspace now inlines across crate boundaries. Codegen changed for every
+crate, so `scope0` (saved before this) is not comparable to later runs —
+use `scope-lto`, saved from the commit that introduced the profile.
 
 ## Deliberately not measured
 
