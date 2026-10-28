@@ -420,10 +420,17 @@ pub fn spawn_event_watcher(
 /// watcher set up proactively: it never re-fires
 /// `NSWorkspaceDidLaunchApplicationNotification` when it later opens a
 /// *new* window, since its process never actually launches afresh.
-fn watchable_pids() -> BTreeSet<i32> {
-    enumerate::onscreen_owner_pids()
-        .into_iter()
-        .chain(workspace::all_regular_app_pids())
+///
+/// Both inputs are already-enumerated sets: callers keep the on-screen set
+/// (they also need it for `attach_watcher` and the full-window sweep), and
+/// enumerating either source more than once per resync is pure overhead.
+/// Keeping the union itself pure is what makes it testable without a live
+/// WindowServer.
+fn watchable_pids(onscreen: &BTreeSet<i32>, regular_apps: &[i32]) -> BTreeSet<i32> {
+    onscreen
+        .iter()
+        .copied()
+        .chain(regular_apps.iter().copied())
         .collect()
 }
 
@@ -461,7 +468,7 @@ fn seed_watchers(
     unwatchable: &mut HashSet<i32>,
 ) {
     let onscreen = enumerate::onscreen_owner_pids();
-    for pid in watchable_pids() {
+    for pid in watchable_pids(&onscreen, &workspace::all_regular_app_pids()) {
         attach_watcher(rt, event_tx, watched, unwatchable, &onscreen, pid);
     }
 }
@@ -499,8 +506,8 @@ fn resync_watchers(
     unwatchable: &mut HashSet<i32>,
     full_window_resync: bool,
 ) {
-    let current = watchable_pids();
     let onscreen = enumerate::onscreen_owner_pids();
+    let current = watchable_pids(&onscreen, &workspace::all_regular_app_pids());
 
     for &pid in &current {
         if !watched.contains_key(&pid) && !unwatchable.contains(&pid) {
@@ -581,7 +588,7 @@ fn resync_watchers(
 /// Kernel-level liveness check, independent of `NSWorkspace` — `kill(pid,
 /// 0)` sends no signal, just checks whether the pid still refers to a live
 /// process (`ESRCH` means it doesn't). This exists because `current`
-/// (`watchable_pids()`) is itself partly sourced from
+/// (`watchable_pids`) is itself partly sourced from
 /// `workspace::all_regular_app_pids()`, i.e. `NSWorkspace.runningApplications()`
 /// — the very subsystem whose termination notification this whole resync
 /// loop is a backstop for. A backgrounded, windowless pre-existing app can
@@ -633,4 +640,24 @@ fn watch_app(
             }
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watchable_pids_unions_onscreen_owners_with_regular_apps() {
+        let onscreen = BTreeSet::from([101, 202]);
+        let current = watchable_pids(&onscreen, &[202, 303]);
+        assert_eq!(
+            current,
+            BTreeSet::from([101, 202, 303]),
+            "every on-screen owner and regular app pid, deduplicated"
+        );
+        assert!(
+            watchable_pids(&BTreeSet::new(), &[]).is_empty(),
+            "no owners and no regular apps means nothing to watch"
+        );
+    }
 }

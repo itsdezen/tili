@@ -342,7 +342,12 @@ terminate notifications were also unreliable; it now runs on its own
 the frontmost poll is gone, since those launch/terminate notifications are
 confirmed reliably delivered (`tili-daemon` has a real `NSApplication`) and
 this is now a rare-miss backstop rather than the primary detection path —
-see that constant's doc comment. It drives one fix added in 0.1.1: it
+see that constant's doc comment. Each tick enumerates the on-screen window
+list (`enumerate::onscreen_owner_pids`) and
+`NSWorkspace.runningApplications()` (`workspace::all_regular_app_pids`) once
+apiece; the union is computed from those two sets, and the same on-screen
+set is reused for watcher attachment and the full-window sweep rather than
+re-read. It drives one fix added in 0.1.1: it
 cross-checks each watched pid's kernel-level liveness via `libc::kill(pid,
 0)` (independent of `NSWorkspace`, which the primary termination
 notification and this backstop both already depend on — closing a gap
