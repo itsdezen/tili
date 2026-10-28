@@ -284,7 +284,7 @@ async fn async_daemon_main(
         // happened, defeating the entire point of replacing polling with
         // this. The generic socket arm below excludes read-only commands
         // (`Ping`/`ListWindows`/`ListWorkspaces`/`ListMonitors`/`Doctor`/
-        // `CurrentMode`/`MenubarStyle`) from this
+        // `CurrentMode`/`MenubarStyle`/`Snapshot`) from this
         // for the same reason, not just "rare enough not to bother" —
         // `tili-menubar`'s own steady-state polling calls exactly those
         // commands every time it wakes up, so counting them as "changed"
@@ -675,6 +675,7 @@ pub(crate) fn command_is_read_only(command: &Command) -> bool {
             | Command::Doctor
             | Command::CurrentMode
             | Command::MenubarStyle
+            | Command::Snapshot
     )
 }
 
@@ -850,6 +851,7 @@ mod tests {
         assert!(command_is_read_only(&Command::Doctor));
         assert!(command_is_read_only(&Command::CurrentMode));
         assert!(command_is_read_only(&Command::MenubarStyle));
+        assert!(command_is_read_only(&Command::Snapshot));
     }
 
     #[test]

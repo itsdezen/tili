@@ -20,3 +20,15 @@ permission grants, and the previous config load's skipped-rule warnings) —
 `tili doctor` combines it with checks it can run without a daemon at all
 (LaunchAgent files, the socket, config syntax). See
 [tili-cli.md](tili-cli.md) and [tili-daemon.md](tili-daemon.md).
+
+`Command::Snapshot`'s payload, `SnapshotInfo`, bundles monitors,
+workspaces, the active mode, and the menubar style into one read. It exists
+purely so `tili-menubar`'s refresh costs one socket connection and one
+`dispatch()` (whose focus sync is one system-wide AX query) instead of four
+— the individual `ListMonitors`/`ListWorkspaces`/`CurrentMode`/
+`MenubarStyle` commands stay in the protocol for every other client. Its
+`style` field is `Option` so a payload without style data keeps the badge's
+previously applied style rather than resetting it to the default, the same
+best-effort rule the four separate queries used to give. Read-only, so it
+joins the others in `tili-daemon`'s `command_is_read_only` exclusion from
+`WaitForChange` change-detection. See [tili-menubar.md](tili-menubar.md).

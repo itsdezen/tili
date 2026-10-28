@@ -97,6 +97,15 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
             payload_response(report)
         }
         Command::MenubarStyle => payload_response(state.menubar_style()),
+        // The four reads above, bundled for `tili-menubar`'s single-refresh
+        // path — built from exactly those same accessors so the payload
+        // can't drift from what the individual commands return.
+        Command::Snapshot => payload_response(tili_ipc::SnapshotInfo {
+            monitors: state.list_monitors(),
+            workspaces: state.list_workspaces(),
+            mode: state.current_mode().to_string(),
+            style: Some(state.menubar_style()),
+        }),
         // `tili-ipc`'s parser deliberately never fails on an unrecognized
         // command string — it becomes `Command::Raw` so a typo'd keybinding
         // still lets the rest of the config load, and fails here instead
@@ -219,6 +228,30 @@ mod tests {
         assert_eq!(workspaces.len(), 1);
         assert!(workspaces[0].active);
         assert_eq!(workspaces[0].window_count, 0);
+    }
+
+    #[test]
+    fn snapshot_returns_default_state_payload() {
+        let mut state = WmState::default();
+        let expected_monitor_ids: Vec<u32> = state.list_monitors().iter().map(|m| m.id).collect();
+        let response = dispatch(&mut state, Command::Snapshot);
+        let Response::OkWithPayload(payload) = response else {
+            panic!("expected OkWithPayload");
+        };
+        let snapshot: tili_ipc::SnapshotInfo = serde_json::from_value(payload).unwrap();
+        assert_eq!(
+            snapshot.monitors.iter().map(|m| m.id).collect::<Vec<_>>(),
+            expected_monitor_ids,
+            "monitors must come from the same accessor as ListMonitors"
+        );
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert!(snapshot.workspaces[0].active);
+        assert_eq!(snapshot.workspaces[0].window_count, 0);
+        assert_eq!(snapshot.mode, "main");
+        let style = snapshot.style.expect("daemon always reports a style");
+        assert_eq!(style.fill, tili_ipc::MenubarFill::Filled);
+        assert_eq!(style.shape, tili_ipc::MenubarShape::Pill);
+        assert!(!style.uppercase);
     }
 
     #[test]

@@ -148,6 +148,14 @@ pub enum Command {
     /// how it learns styling without a second, independent config-watch
     /// path (see `MenubarStyle`).
     MenubarStyle,
+    /// One consolidated read of everything `tili-menubar`'s refresh needs —
+    /// monitors, workspaces, current mode, and menubar style — in a single
+    /// round trip (see `SnapshotInfo`). `dispatch()` runs its focus sync
+    /// once per command, and each command costs a fresh socket connection,
+    /// so the four separate queries this replaces cost four of each per
+    /// refresh. Read-only, so it's excluded from `WaitForChange`
+    /// change-detection alongside those four.
+    Snapshot,
     /// Gracefully stops the daemon: responds `Ok` (so a client waiting on
     /// the reply doesn't hang) before the process exits. Handled directly
     /// in `tili-daemon`'s main loop, not through `dispatch()` — it isn't a
@@ -276,6 +284,24 @@ pub struct MenubarStyle {
     pub uppercase: bool,
 }
 
+/// `Command::Snapshot`'s payload: the four reads `tili-menubar`'s refresh
+/// previously issued as separate commands, bundled so one connection and
+/// one `dispatch()` focus sync serve the whole refresh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotInfo {
+    pub monitors: Vec<MonitorInfo>,
+    pub workspaces: Vec<WorkspaceInfo>,
+    /// The daemon's active keybindings mode — same value
+    /// `Command::CurrentMode` returns.
+    pub mode: String,
+    /// The current `menubar { }` style. `Option` keeps the client's
+    /// best-effort rule expressible: `None` means "no style data in this
+    /// payload", so the badge keeps the previously applied style rather
+    /// than resetting to `MenubarStyle::default()`. The daemon always
+    /// fills this in (`WmState::menubar_style` is never absent).
+    pub style: Option<MenubarStyle>,
+}
+
 /// A connected display as reported by `Command::ListMonitors` (M9).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorInfo {
@@ -317,5 +343,56 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         let back: Command = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, Command::Focus(Direction::Left)));
+    }
+
+    #[test]
+    fn snapshot_command_and_payload_roundtrip_through_json() {
+        let cmd = Command::Snapshot;
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: Command = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, Command::Snapshot));
+
+        let info = SnapshotInfo {
+            monitors: vec![MonitorInfo {
+                id: 7,
+                is_main: true,
+                focused: true,
+                active_workspace: Some("work".to_string()),
+                frame: RectInfo {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1440.0,
+                    height: 900.0,
+                },
+            }],
+            workspaces: vec![WorkspaceInfo {
+                name: "work".to_string(),
+                active: true,
+                window_count: 3,
+                monitor: Some(7),
+            }],
+            mode: "resize".to_string(),
+            style: Some(MenubarStyle {
+                fill: MenubarFill::Outlined,
+                shape: MenubarShape::Rounded,
+                uppercase: true,
+            }),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: SnapshotInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.monitors.len(), 1);
+        assert_eq!(back.monitors[0].id, 7);
+        assert!(back.monitors[0].focused);
+        assert_eq!(back.monitors[0].active_workspace.as_deref(), Some("work"));
+        assert_eq!(back.monitors[0].frame.width, 1440.0);
+        assert_eq!(back.workspaces.len(), 1);
+        assert_eq!(back.workspaces[0].name, "work");
+        assert_eq!(back.workspaces[0].window_count, 3);
+        assert_eq!(back.workspaces[0].monitor, Some(7));
+        assert_eq!(back.mode, "resize");
+        let style = back.style.expect("style should survive the round trip");
+        assert_eq!(style.fill, MenubarFill::Outlined);
+        assert_eq!(style.shape, MenubarShape::Rounded);
+        assert!(style.uppercase);
     }
 }

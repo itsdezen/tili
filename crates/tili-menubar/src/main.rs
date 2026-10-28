@@ -83,7 +83,7 @@ fn main() {
                 // — either way, fetch the real current state. Spawned onto
                 // its own short-lived thread rather than run inline: this
                 // loop needs to re-issue `wait_for_change` immediately, not
-                // after `poll_daemon`'s two extra round trips finish —
+                // after `poll_daemon`'s own round trip finishes —
                 // `Command::WaitForChange`'s server-side wakeup isn't a
                 // queue (see its doc comment), so any change firing during
                 // that gap, while nothing here is subscribed yet, is missed

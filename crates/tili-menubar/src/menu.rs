@@ -28,11 +28,13 @@ pub struct Snapshot {
     /// `"manage"`/a custom name) — drives which glyph `badge::image_for`
     /// draws.
     pub mode: String,
-    /// `None` specifically when this poll's `Command::MenubarStyle`
-    /// request failed (distinct from the whole `Snapshot` being missing) —
-    /// `apply_snapshot` then keeps whatever style was last applied instead
-    /// of resetting to default, same "don't flash a broken state on a
-    /// transient hiccup" reasoning as this struct itself.
+    /// `None` specifically when the payload carried no style data — distinct
+    /// from the whole `Snapshot` being missing. `apply_snapshot` then keeps
+    /// whatever style was last applied instead of resetting to default, same
+    /// "don't flash a broken state on a transient hiccup" reasoning as this
+    /// struct itself. The daemon always fills it in; keeping the wire field
+    /// optional means a payload without style can't be misread as "default
+    /// style".
     pub style: Option<tili_ipc::MenubarStyle>,
 }
 
@@ -59,33 +61,28 @@ pub fn build_initial(mtm: MainThreadMarker) -> TrayIcon {
     tray
 }
 
-/// Polls `Command::ListMonitors` (for the focused monitor's current
-/// workspace), `Command::ListWorkspaces` (the full switchable list),
-/// `Command::CurrentMode` (for the badge glyph), and `Command::MenubarStyle`
-/// (for badge/menu styling) — the first three are required for a `Some`
-/// result (`None` on any of their transport/decode failures); the style
-/// fetch is best-effort on its own (see `Snapshot::style`'s doc comment).
+/// Polls one `Command::Snapshot` — the focused monitor's current workspace,
+/// the full switchable workspace list, the badge mode, and the styling all
+/// arrive in one round trip. `None` on any transport/decode failure; the
+/// style is carried as an `Option` inside the payload (see `Snapshot::style`).
 pub fn poll_daemon() -> Option<Snapshot> {
-    let monitors: Vec<tili_ipc::MonitorInfo> = send_and_decode(tili_ipc::Command::ListMonitors)?;
-    let workspaces: Vec<tili_ipc::WorkspaceInfo> =
-        send_and_decode(tili_ipc::Command::ListWorkspaces)?;
-    let mode: String = send_and_decode(tili_ipc::Command::CurrentMode)?;
-    let style = send_and_decode(tili_ipc::Command::MenubarStyle);
-    let current = monitors
+    let info: tili_ipc::SnapshotInfo = send_and_decode(tili_ipc::Command::Snapshot)?;
+    let current = info
+        .monitors
         .into_iter()
         .find(|m| m.focused)
         .and_then(|m| m.active_workspace);
     Some(Snapshot {
         current,
-        workspaces,
-        mode,
-        style,
+        workspaces: info.workspaces,
+        mode: info.mode,
+        style: info.style,
     })
 }
 
 /// Sends `command` and decodes its `OkWithPayload` response as `T` — the
-/// pattern all three `poll_daemon` requests share, `None` on any
-/// transport/decode failure or non-payload response.
+/// pattern `poll_daemon` uses, `None` on any transport/decode failure or
+/// non-payload response.
 fn send_and_decode<T: serde::de::DeserializeOwned>(command: tili_ipc::Command) -> Option<T> {
     match crate::ipc::send(command).ok()? {
         tili_ipc::Response::OkWithPayload(v) => serde_json::from_value(v).ok(),
@@ -140,7 +137,7 @@ pub struct MenuState {
     /// none of those handles are still in the live `NSMenu`.
     items: HashMap<String, MenuItem>,
     /// The last successfully fetched `MenubarStyle` — see
-    /// `Snapshot::style`'s doc comment for why a single failed style fetch
+    /// `Snapshot::style`'s doc comment for why a payload without style
     /// doesn't reset this to `MenubarStyle::default()`.
     style: tili_ipc::MenubarStyle,
 }

@@ -57,11 +57,11 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   badge stuck on a stale workspace until the next unrelated change or the
   30s timeout.
   Client-side, `wait_for_change`'s own loop spawns `menu::poll_daemon()`
-  (the two follow-up round trips — `ListMonitors` then `ListWorkspaces` —
-  that fetch the state a wakeup implies changed) onto its own short-lived
-  thread instead of running it inline, so the loop re-issues the next
-  `wait_for_change` immediately rather than after those two round trips
-  finish. `Command::WaitForChange`'s server-side wakeup isn't a queue —
+  (the one `Command::Snapshot` round trip that fetches the state a wakeup
+  implies changed — monitors, workspaces, mode, and style in one payload)
+  onto its own short-lived thread instead of running it
+  inline, so the loop re-issues the next `wait_for_change` immediately
+  rather than after that round trip finishes. `Command::WaitForChange`'s server-side wakeup isn't a queue —
   nothing is subscribed while no connection is open — so a change firing
   during that gap used to be silently missed rather than merely delivered
   late; a rapid hotkey burst landed in it often enough to be noticeable
@@ -86,11 +86,12 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   `std::process::exit` alone wouldn't stick, since `KeepAlive` in the plist
   would just have launchd respawn this process right back into the same
   dead end.
-  `ListMonitors`/`ListWorkspaces` (and `Ping`/`ListWindows`) are excluded
+  `Command::Snapshot` (and `Ping`/`ListWindows`, plus the individual
+  read-only queries it bundles) is excluded
   from what counts as "changed" on the server side
   (`tili-daemon/src/main.rs`'s socket command arm) precisely because this
-  poller calls the first two on every single wakeup: without the
-  exclusion, each poll's own read-only queries re-notified every blocked
+  poller calls it on every single wakeup: without the
+  exclusion, each poll's own read-only query re-notified every blocked
   `WaitForChange` connection — including whichever one this same poller
   had just re-subscribed — turning the long-poll design back into a
   continuously-spinning loop the instant the first real change of a
@@ -99,9 +100,9 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   <name>` from a terminal (goes through the identical socket path) staying
   fast throughout.
 - `src/badge.rs`'s `image_for` takes a `&tili_ipc::MenubarStyle`
-  (`fill`/`shape`/`uppercase`), fetched by `poll_daemon` via
-  `Command::MenubarStyle` and cached on `MenuState.style` (kept across a
-  single failed style fetch — same "don't flash a broken state on a
+  (`fill`/`shape`/`uppercase`), carried in `poll_daemon`'s
+  `Command::Snapshot` payload and cached on `MenuState.style` (kept when
+  a payload carries no style — same "don't flash a broken state on a
   hiccup" reasoning as `Snapshot` itself). `fill` picks the pill's drawing
   path in `pill_image` — `Filled` (default) knocks the text out of a solid
   fill via `NSCompositingOperation::DestinationOut`; `Outlined` strokes an

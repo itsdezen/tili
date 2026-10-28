@@ -964,7 +964,15 @@ it already passed that exact check once at its own startup (see
 the system dialog for a *not-yet-decided* grant — a re-check against an
 already-trusted process just reports `true` with no dialog. Read-only, so
 it's excluded from `mutates` in `main.rs`'s socket arm the same way
-`Ping`/`ListWindows`/`ListWorkspaces`/`ListMonitors` are.
+`Ping`/`ListWindows`/`ListWorkspaces`/`ListMonitors`/`Command::Snapshot`
+are.
+
+`Command::Snapshot` is the one read-only arm that composes several existing
+accessors instead of reading one: `SnapshotInfo` bundles
+`list_monitors`/`list_workspaces`/`current_mode`/`menubar_style`, so
+`tili-menubar`'s refresh is one connection and one `dispatch()` focus sync
+instead of four. It's excluded from `mutates` for the same reason those four
+commands are — see [tili-menubar.md](tili-menubar.md).
 
 `src/dispatch.rs` has the single `dispatch(&mut WmState, Command) ->
 Response` function — both the Unix-socket handler and the global-hotkey
