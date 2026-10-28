@@ -1018,9 +1018,16 @@ delivers `NSWorkspaceDidLaunchApplicationNotification`/`DidWakeNotification`
 only when a real `NSApplication.run()` is pumping the main run loop that
 receives it, confirmed on real hardware after those notifications were
 silently never delivered to an `NSApplication`-less process), then spawns a
-background thread that builds its own `tokio::runtime::Runtime` and
+background thread that builds its own multi-thread Tokio runtime with two
+worker threads (`Builder::new_multi_thread().worker_threads(2)`) and
 `block_on`s `async_daemon_main` — the whole daemon body that used to be
-`main()` itself, essentially unchanged otherwise. The real main thread then
+`main()` itself, essentially unchanged otherwise. Two workers rather than the
+one-per-core default: the select loop is driven by the `block_on` thread, so
+the pool only serves spawned tasks (`WaitForChange` long-polls and the
+per-app AX notification streams, both awaiting rather than computing), and a
+second worker keeps those moving while the first is inside a short
+synchronous AX call. `spawn_blocking` wake probes use the blocking pool,
+whose size is independent of the worker count. The real main thread then
 parks in `app.run()`, which never returns.
 
 Because `app.run()` never returns on its own, `async_daemon_main` returning

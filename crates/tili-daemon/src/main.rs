@@ -85,7 +85,18 @@ fn main() {
     let app_event_rx = tili_ax::register_on_main(mtm);
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("failed to build tokio runtime");
+        // Two workers, not the one-per-core default: the select loop is
+        // driven by this `block_on` thread, so the worker pool exists only
+        // for spawned tasks — `WaitForChange` long-polls and the per-app AX
+        // notification streams, both of which await rather than compute. A
+        // second worker keeps those tasks moving while the first is inside a
+        // short synchronous AX call, and the blocking pool that serves
+        // `spawn_blocking` wake probes is sized independently of this count.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
         // Catches a panic anywhere in the daemon body: without this, an
         // unwind past this thread's boundary kills it silently while
         // `app.run()` on the real main thread stays parked forever — a
