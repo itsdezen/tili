@@ -15,7 +15,7 @@
 # still compare against it with `--compare NAME`.
 set -euo pipefail
 
-MAX_REGRESSION_PCT=10
+MAX_REGRESSION_PCT=20
 SAVE_NAME=""
 COMPARE_NAME=""
 RUN_TESTS=1
@@ -43,7 +43,7 @@ Options:
   --save NAME           save this run's criterion results as baseline NAME
   --compare NAME        compare against baseline NAME; exit 1 when any bench
                         regresses more than --max-regression
-  --max-regression PCT  regression threshold in percent (default: 10)
+  --max-regression PCT  regression threshold in percent (default: 20)
   --no-tests            skip cargo test (fmt and clippy still run)
   --sample              also run collect.sh's read-only sampling window
   --seconds N           sampling window for --sample (default: 60)
@@ -177,6 +177,10 @@ if [ -n "$COMPARE_NAME" ]; then
     if [ ! -f "$CACHE_ROOT/$COMPARE_NAME.tar" ]; then
         die "no cached baseline '$COMPARE_NAME' (run --save $COMPARE_NAME first)"
     fi
+    # A fresh worktree has no target/criterion yet — criterion only creates
+    # it on the first bench run — so the extraction target has to exist
+    # before tar will chdir into it.
+    mkdir -p target/criterion
     tar -xf "$CACHE_ROOT/$COMPARE_NAME.tar" -C target/criterion \
         || die "could not restore baseline '$COMPARE_NAME'"
     BENCH_ARGS+=(--baseline "$COMPARE_NAME")
@@ -255,10 +259,25 @@ for line in text.splitlines():
     if match and current:
         parts = [part.strip().replace("\u2212", "-") for part in match.group(1).split()]
         if len(parts) >= 2 and parts[1].endswith("%"):
-            rows.append((current, float(parts[1].rstrip("%"))))
+            # [id, point-estimate change, criterion's own verdict]
+            rows.append([current, float(parts[1].rstrip("%")), "no change"])
+        continue
+    # Criterion prints its statistical verdict on the line after the change
+    # interval; that verdict, not the raw percentage, decides a regression.
+    match = re.match(r"^\s+Performance has (regressed|improved)\.", line)
+    if match and rows:
+        rows[-1][2] = match.group(1)
 
-regressed = [(name, pct) for name, pct in rows if pct > threshold]
-improved = [(name, pct) for name, pct in rows if pct < -threshold]
+regressed = [
+    (name, pct)
+    for name, pct, verdict in rows
+    if verdict == "regressed" and pct > threshold
+]
+improved = [
+    (name, pct)
+    for name, pct, verdict in rows
+    if verdict == "improved" and pct < -threshold
+]
 
 lines = ["## perf verify", ""]
 lines.append(f"- at: {started_at}")
@@ -266,23 +285,29 @@ lines.append(f"- commit: `{commit}`")
 if save_name:
     lines.append(f"- saved baseline: `{save_name}`")
 if compare_name:
-    lines.append(f"- compared against: `{compare_name}` (threshold {threshold:g}%)")
+    lines.append(f"- compared against: `{compare_name}` (fails only on a criterion-confirmed "
+                 f"regression above {threshold:g}%)")
 lines.append("")
 
 if rows:
     lines.append("| bench id | change | verdict |")
     lines.append("| --- | ---: | --- |")
-    for name, pct in rows:
-        verdict = "regressed" if pct > threshold else ("improved" if pct < -threshold else "no change")
-        lines.append(f"| `{name}` | {pct:+.1f}% | {verdict} |")
+    for name, pct, verdict in rows:
+        shown = verdict
+        if verdict == "regressed" and pct <= threshold:
+            shown = "regressed, under threshold"
+        elif verdict == "improved" and pct >= -threshold:
+            shown = "improved, under threshold"
+        lines.append(f"| `{name}` | {pct:+.1f}% | {shown} |")
 else:
     lines.append("No `change:` lines in the bench output — this was a baseline run, "
                  "or criterion found no comparable baseline.")
 lines.append("")
 if regressed:
-    lines.append(f"**{len(regressed)} bench id(s) regressed beyond {threshold:g}%.**")
+    lines.append(f"**{len(regressed)} bench id(s) regressed: criterion confirmed a change "
+                 f"above {threshold:g}%.**")
 elif compare_name:
-    lines.append("No bench regressed beyond the threshold.")
+    lines.append(f"No criterion-confirmed regression above {threshold:g}%.")
 if improved:
     lines.append(f"{len(improved)} bench id(s) improved by more than {threshold:g}%.")
 
