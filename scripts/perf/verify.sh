@@ -15,7 +15,7 @@
 # still compare against it with `--compare NAME`.
 set -euo pipefail
 
-MAX_REGRESSION_PCT=20
+MAX_REGRESSION_PCT=30
 SAVE_NAME=""
 COMPARE_NAME=""
 RUN_TESTS=1
@@ -43,12 +43,17 @@ Options:
   --save NAME           save this run's criterion results as baseline NAME
   --compare NAME        compare against baseline NAME; exit 1 when any bench
                         regresses more than --max-regression
-  --max-regression PCT  regression threshold in percent (default: 20)
+  --max-regression PCT  regression threshold in percent (default: 30)
   --no-tests            skip cargo test (fmt and clippy still run)
   --sample              also run collect.sh's read-only sampling window
   --seconds N           sampling window for --sample (default: 60)
   --report PATH         write the markdown summary to PATH as well
   -h, --help            this help
+
+A regression only fails the run when criterion itself reports one AND the
+point estimate exceeds the threshold. The default is deliberately loose:
+these are sub-microsecond benches, and a busy machine can move one by 20%
+between runs. Re-run a flagged id alone before believing it.
 
 Baselines are cached under ~/.cache/tili-perf/criterion (override with
 TILI_PERF_CACHE) because target/ is per-worktree and gitignored.
