@@ -187,6 +187,23 @@ rss_kb_of() {
     ps -o rss= -p "$1" 2>/dev/null | tr -d '[:space:]'
 }
 
+# RSS counts shared framework pages a process has merely touched, which is why
+# two AppKit processes can differ by tens of MB while their private memory is
+# identical. `vmmap`'s physical footprint is the number that tracks what the
+# process actually costs; best-effort, since it needs task access.
+footprint_mb_of() {
+    local raw
+    raw=$(vmmap -summary "$1" 2>/dev/null \
+        | awk '/^Physical footprint:/ { print $3; exit }')
+    case "$raw" in
+        '' | *[!0-9.]*[MGK]) printf 'n/a' ;;
+        *M) printf '%.1f' "${raw%M}" ;;
+        *K) awk -v kb="${raw%K}" 'BEGIN { printf "%.1f", kb / 1024 }' ;;
+        *G) awk -v gb="${raw%G}" 'BEGIN { printf "%.1f", gb * 1024 }' ;;
+        *) printf 'n/a' ;;
+    esac
+}
+
 # `ps -M` prints one header row followed by one row per thread.
 thread_count_of() {
     local rows
@@ -215,19 +232,19 @@ iso_now() {
 
 emit_sample_row() {
     local name=$1 pid=$2 started_at=$3
-    local finished_at cpu_delta cpu_pct rss_mb threads
+    local finished_at cpu_delta cpu_pct rss_mb footprint_mb threads
 
     if [ -z "$pid" ] || [ -z "$started_at" ]; then
-        printf '| %s | — | not running (skipped) | — | — | — |\n' "$name"
-        printf '%s\t\t\t\t\t\n' "$name" >>"$SAMPLES_TSV"
+        printf '| %s | — | not running (skipped) | — | — | — | — |\n' "$name"
+        printf '%s\t\t\t\t\t\t\n' "$name" >>"$SAMPLES_TSV"
         return
     fi
 
     finished_at=$(cpu_time_of "$pid")
     if [ -z "$finished_at" ]; then
-        printf '| %s | %s | exited during sampling (skipped) | — | — | — |\n' \
+        printf '| %s | %s | exited during sampling (skipped) | — | — | — | — |\n' \
             "$name" "$pid"
-        printf '%s\t\t\t\t\t\n' "$name" >>"$SAMPLES_TSV"
+        printf '%s\t\t\t\t\t\t\n' "$name" >>"$SAMPLES_TSV"
         return
     fi
 
@@ -236,12 +253,14 @@ emit_sample_row() {
     cpu_pct=$(awk -v delta="$cpu_delta" -v window="$ELAPSED" \
         'BEGIN { if (window > 0) printf "%.2f", 100 * delta / window; else printf "0.00" }')
     rss_mb=$(awk -v kb="$(rss_kb_of "$pid")" 'BEGIN { printf "%.1f", kb / 1024 }')
+    footprint_mb=$(footprint_mb_of "$pid")
     threads=$(thread_count_of "$pid")
 
-    printf '| %s | %s | %s | %s | %s | %s |\n' \
-        "$name" "$pid" "$cpu_delta" "$cpu_pct" "$rss_mb" "$threads"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$name" "$pid" "$cpu_delta" "$cpu_pct" "$rss_mb" "$threads" >>"$SAMPLES_TSV"
+    printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
+        "$name" "$pid" "$cpu_delta" "$cpu_pct" "$rss_mb" "$footprint_mb" "$threads"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$pid" "$cpu_delta" "$cpu_pct" "$rss_mb" "$footprint_mb" "$threads" \
+        >>"$SAMPLES_TSV"
 }
 
 confirm_switch() {
@@ -348,8 +367,8 @@ printf -- '- daemon log: `%s`\n\n' "$DAEMON_ERR_LOG"
 if [ -z "$DAEMON_PID" ] && [ -z "$MENUBAR_PID" ]; then
     printf '> No tili processes are running — nothing sampled.\n\n'
 else
-    printf '| process | pid | cpu time delta (s) | avg cpu (%%) | rss (MB) | threads |\n'
-    printf '| --- | ---: | ---: | ---: | ---: | ---: |\n'
+    printf '| process | pid | cpu time delta (s) | avg cpu (%%) | rss (MB) | footprint (MB) | threads |\n'
+    printf '| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n'
     emit_sample_row "tili-daemon" "$DAEMON_PID" "$DAEMON_T0"
     emit_sample_row "tili-menubar" "$MENUBAR_PID" "$MENUBAR_T0"
     printf '\n'
@@ -592,7 +611,15 @@ import sys
 samples = []
 with open(samples_path, encoding="utf-8") as samples_file:
     for line in samples_file:
-        name, pid, cpu_delta, cpu_pct, rss_mb, threads = line.rstrip("\n").split("\t")
+        (
+            name,
+            pid,
+            cpu_delta,
+            cpu_pct,
+            rss_mb,
+            footprint_mb,
+            threads,
+        ) = line.rstrip("\n").split("\t")
         running = bool(pid)
         samples.append(
             {
@@ -602,6 +629,9 @@ with open(samples_path, encoding="utf-8") as samples_file:
                 "cpu_time_delta_s": float(cpu_delta) if cpu_delta else None,
                 "avg_cpu_pct": float(cpu_pct) if cpu_pct else None,
                 "rss_mb": float(rss_mb) if rss_mb else None,
+                "physical_footprint_mb": (
+                    float(footprint_mb) if footprint_mb not in ("", "n/a") else None
+                ),
                 "threads": int(threads) if threads.isdigit() else None,
             }
         )

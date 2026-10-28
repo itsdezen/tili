@@ -127,7 +127,18 @@ frame writes, daemon dispatch, event latency, or animation tween steps.
 `ps -o rss=` for each process, in KiB, divided by 1024 and shown as MB. It
 is a single snapshot at the end of the sampling window, so it reflects the
 process's steady state but not allocator churn during the window. It
-includes shared library pages the process has touched.
+includes shared library pages the process has touched, which is why it is
+**not** a measure of what a process costs: the two tili processes report
+~40 MB and ~55 MB RSS while their physical footprints are ~10 MB and
+~13 MB. Compare footprint when the question is memory use; keep RSS only as
+a rough trend.
+
+### Physical footprint
+
+`vmmap -summary <pid>`, first `Physical footprint:` line, in MB. This is
+dirty/private memory the process is actually charged for, and it is the
+number to use for "did this change memory use". It is best-effort (`n/a`
+when task access is denied).
 
 ### Threads
 
@@ -293,6 +304,20 @@ user waits on. The ~8% CPU difference is inside run-to-run noise at load
 ~3.4, and the change added a positional wire contract plus a fallback path,
 so it was not worth the risk. The gated scan trace stayed in, because it is
 what made this measurable.
+
+## Menubar memory: no leak, and RSS was the wrong metric
+
+`tili-menubar` looked like it cost 47-55 MB. `vmmap -summary` puts its
+physical footprint at 13.2 MB (peak 13.3 MB) and the daemon's at 9.7 MB;
+the rest of the RSS figure is shared framework pages both processes have
+merely touched. Driving 200 menu-bar refreshes (`tili flatten`, which
+notifies without moving a window) moved RSS by 144 KB — allocator noise,
+not growth.
+
+So there is nothing to reclaim here, and the RSS column in the earlier
+before/after table was measuring shared pages: its 47.5 -> 51.1 MB delta was
+noise. `collect.sh` now reports physical footprint next to RSS for that
+reason.
 
 ## Deliberately not measured
 
