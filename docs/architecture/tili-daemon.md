@@ -298,8 +298,10 @@ resolved to its successor yet — an `AxWindow::system_focused_id` check
 placed here was tried on real hardware and declined every time. The pid
 check needs no AX call and no timing at all, and the sibling it records via
 `sync_focus_to_window` only has to be reasonable: `dispatch()`'s
-`sync_focus_from_frontmost` corrects the bookkeeping before the user's very
-next command. Both this and the liveness check above read `self.windows`
+`sync_focus_from_frontmost` corrects the bookkeeping before the next command
+that acts on focus (a read-only query skipping it doesn't matter — none of
+them reads `workspace_focus`). Both this and the liveness check above read
+`self.windows`
 (real `AxWindow` handles), so neither is unit-testable — `WmState`'s tests
 never have one; they're verified on hardware.
 
@@ -501,11 +503,16 @@ so it's not just a focus-pointer update anymore the way plain `Split`
 navigation is.
 
 `dispatch()` calls `WmState::sync_focus_from_frontmost()` before the
-command match — resolves which window real macOS currently considers
-focused (via `tili_ax::AxWindow::system_focused_id`, an
+command match for every command that can act on the result — resolves
+which window real macOS currently considers focused (via
+`tili_ax::AxWindow::system_focused_id`, an
 `AXUIElementCreateSystemWide`-based query, not "which app is frontmost, then
 that app's own focused window") and updates `workspace_focus`
-synchronously, immediately before that command runs. Reads
+synchronously, immediately before that command runs. The read-only queries
+skip it (`dispatch::needs_focus_sync`): none of their payloads reads
+`workspace_focus` or a tree's recorded focus, and `tili-menubar`'s refresh
+issues one (`Command::Snapshot`) every time it wakes up, so the system-wide
+AX query was being paid per refresh for nothing. Reads
 `kAXFocusedUIElementAttribute`, not `kAXFocusedWindowAttribute` — confirmed
 on real hardware that the system-wide element never populates the latter
 at all (always returns no value, regardless of what's actually focused;
@@ -532,7 +539,8 @@ confirmed on real hardware that a background poll/notification updating
 focus asynchronously has an unavoidable race against the very next hotkey
 press, since there's no ordering guarantee between "the background sync
 noticed the click" and "the keypress got processed." Other AX-based tiling
-WMs resolve this the same way, synchronously at the top of every command —
+WMs resolve this the same way, synchronously at the top of every command
+that acts on focus —
 this is the fix for a long-reported "the first direction key press after
 switching windows manually does nothing/goes the wrong way" bug that
 several reactive-sync attempts (an AX per-window notification, an
@@ -544,7 +552,10 @@ resync tick) all failed to fully close: even a reliably-delivered push
 notification still races the very next hotkey press, since there's no
 ordering guarantee between "the notification arrived" and "the keypress got
 processed" — only a synchronous, on-demand resolve at the top of every
-command closes that gap. `sync_focus_to_window` (the shared core both
+command that acts on focus closes that gap. A read-only query skipping it
+can't widen the gap: the next mutating command still resolves focus
+synchronously before it runs, and the only thing the skip leaves stale is
+that same bookkeeping. `sync_focus_to_window` (the shared core both
 `sync_focus_from_frontmost` and `sync_focus_from_pid` funnel into) updates
 `workspace_focus` for both `Tiled` and `Floating` placements — since
 `Node::Floating` gave floating windows a tree node too (see the
@@ -970,9 +981,9 @@ are.
 `Command::Snapshot` is the one read-only arm that composes several existing
 accessors instead of reading one: `SnapshotInfo` bundles
 `list_monitors`/`list_workspaces`/`current_mode`/`menubar_style`, so
-`tili-menubar`'s refresh is one connection and one `dispatch()` focus sync
-instead of four. It's excluded from `mutates` for the same reason those four
-commands are — see [tili-menubar.md](tili-menubar.md).
+`tili-menubar`'s refresh is one connection instead of four (and, being
+read-only, no focus sync at all). It's excluded from `mutates` for the same
+reason those four commands are — see [tili-menubar.md](tili-menubar.md).
 
 `src/dispatch.rs` has the single `dispatch(&mut WmState, Command) ->
 Response` function — both the Unix-socket handler and the global-hotkey

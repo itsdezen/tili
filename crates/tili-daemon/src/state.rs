@@ -2396,20 +2396,22 @@ impl WmState {
     }
 
     /// Re-resolves `workspace_focus` from whichever window real macOS
-    /// currently considers focused, *before* any command runs — not a
-    /// reactive sync triggered by a notification/poll event arriving at
-    /// some later, unpredictable time. Confirmed on real hardware that the
-    /// reactive version has an unavoidable race: a background poll/notification
-    /// updating `workspace_focus` asynchronously can easily still be stale
-    /// by the time a hotkey fires moments later, since there's no ordering
-    /// guarantee between "the poll noticed the click" and "the user's next
-    /// keypress got processed." Other AX-based tiling WMs resolve this the
-    /// same way, synchronously at the top of every command — resolve
-    /// reality immediately before using it, rather than trusting a cache
-    /// that was last updated by some independent, unsynchronized
-    /// background event.
+    /// currently considers focused, *before* any command that acts on it
+    /// runs — not a reactive sync triggered by a notification/poll event
+    /// arriving at some later, unpredictable time. Confirmed on real
+    /// hardware that the reactive version has an unavoidable race: a
+    /// background poll/notification updating `workspace_focus`
+    /// asynchronously can easily still be stale by the time a hotkey fires
+    /// moments later, since there's no ordering guarantee between "the poll
+    /// noticed the click" and "the user's next keypress got processed."
+    /// Other AX-based tiling WMs resolve this the same way, synchronously at
+    /// the top of every command — resolve reality immediately before using
+    /// it, rather than trusting a cache that was last updated by some
+    /// independent, unsynchronized background event.
     /// Called once at the top of `dispatch()`, covering both socket- and
-    /// hotkey-triggered commands.
+    /// hotkey-triggered commands; read-only queries skip it there
+    /// (`dispatch::needs_focus_sync`), since none of them reads
+    /// `workspace_focus`.
     ///
     /// Uses `tili_ax::AxWindow::system_focused_id` (the system-wide
     /// `kAXFocusedUIElementAttribute`, not "which app is frontmost then that
@@ -3710,7 +3712,8 @@ impl WmState {
     /// window is not something macOS can hand focus to. Which one is
     /// returned when the app has several here is deliberately unimportant —
     /// macOS picks its own, and `dispatch()`'s `sync_focus_from_frontmost`
-    /// corrects the bookkeeping before the user's very next command.
+    /// corrects the bookkeeping before the next command that acts on focus
+    /// (read-only queries skip that sync, and none of them reads it).
     fn same_app_window_in(&self, workspace: &str, pid: i32) -> Option<WindowId> {
         self.windows
             .iter()

@@ -21,13 +21,20 @@ pub fn dispatch(state: &mut WmState, command: Command) -> Response {
 
 fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
     // Resolves `WmState`'s focus bookkeeping against whatever window real
-    // macOS currently considers focused, synchronously, before *any*
-    // command runs — see `WmState::sync_focus_from_frontmost`'s doc comment
-    // for why this can't be a reactive background sync instead (an
-    // unavoidable race against the very next hotkey press). Other AX-based
-    // tiling WMs resolve this the same way: a synchronous focus resync at
-    // the top of every command, not a reactive background sync.
-    state.sync_focus_from_frontmost();
+    // macOS currently considers focused, synchronously, before any command
+    // that can act on it runs (`needs_focus_sync`) — see
+    // `WmState::sync_focus_from_frontmost`'s doc comment for why this can't
+    // be a reactive background sync instead (an unavoidable race against
+    // the very next hotkey press). Other AX-based tiling WMs resolve this
+    // the same way: a synchronous focus resync at the top of every command
+    // that acts on focus, not a reactive background sync. The read-only
+    // queries skip it: none of their payloads reads the focus bookkeeping
+    // it updates, and `tili-menubar` issues one (`Command::Snapshot`) on
+    // every refresh, so syncing there is a system-wide AX query per refresh
+    // that nothing reads.
+    if needs_focus_sync(&command) {
+        state.sync_focus_from_frontmost();
+    }
     // A command reaching here that isn't one of the read-only queries
     // `tili-menubar`'s own long-poll-driven refresh issues is unambiguous
     // proof of real user activity (a hotkey press or an explicit CLI/socket
@@ -122,6 +129,20 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
     }
 }
 
+/// Whether `dispatch_inner` has to resolve focus from real macOS state
+/// before running `command`.
+///
+/// Every mutating command does: they act on "whatever's currently focused",
+/// and the bookkeeping is only correct as of the last sync. Read-only
+/// queries skip the system-wide AX query outright, because none of their
+/// payloads reads the focus bookkeeping (it's `workspace_focus` plus each
+/// tree's recorded focus, and no query reports either), so there's no
+/// exception list to maintain here — read-only and "doesn't read focus" are
+/// the same set.
+fn needs_focus_sync(command: &Command) -> bool {
+    !crate::command_is_read_only(command)
+}
+
 fn to_tree_direction(dir: tili_ipc::Direction) -> tili_tree::Direction {
     match dir {
         tili_ipc::Direction::Left => tili_tree::Direction::Left,
@@ -159,6 +180,46 @@ fn payload_response<T: serde::Serialize>(value: T) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every read-only variant `command_is_read_only` knows about. Kept as a
+    /// literal list (rather than derived) so adding a variant forces a
+    /// deliberate decision here about whether it reads the focus bookkeeping.
+    fn read_only_commands() -> Vec<Command> {
+        vec![
+            Command::Ping,
+            Command::ListWindows,
+            Command::ListWorkspaces,
+            Command::ListMonitors,
+            Command::Doctor,
+            Command::CurrentMode,
+            Command::MenubarStyle,
+            Command::Snapshot,
+        ]
+    }
+
+    #[test]
+    fn read_only_commands_skip_the_focus_sync() {
+        for command in read_only_commands() {
+            assert!(
+                !needs_focus_sync(&command),
+                "{command:?} doesn't read the focus bookkeeping, so it must not pay for the sync"
+            );
+        }
+    }
+
+    #[test]
+    fn mutating_commands_need_the_focus_sync() {
+        assert!(needs_focus_sync(&Command::Focus(tili_ipc::Direction::Left)));
+        assert!(needs_focus_sync(&Command::WorkspaceSwitch(
+            "work".to_string()
+        )));
+        // Mode changes don't act on focus either, but they're mutating
+        // commands: the predicate keys off read-only-ness rather than a
+        // second "actually reads focus" list, so there's nothing extra to
+        // keep in step.
+        assert!(needs_focus_sync(&Command::ModeEnter("manage".to_string())));
+        assert!(needs_focus_sync(&Command::ModeExit));
+    }
 
     #[test]
     fn ping_returns_ok() {

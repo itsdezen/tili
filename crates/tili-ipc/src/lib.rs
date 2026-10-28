@@ -150,11 +150,12 @@ pub enum Command {
     MenubarStyle,
     /// One consolidated read of everything `tili-menubar`'s refresh needs —
     /// monitors, workspaces, current mode, and menubar style — in a single
-    /// round trip (see `SnapshotInfo`). `dispatch()` runs its focus sync
-    /// once per command, and each command costs a fresh socket connection,
-    /// so the four separate queries this replaces cost four of each per
-    /// refresh. Read-only, so it's excluded from `WaitForChange`
-    /// change-detection alongside those four.
+    /// round trip (see `SnapshotInfo`). Each command costs a fresh socket
+    /// connection, so the four separate queries this replaced cost four of
+    /// those per refresh. Being read-only it also skips `dispatch()`'s focus
+    /// sync (see `needs_focus_sync` in `tili-daemon`), so a refresh now
+    /// costs no focus query at all. Read-only, so it's excluded from
+    /// `WaitForChange` change-detection alongside those four.
     Snapshot,
     /// Gracefully stops the daemon: responds `Ok` (so a client waiting on
     /// the reply doesn't hang) before the process exits. Handled directly
@@ -285,8 +286,8 @@ pub struct MenubarStyle {
 }
 
 /// `Command::Snapshot`'s payload: the four reads `tili-menubar`'s refresh
-/// previously issued as separate commands, bundled so one connection and
-/// one `dispatch()` focus sync serve the whole refresh.
+/// previously issued as separate commands, bundled so one connection serves
+/// the whole refresh (and, being read-only, with no focus sync at all).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotInfo {
     pub monitors: Vec<MonitorInfo>,

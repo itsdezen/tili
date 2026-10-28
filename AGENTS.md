@@ -154,8 +154,10 @@ signing.**
   mutation) and `Command::WaitForChange` (spawned into its own task that
   never touches `WmState` — see that command's doc comment in `tili-ipc`).
   `dispatch()` syncs
-  focus from real macOS frontmost state synchronously before every
-  command — deliberately not a reactive background sync (race-prone;
+  focus from real macOS frontmost state synchronously before every command
+  that acts on it (`dispatch::needs_focus_sync` — read-only queries skip it,
+  since none of their payloads reads the focus bookkeeping) — deliberately
+  not a reactive background sync (race-prone;
   see docs/architecture/tili-daemon.md). `main.rs`'s real `fn main()` sets
   up a real `NSApplication` on the process main thread and hands the whole
   daemon body to `async_daemon_main` on a background thread with its own

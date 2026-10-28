@@ -24,8 +24,8 @@ permission grants, and the previous config load's skipped-rule warnings) —
 `Command::Snapshot`'s payload, `SnapshotInfo`, bundles monitors,
 workspaces, the active mode, and the menubar style into one read. It exists
 purely so `tili-menubar`'s refresh costs one socket connection and one
-`dispatch()` (whose focus sync is one system-wide AX query) instead of four
-— the individual `ListMonitors`/`ListWorkspaces`/`CurrentMode`/
+`dispatch()` (and, being read-only, no focus sync at all) instead of four —
+the individual `ListMonitors`/`ListWorkspaces`/`CurrentMode`/
 `MenubarStyle` commands stay in the protocol for every other client. Its
 `style` field is `Option` so a payload without style data keeps the badge's
 previously applied style rather than resetting it to the default, the same

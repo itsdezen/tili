@@ -369,7 +369,14 @@ async fn async_daemon_main(
                         if let Err(e) = socket::write_response(&mut stream, &response).await {
                             eprintln!("tili-daemon: failed to write response: {e}");
                         }
-                        sync_active_combos(&active_combos, &state);
+                        // Only a mutating command can change the current
+                        // mode or its bindings, so only it needs the shared
+                        // set rebuilt — a read-only query leaves both
+                        // untouched, and `tili-menubar`'s refresh issues one
+                        // of those (`Snapshot`) every time it wakes up.
+                        if mutates {
+                            sync_active_combos(&active_combos, &state);
+                        }
                         changed = mutates || pids_changed;
                     }
                     Err(e) => eprintln!("tili-daemon: failed to read command: {e}"),
@@ -759,8 +766,9 @@ async fn handle_event(
         }
         WmEvent::WindowFocused { .. } => {
             // No-op: `WmState`'s own focus tracking is instead resolved
-            // synchronously at the top of every `dispatch()` call (see
-            // `WmState::sync_focus_from_frontmost`) — confirmed on real
+            // synchronously at the top of every `dispatch()` call that acts
+            // on it (see `WmState::sync_focus_from_frontmost` and
+            // `dispatch::needs_focus_sync`) — confirmed on real
             // hardware that resyncing reactively, whenever this event
             // happens to arrive, has an unavoidable race against the next
             // hotkey press, since there's no ordering guarantee between the
@@ -886,5 +894,50 @@ mod tests {
         assert!(!command_is_read_only(&Command::Focus(
             tili_ipc::Direction::Left
         )));
+    }
+
+    /// The socket arm only rebuilds the shared combo set for mutating
+    /// commands, so a read-only query has to leave the set it's built from
+    /// untouched — otherwise skipping the rebuild would silently leave the
+    /// hotkey tap dispatching against a stale mode's bindings.
+    ///
+    /// `Doctor` is left out of the dispatch loop on purpose: its arm calls
+    /// the *prompting* `AXIsProcessTrustedWithOptions` check, which a test
+    /// binary must never trigger. It only reads config/permission state, so
+    /// it can't enter/exit a mode either.
+    #[test]
+    fn read_only_commands_leave_active_combos_untouched() {
+        let mut state = WmState::default();
+        let config = tili_config::parse(
+            r#"
+            keybindings mode="main" {
+                bind "alt-shift-semicolon" "mode resize"
+            }
+            "#,
+        )
+        .unwrap();
+        state.apply_config(&config);
+        let before = state.active_key_combos();
+        assert!(
+            !before.is_empty(),
+            "fixture needs a binding, or a change couldn't be observed"
+        );
+
+        for command in [
+            Command::Ping,
+            Command::ListWindows,
+            Command::ListWorkspaces,
+            Command::ListMonitors,
+            Command::CurrentMode,
+            Command::MenubarStyle,
+            Command::Snapshot,
+        ] {
+            dispatch(&mut state, command);
+            assert_eq!(
+                state.active_key_combos(),
+                before,
+                "a read-only command changed the set the hotkey tap reads"
+            );
+        }
     }
 }
