@@ -1,15 +1,21 @@
 use tili_ipc::{Command, Response};
 
 use crate::state::WmState;
+use crate::trace;
 
 pub fn dispatch(state: &mut WmState, command: Command) -> Response {
     let dispatch_start = std::time::Instant::now();
-    let command_name = format!("{command:?}");
+    // `dispatch_inner` consumes `command`, so its debug name has to be built
+    // first — only when tracing, since that `Debug` formatting and its
+    // allocation are the per-command cost this exists to avoid.
+    let command_name = trace::enabled().then(|| format!("{command:?}"));
     let response = dispatch_inner(state, command);
-    eprintln!(
-        "tili-daemon: dispatch {command_name} took {:?}",
-        dispatch_start.elapsed()
-    );
+    if let Some(command_name) = command_name {
+        trace::log(format_args!(
+            "tili-daemon: dispatch {command_name} took {:?}",
+            dispatch_start.elapsed()
+        ));
+    }
     response
 }
 

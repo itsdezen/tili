@@ -9,6 +9,8 @@ use tili_ax::{
 use tili_ipc::{Command, MonitorInfo, RectInfo, WindowInfo, WorkspaceInfo};
 use tili_tree::{Direction, Gaps, NodeId, Rect, Tree, WindowId};
 
+use crate::trace;
+
 /// The workspace new windows land in, and the one active at daemon startup.
 /// Workspaces declared in config (M5) are created up front by `apply_config`;
 /// this is just the one that's active before any config or explicit switch
@@ -3386,16 +3388,16 @@ impl WmState {
         self.frame_setter.set_suppressed(true);
         let phase_start = Instant::now();
         self.relayout_monitor_concurrently(monitor_id);
-        eprintln!(
+        trace::log(format_args!(
             "tili-daemon: switch_workspace {name} phase=incoming_relayout took {:?}",
             phase_start.elapsed()
-        );
+        ));
         let phase_start = Instant::now();
         self.reposition_floating_for_monitor_concurrently(monitor_id);
-        eprintln!(
+        trace::log(format_args!(
             "tili-daemon: switch_workspace {name} phase=incoming_floating_reposition took {:?}",
             phase_start.elapsed()
-        );
+        ));
 
         // Raised *before* either outgoing park loop below, not after —
         // `raise_focused` changes z-order/keyboard focus only, it doesn't
@@ -3417,19 +3419,19 @@ impl WmState {
             self.set_focused_node(node);
             let phase_start = Instant::now();
             self.raise_focused();
-            eprintln!(
+            trace::log(format_args!(
                 "tili-daemon: switch_workspace {name} phase=raise_focused took {:?}",
                 phase_start.elapsed()
-            );
+            ));
         }
 
         if swap_monitor.is_none() {
             let phase_start = Instant::now();
             self.park_concurrently(&outgoing_floating);
-            eprintln!(
+            trace::log(format_args!(
                 "tili-daemon: switch_workspace {name} phase=outgoing_floating_park took {:?}",
                 phase_start.elapsed()
-            );
+            ));
         }
 
         if let Some(swap_id) = swap_monitor {
@@ -3439,23 +3441,23 @@ impl WmState {
             // elsewhere would just be a second, needless flash).
             let phase_start = Instant::now();
             self.relayout_monitor_concurrently(swap_id);
-            eprintln!(
+            trace::log(format_args!(
                 "tili-daemon: switch_workspace {name} phase=swap_relayout took {:?}",
                 phase_start.elapsed()
-            );
+            ));
             let phase_start = Instant::now();
             self.reposition_floating_for_monitor_concurrently(swap_id);
-            eprintln!(
+            trace::log(format_args!(
                 "tili-daemon: switch_workspace {name} phase=swap_floating_reposition took {:?}",
                 phase_start.elapsed()
-            );
+            ));
         } else {
             let phase_start = Instant::now();
             self.park_concurrently(&outgoing_tiled);
-            eprintln!(
+            trace::log(format_args!(
                 "tili-daemon: switch_workspace {name} phase=outgoing_tiled_park took {:?}",
                 phase_start.elapsed()
-            );
+            ));
         }
 
         // Kept suppressed through the `swap_monitor` branch above too, not
@@ -3468,10 +3470,10 @@ impl WmState {
         // drag it away from the frame just written here.
         self.frame_setter.set_suppressed(false);
 
-        eprintln!(
+        trace::log(format_args!(
             "tili-daemon: switch_workspace {name} total took {:?}",
             switch_start.elapsed()
-        );
+        ));
         Ok(())
     }
 
@@ -4174,10 +4176,10 @@ impl WmState {
                     let id = window.id();
                     let write_start = Instant::now();
                     f(&mut window, target);
-                    eprintln!(
+                    trace::log(format_args!(
                         "tili-daemon: write_windows_concurrently window={id} took {:?}",
                         write_start.elapsed()
-                    );
+                    ));
                     window
                 })
             })
@@ -4187,10 +4189,10 @@ impl WmState {
                 self.windows.insert(window.id(), window);
             }
         }
-        eprintln!(
+        trace::log(format_args!(
             "tili-daemon: write_windows_concurrently windows={window_count} join took {:?}",
             join_start.elapsed()
-        );
+        ));
     }
 
     /// `switch_workspace`-only variant of `park`: the bookkeeping that

@@ -1,6 +1,7 @@
 mod dispatch;
 mod socket;
 mod state;
+mod trace;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -710,14 +711,18 @@ async fn handle_event(
             pending_pids.insert(pid);
         }
         WmEvent::AppTerminated { pid } => {
-            eprintln!("tili-daemon: NSWorkspace AppTerminated pid={pid}");
+            trace::log(format_args!(
+                "tili-daemon: NSWorkspace AppTerminated pid={pid}"
+            ));
             // The process is gone — no point rescanning a pid that was
             // merely queued for one.
             pending_pids.remove(&pid);
             state.remove_app(pid);
         }
         WmEvent::AppLaunched { pid, .. } => {
-            eprintln!("tili-daemon: NSWorkspace AppLaunched pid={pid}");
+            trace::log(format_args!(
+                "tili-daemon: NSWorkspace AppLaunched pid={pid}"
+            ));
             // The watcher always follows this with a `WindowsChanged` for
             // the same pid once it has windows to report — this just marks
             // `pid` in `pending_launch_pids` in the meantime, so
@@ -727,15 +732,17 @@ async fn handle_event(
             state.note_app_launched(pid);
         }
         WmEvent::SystemDidWake => {
-            eprintln!("tili-daemon: NSWorkspace SystemDidWake received");
+            trace::log(format_args!(
+                "tili-daemon: NSWorkspace SystemDidWake received"
+            ));
             state.note_system_wake().await;
         }
         WmEvent::ScreenLocked => {
-            eprintln!("tili-daemon: screen locked");
+            trace::log(format_args!("tili-daemon: screen locked"));
             state.note_screen_locked();
         }
         WmEvent::ScreenUnlocked => {
-            eprintln!("tili-daemon: screen unlocked");
+            trace::log(format_args!("tili-daemon: screen unlocked"));
             state.note_screen_unlocked().await;
         }
         WmEvent::WindowFocused { .. } => {
@@ -749,7 +756,9 @@ async fn handle_event(
             // synchronous resync, not a fallback for it.
         }
         WmEvent::FrontmostAppChanged { pid } => {
-            eprintln!("tili-daemon: NSWorkspace FrontmostAppChanged pid={pid}");
+            trace::log(format_args!(
+                "tili-daemon: NSWorkspace FrontmostAppChanged pid={pid}"
+            ));
             // Unlike `WindowFocused` above, this fires for a pure OS-level
             // frontmost-app change (Cmd-Tab, Mission Control/Control Center)
             // that would otherwise never route through `dispatch()` at all

@@ -16,6 +16,7 @@ set -euo pipefail
 
 SAMPLE_SECONDS=60
 SWITCH_COUNT=0
+COMMAND_COUNT=0
 JSON_PATH=""
 TILI_BIN="${TILI_BIN:-tili}"
 DAEMON_ERR_LOG="${HOME}/Library/Logs/tili/daemon.err.log"
@@ -31,12 +32,18 @@ RESTORE_FAILED=0
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/perf/collect.sh [--seconds N] [--switch N] [--json PATH]
+Usage: scripts/perf/collect.sh [--seconds N] [--commands N] [--switch N] [--json PATH]
 
   --seconds N   read-only sampling window (default: 60)
+  --commands N  additionally send `tili ping` N times and report the
+                round-trip p50/p95 plus daemon.err.log growth per command.
+                Read-only: `ping` never moves windows, so this never prompts.
   --switch N    additionally switch workspace N times, with confirmation;
                 this MOVES REAL WINDOWS. N must be > 0 to take effect.
   --json PATH   also write the same readings as JSON to PATH.
+
+The command phase measures a full CLI round trip, same as the switch phase:
+process startup, socket connect, daemon dispatch, and reading the reply.
 
 The switch phase uses this repo's `tili workspace <name>` subcommand (there
 is no `tili switch`; see crates/tili-cli/src/main.rs). It cycles through the
@@ -100,6 +107,15 @@ while [ "$#" -gt 0 ]; do
             SAMPLE_SECONDS=${1#*=}
             shift
             ;;
+        --commands)
+            [ "$#" -ge 2 ] || die "--commands needs a value"
+            COMMAND_COUNT=$2
+            shift 2
+            ;;
+        --commands=*)
+            COMMAND_COUNT=${1#*=}
+            shift
+            ;;
         --switch)
             [ "$#" -ge 2 ] || die "--switch needs a value"
             SWITCH_COUNT=$2
@@ -129,6 +145,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 is_positive_int "$SAMPLE_SECONDS" || die "--seconds must be a positive integer"
+is_nonnegative_int "$COMMAND_COUNT" || die "--commands must be a non-negative integer"
 is_nonnegative_int "$SWITCH_COUNT" || die "--switch must be a non-negative integer"
 
 command -v python3 >/dev/null 2>&1 \
@@ -265,6 +282,15 @@ confirm_switch() {
 DAEMON_PID=$(pid_of tili-daemon)
 MENUBAR_PID=$(pid_of tili-menubar)
 
+if [ "$COMMAND_COUNT" -gt 0 ]; then
+    if [ -z "$DAEMON_PID" ]; then
+        die "--commands requires a running tili-daemon to ping"
+    fi
+    if [ ! -x "$TILI_BIN" ] && ! command -v "$TILI_BIN" >/dev/null 2>&1; then
+        die "--commands requires the tili CLI, but '$TILI_BIN' was not found"
+    fi
+fi
+
 if [ "$SWITCH_COUNT" -gt 0 ] && [ -n "$DAEMON_PID" ] \
     && [ ! -x "$TILI_BIN" ] && ! command -v "$TILI_BIN" >/dev/null 2>&1; then
     die "--switch requires the tili CLI, but '$TILI_BIN' was not found"
@@ -327,6 +353,79 @@ else
     emit_sample_row "tili-daemon" "$DAEMON_PID" "$DAEMON_T0"
     emit_sample_row "tili-menubar" "$MENUBAR_PID" "$MENUBAR_T0"
     printf '\n'
+fi
+
+# ---------------------------------------------------------------------------
+# Read-only command round-trip (`ping` never moves windows)
+# ---------------------------------------------------------------------------
+
+COMMANDS_MEASURED=0
+CMD_MEASURED_COUNT=""
+CMD_P50_MS=""
+CMD_P95_MS=""
+CMD_LOG_BEFORE=0
+CMD_LOG_AFTER=0
+CMD_LOG_GROWTH=0
+CMD_PER_COMMAND=""
+
+if [ "$COMMAND_COUNT" -gt 0 ]; then
+    printf '## command round-trip\n\n'
+    CMD_LOG_BEFORE=$(file_size_of "$DAEMON_ERR_LOG")
+    if SUMMARY=$(python3 - "$TILI_BIN" "$COMMAND_COUNT" <<'PY'
+import subprocess
+import sys
+import time
+
+tili = sys.argv[1]
+count = int(sys.argv[2])
+times = []
+for _ in range(count):
+    started = time.perf_counter()
+    result = subprocess.run(
+        [tili, "ping"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if result.returncode != 0:
+        sys.stderr.write(
+            "collect.sh: tili ping failed: %s\n"
+            % (result.stderr.strip() or "no error output")
+        )
+        sys.exit(1)
+    times.append(elapsed_ms)
+
+def nearest_rank(values, percentile):
+    ordered = sorted(values)
+    rank = max(1, -(-len(ordered) * percentile // 100))
+    return ordered[rank - 1]
+
+p50 = nearest_rank(times, 50)
+p95 = nearest_rank(times, 95)
+print("%d %.3f %.3f" % (len(times), p50, p95))
+PY
+    ); then
+        COMMANDS_MEASURED=1
+        read -r CMD_MEASURED_COUNT CMD_P50_MS CMD_P95_MS <<<"$SUMMARY"
+    else
+        printf '> Command measurement failed; see stderr above.\n\n' >&2
+    fi
+    CMD_LOG_AFTER=$(file_size_of "$DAEMON_ERR_LOG")
+    CMD_LOG_GROWTH=$((CMD_LOG_AFTER - CMD_LOG_BEFORE))
+    CMD_PER_COMMAND=$(awk -v bytes="$CMD_LOG_GROWTH" -v count="$CMD_MEASURED_COUNT" \
+        'BEGIN { if (count > 0) printf "%.1f", bytes / count; else printf "n/a" }')
+
+    printf '| commands | p50 (ms) | p95 (ms) | daemon.err.log growth (B) | per command (B) |\n'
+    printf '| ---: | ---: | ---: | ---: | ---: |\n'
+    if [ "$COMMANDS_MEASURED" = "1" ]; then
+        printf '| %s | %s | %s | %s | %s |\n\n' \
+            "$CMD_MEASURED_COUNT" "$CMD_P50_MS" "$CMD_P95_MS" \
+            "$CMD_LOG_GROWTH" "$CMD_PER_COMMAND"
+    else
+        printf '| %s | n/a | n/a | %s | %s |\n\n' \
+            "$COMMAND_COUNT" "$CMD_LOG_GROWTH" "$CMD_PER_COMMAND"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -459,8 +558,9 @@ fi
 if [ -n "$JSON_PATH" ]; then
     python3 - "$JSON_PATH" "$SAMPLES_TSV" "$STARTED_AT" "$HOST" "$MACOS_VERSION" \
         "$MACOS_BUILD" "$COMMIT" "$TILI_VERSION" "$SAMPLE_SECONDS" "$ELAPSED" \
-        "$SWITCH_MEASURED" "$P50_MS" "$P95_MS" "$LOG_BEFORE" "$LOG_AFTER" \
-        "${RESTORE_WORKSPACE:-}" <<'PY'
+        "$COMMANDS_MEASURED" "$CMD_MEASURED_COUNT" "$CMD_P50_MS" "$CMD_P95_MS" \
+        "$CMD_LOG_BEFORE" "$CMD_LOG_AFTER" "$SWITCH_MEASURED" "$P50_MS" \
+        "$P95_MS" "$LOG_BEFORE" "$LOG_AFTER" "${RESTORE_WORKSPACE:-}" <<'PY'
 import json
 import sys
 
@@ -475,6 +575,12 @@ import sys
     tili_version,
     sample_seconds,
     elapsed,
+    commands_measured,
+    cmd_count,
+    cmd_p50_ms,
+    cmd_p95_ms,
+    cmd_log_before,
+    cmd_log_after,
     switch_measured,
     p50_ms,
     p95_ms,
@@ -500,6 +606,18 @@ with open(samples_path, encoding="utf-8") as samples_file:
             }
         )
 
+commands = None
+if commands_measured == "1":
+    count = int(cmd_count)
+    growth = int(cmd_log_after) - int(cmd_log_before)
+    commands = {
+        "count": count,
+        "p50_ms": float(cmd_p50_ms),
+        "p95_ms": float(cmd_p95_ms),
+        "daemon_err_log_growth_bytes": growth,
+        "daemon_err_log_growth_per_command_bytes": round(growth / count, 1),
+    }
+
 switch = None
 if switch_measured == "1":
     switch = {
@@ -518,6 +636,7 @@ document = {
     "sample_seconds": int(sample_seconds),
     "elapsed_seconds": float(elapsed),
     "samples": samples,
+    "commands": commands,
     "switch": switch,
 }
 with open(path, "w", encoding="utf-8") as output:

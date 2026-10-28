@@ -19,6 +19,7 @@ cargo bench -p tili-tree --bench layout
 
 ```sh
 scripts/perf/collect.sh                 # read-only 60s CPU/RSS/thread sample
+scripts/perf/collect.sh --commands 100  # read-only: ping p50/p95 + log growth/command
 scripts/perf/collect.sh --switch N      # opt-in: moves real windows, asks first
 scripts/perf/verify.sh --save scope0    # CI gate + bench, cache the baseline
 scripts/perf/verify.sh --compare scope0 # CI gate + bench, fail on regression

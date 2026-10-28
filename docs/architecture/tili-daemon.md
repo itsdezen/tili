@@ -985,6 +985,20 @@ Input Monitoring permission isn't granted) does the same. This only covers
 after a sustained run of unreachable-daemon retries (see
 [tili-menubar.md](tili-menubar.md)).
 
+`src/trace.rs` owns the opt-in timing/diagnostic log switch
+(`TILI_TRACE_TIMING=1|true|yes`, parsed once into a `OnceLock`): `dispatch`'s
+per-command duration, `switch_workspace`'s phase timings,
+`write_windows_concurrently`'s per-window writes, and `main.rs`'s per-event
+NSWorkspace lines all go through `trace::log(format_args!(...))`, so an
+argument's formatting/allocation happens only when the flag is on. Real
+failures and warnings stay unconditional `eprintln!` — config-load errors and
+`config_warnings`, socket read/write failures, the hotkey-command failure
+line, permission messages, and the low-frequency sleep/lock/probe and
+auto-switch trail (see the sleep/wake section above for why that one is worth
+keeping). `TILI_TRACE_TIMING` is read from the environment launchd started
+the daemon with, so turning it on means relaunching the daemon, not a config
+reload.
+
 ## main.rs — process structure and the event loop
 
 The real process entry point, `fn main()`, is deliberately *not*

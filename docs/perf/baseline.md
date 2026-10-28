@@ -32,6 +32,30 @@ Longer window, plus a JSON copy:
 scripts/perf/collect.sh --seconds 120 --json /tmp/tili-perf.json
 ```
 
+Command round-trip. Read-only — `ping` never moves windows, so this never
+prompts:
+
+```sh
+scripts/perf/collect.sh --commands 100
+scripts/perf/collect.sh --commands 100 --json /tmp/tili-perf-commands.json
+```
+
+One sample is the full wall-clock round trip of `tili ping`: CLI process
+startup, Unix-socket connect, daemon dispatch, and the CLI reading its reply.
+The same run reports `daemon.err.log` growth over the whole phase; the table's
+last column is that total divided by the command count. A run against the
+installed daemon and the harness's own build differ in exactly the logging
+cost this mode exists to expose, so record which binary `TILI_BIN` pointed at.
+
+Example output (installed 0.11.1 daemon; the diagnostic lines still on at that
+version are the "before" side of the gating change):
+
+```markdown
+| commands | p50 (ms) | p95 (ms) | daemon.err.log growth (B) | per command (B) |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 | 6.182 | 7.686 | 4280 | 42.8 |
+```
+
 Workspace-switch round-trip. **This moves real windows and workspaces**;
 it prints a warning and needs an interactive `yes`, or
 `TILI_PERF_CONFIRM=1` for a scripted run, then restores the previously
@@ -122,6 +146,19 @@ busy core, all threads summed). macOS reports this with 10 ms resolution,
 so a 60 s window quantises to ~0.017 percentage points; a reading of
 `0.1%` is within one tick of idle and should not be over-interpreted.
 
+### Command round-trip (p50 / p95)
+
+One sample is the full wall-clock round trip of `tili ping`, measured with
+Python `time.perf_counter` around `subprocess.run`: CLI process startup,
+Unix-socket connect, daemon dispatch, and the CLI reading its reply. `ping`
+is the cheapest possible command (no AX/window work), so this isolates the
+per-command fixed cost — including any stderr writing the daemon does before
+it replies. p50/p95 use the same nearest-rank definition as the switch phase.
+
+`--commands N` also reports `daemon.err.log` growth over the phase, total and
+per command. That second figure is the one a logging change has to move: on
+0.11.1 it is about 43 B per `ping`, one `dispatch` line apiece.
+
 ### Workspace-switch round-trip (p50 / p95)
 
 One sample is the full wall-clock round trip of `tili workspace <name>`:
@@ -134,9 +171,10 @@ that later scopes should move, and it needs the opt-in switch run.
 
 ### `daemon.err.log` growth
 
-Byte-size delta of `~/Library/Logs/tili/daemon.err.log` across the switch
-phase (`stat -f%z`). Zero means the switch load produced no new warnings or
-errors. A negative value means the log was rotated or truncated during the
+Byte-size delta of `~/Library/Logs/tili/daemon.err.log` across the command
+and/or switch phase (`stat -f%z`). Zero means that load produced no new
+warnings or errors — the target once timing/diagnostic lines are off by
+default. A negative value means the log was rotated or truncated during the
 run.
 
 ## Preliminary baseline
