@@ -700,8 +700,20 @@ pub(crate) fn command_is_read_only(command: &Command) -> bool {
 fn drain_pending_windows(state: &mut WmState, pending_pids: &mut HashSet<i32>) -> bool {
     let pids_changed = !pending_pids.is_empty();
     for pid in pending_pids.drain() {
+        // The AX scan is IPC into the target app and re-reads every window of
+        // the pid that fired the notification, so its cost is what the
+        // per-window read path is judged on. Timing is only taken when
+        // tracing is on, so the normal path pays one flag read.
+        let scan_start = trace::enabled().then(std::time::Instant::now);
         let windows = tili_ax::list_windows_for_pid(pid);
+        let window_count = windows.len();
         state.apply_windows_changed(pid, windows);
+        if let Some(scan_start) = scan_start {
+            trace::log(format_args!(
+                "tili-daemon: scan pid={pid} windows={window_count} took {:?}",
+                scan_start.elapsed()
+            ));
+        }
     }
     // Cheap no-op after its first real call (see `startup_frontmost_revealed`)
     // — called unconditionally here, from every call site of this function
