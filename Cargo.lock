@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "tili-ax"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "axuielement",
  "block2",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "tili-cli"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "tili-config"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "kdl",
  "notify",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "tili-daemon"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "objc2",
  "objc2-app-kit",
@@ -1679,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "tili-ipc"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "tili-menubar"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "block2",
  "objc2",
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "tili-tree"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "criterion",
  "slotmap",
@@ -2004,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "clap",
 ]
