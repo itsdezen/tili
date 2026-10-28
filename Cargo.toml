@@ -22,3 +22,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "sync", "time", "io-util", "signal"] }
 clap = { version = "4", features = ["derive"] }
+
+# Shipped binaries are small but split across seven crates, so cross-crate
+# inlining is where the wins are; thin LTO keeps CI's release build from
+# paying full-LTO time for the last few percent. `panic` stays "unwind" on
+# purpose: tili-daemon's `catch_unwind` is what turns a panic into a clean
+# non-zero exit so launchd restarts it instead of leaving a zombie.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
