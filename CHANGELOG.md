@@ -6,6 +6,43 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [Unreleased]
+
+### Changed
+
+- **The menu bar refreshes with one round trip instead of four.** It used to
+  issue `ListMonitors`, `ListWorkspaces`, `CurrentMode` and `MenubarStyle`
+  as separate commands — four socket connections and four system-wide AX
+  focus queries per workspace change. A single `Snapshot` command now
+  returns the same four reads, and being read-only it skips the focus sync
+  entirely.
+- **The daemon no longer writes to `daemon.err.log` during normal
+  operation.** Per-command dispatch timings, per-switch phase timings,
+  per-window park timings and per-event NSWorkspace lines were
+  unconditional; they now require `TILI_TRACE_TIMING=1` at daemon launch.
+  A `tili ping` used to emit ~43 bytes of stderr per call and a workspace
+  switch ~1 KB; both are now zero. Real warnings and failures are
+  unchanged.
+- **The daemon runs two Tokio workers instead of one per CPU core**
+  (23-24 threads down to 17 on an M4), since the event loop is a single
+  task and the worker pool only serves spawned `WaitForChange`/AX-stream
+  tasks.
+- **The watcher resync enumerates each source once per 2s tick** instead of
+  walking the on-screen window list twice.
+- **Release binaries are about a third smaller** (thin LTO, one codegen
+  unit, stripped symbols): `tili-daemon` 4.47 MB -> 2.85 MB,
+  `tili-menubar` 1.28 MB -> 0.88 MB, `tili` 1.88 MB -> 1.25 MB. The layout
+  bench is 2-11% faster across 18 of 22 ids as a side effect.
+
+### Added
+
+- **Performance tooling**: `cargo bench -p tili-tree --bench layout` (layout,
+  insert, remove, focus, balance), `scripts/perf/collect.sh` (idle CPU/RSS/
+  footprint/thread sampling, opt-in command and workspace-switch
+  round-trips) and `scripts/perf/verify.sh` (the CI gate plus the bench,
+  with cached baselines and a regression threshold). Measurements and what
+  they do and do not cover live in `docs/perf/baseline.md`.
+
 ## [0.11.1] - 2026-09-09
 
 ### Fixed
