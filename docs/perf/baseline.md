@@ -330,5 +330,9 @@ reason.
 - Real workspace-switch cost in the committed baseline: the switch phase is
   opt-in because it moves windows, so the owner has to supply those numbers
   separately.
+- Session snapshot/save cost. It runs off the event loop on a 3s debounce /
+  60s safety interval and reads only in-memory state, so it is intentionally
+  outside the per-command and layout benchmarks; re-check with
+  `collect.sh` if a future change makes extraction expensive.
 - Energy, wakeups, allocations, and syscall counts. No `powermetrics`, no
   Instruments, no `sudo` — the harness is intentionally runnable by anyone.

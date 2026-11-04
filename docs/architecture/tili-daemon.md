@@ -474,6 +474,84 @@ Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
 parsed since M5) is intentionally still unwired — M9's bar is
 hot-plug/unplug safety, not that finer-grained UX.
 
+## Session state and restore
+
+`session.rs` persists every managed window placement to a versioned JSON
+file (`~/Library/Application Support/tili/session.json` by default), and
+`WmState` applies it during a startup-only grace window. The saved state is
+not a copy of `WmState`: it is a `WindowId`-based snapshot with no `NodeId`s
+and no `AxUIElement`s, so it can be loaded before any window exists and
+tested without macOS.
+
+### What is saved
+
+- Per workspace: a `TreeSnapshot` (Tiles or Accordion containers, nested
+  children order, orientation, weights, MRU), remembered focus, tiled
+  fullscreen window, and last monitor.
+- Per window: `window_id`, pid, bundle id, title, `WindowKind`, workspace,
+  placement (`Tiled`, `Floating { manual }`, `NativeFullscreen`,
+  `Minimized`, `HiddenApplication`, `Popup`), special-state anchor, manual
+  floating geometry preserved across a special-state round trip, and a frame
+  hint.
+- Per monitor: frame and `is_main` (plus the display id as a hint only, since
+  `CGDirectDisplayID` can change across sleep/hot-plug), the focused monitor,
+  active workspace per monitor, and previous workspace.
+- `Popup` windows are recorded for diagnostics but never geometry-restored:
+  tili does not own their position by design.
+
+`TreeSnapshot`/`TreeAnchor` live in `tili-tree` and are serializable; a tree
+is rebuilt with `Tree::from_snapshot`, which validates duplicate leaves,
+weights, and MRU before normalizing. Missing windows are filtered by
+`snapshot_filtered`/`remap_snapshot` and empty containers compact away.
+
+### Startup flow
+
+1. Load config, then load the session file. Missing/corrupt/unsupported
+   versions are logged and ignored; corrupt primary falls back to
+   `session.json.bak`. The daemon always starts.
+2. `begin_restore` creates a `RestoreMatcher` and a grace deadline
+   (`restore_grace_ms`, default 2s).
+3. As `apply_windows_changed` scans each pid, a brand-new window is offered
+   to the matcher before normal rules/classification. Hard match is
+   `window_id + pid + bundle_id`; fallback is bundle id + non-empty title +
+   `WindowKind`, and is used only when exactly one saved entry matches.
+   Ambiguous fallbacks are skipped — a wrong placement is worse than none.
+4. Matched normal windows are placed at their saved frame hint immediately
+   (direct write, no animation) and inserted at their saved anchor; matched
+   special windows keep their live OS state and record workspace/restore
+   target/anchor for later promotion.
+5. `finalize_restore` rebuilds each declared workspace's tree from the saved
+   snapshot with current `WindowId`s, re-inserts unmatched newly-opened
+   windows, restores focus/fullscreen/active workspace/focused monitor, then
+   relayouts visible monitors under `set_suppressed(true)` and parks inactive
+   workspaces. Windows opened after finalize use normal rules.
+
+If all saved normal windows match early, restore finalizes before the
+deadline. Saved special windows that were not seen remain in
+`deferred_special`; if they appear later (native fullscreen on another
+Space, a minimized app, ...) they are matched lazily and rejoin their saved
+workspace/anchor.
+
+### Save flow and crash behavior
+
+- Mutations bump `session_revision`; `main.rs` snapshots after
+  `save-debounce-ms` (default 3s) and on a `periodic-save-seconds` (default
+  60s) safety interval. Writes happen on `spawn_blocking`, never on the event
+  loop.
+- `SessionStore::save` writes a temp file, fsyncs it, rotates the previous
+  primary to `session.json.bak`, then renames the temp file into place.
+  Permissions are `0600`; the state contains titles/bundle ids but no window
+  content.
+- No save while restore is active or after a panic. A zero-match restore
+  keeps the previous file on disk (`session_save_suppressed`) rather than
+  overwriting it with an empty/partial session; any real user mutation
+  clears that suppression.
+- `kill -9` leaves the last good snapshot; the next startup restores matched
+  windows and places unmatched ones normally, so nothing is left parked.
+- `tili uninstall` removes the primary and backup session files.
+  `tili doctor` reports the file's version/window count and the last
+  restore's matched/missing/deferred counts.
+
 ## Mouse-follows-focus / focus-follows-monitor (M10)
 
 `mouse_follows_focus`/`focus_follows_monitor` are plain `bool`s set from

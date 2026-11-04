@@ -179,6 +179,24 @@ faster, activity-gated timer instead — and then made speed-configurable
 (`AnimationSpeed::Medium`/`::High`) once even 16ms/~60fps still read as
 low-fps on real hardware.
 
+## Session state is startup-only and never stores NodeIds
+
+- The persisted session is a `WindowId`-based snapshot; `NodeId`s are
+  SlotMap keys and are never serialized. `TreeSnapshot`/`Tree::from_snapshot`
+  own the round trip and validate/normalize on load.
+- Restore is startup-only. Saved state wins for **matched** startup windows
+  during the grace window; unmatched windows, windows opened after the
+  grace deadline, and all later activity use config rules normally.
+- Ambiguous fallback matches are skipped, never guessed.
+- A missing/corrupt/unsupported-version state file is ignored (primary may
+  fall back to `session.json.bak`); it can never prevent daemon startup.
+- Writes are atomic (temp + fsync + rename) with a rotated `.bak`, and run
+  off the event loop via `spawn_blocking`. No save while restore is active
+  or after a panic. A zero-match restore preserves the previous file until a
+  real user mutation.
+- `Popup`/ignored windows may be recorded but are never geometry-restored;
+  tili does not own their placement.
+
 ## One dispatch path, one sanctioned Mutex
 
 Hotkey-triggered and socket-triggered commands both go through `dispatch()`

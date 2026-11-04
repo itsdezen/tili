@@ -30,6 +30,16 @@ feature set:
 
 See [CHANGELOG.md](CHANGELOG.md) for the full itemized list.
 
+## v0.12.0 — session state and recovery (in progress)
+
+- Persist and restore Tiles/Accordion trees, focus, active workspace per
+  monitor, floating geometry, and special states (native fullscreen,
+  minimized, hidden application) across restart or crash.
+- Versioned, atomic `session.json` with a `.bak`, written off the event loop;
+  startup grace window and conservative hard/fallback window matching.
+- `tili doctor` reports the state file and last restore summary;
+  `tili uninstall` removes the state files.
+
 ## Planned
 
 Nothing here is scheduled — this is the backlog of ideas judged worth

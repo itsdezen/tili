@@ -6,6 +6,28 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [Unreleased]
+
+### Added
+
+- **Full session state and restore.** tili now persists managed layout and
+  placements to a versioned JSON file and restores them on the next start:
+  Tiles and Accordion trees (nested containers, orientation, weights, MRU),
+  focus, active workspace per monitor, floating geometry, tiled fullscreen,
+  and native-fullscreen/minimized/hidden-application anchors. A startup
+  grace window matches reopened windows conservatively (hard identity first,
+  fallback only when unique); unmatched/late windows use normal rules.
+  Atomic writes plus `session.json.bak`, off-loop writes, corrupt/version
+  fallback, startup recovery after `kill -9`, and a zero-match guard that
+  preserves the previous state. Configure with `session { ... }` in
+  `tili.kdl`; `tili doctor` reports the file/restore summary and
+  `tili uninstall` removes it.
+
+### Changed
+
+- `tili-tree` gains a serializable `TreeSnapshot`/`TreeAnchor` API; no
+  `NodeId` is ever persisted.
+
 ## [0.11.2] - 2026-10-28
 
 ### Changed

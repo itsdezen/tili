@@ -85,6 +85,14 @@ resolves transparently through a symlinked parent and reports an ordinary
 regular file, so `uninstall()` walks every ancestor directory first and
 skips deletion if any of them is itself a symlink.
 
+`uninstall()` also removes the persisted session state
+(`~/Library/Application Support/tili/session.json` and its `.bak`), and
+`doctor()` reports the state file's version/window count plus the daemon's
+last restore summary (`Command::Doctor`'s `session_restore`). The CLI
+duplicates the default session path rather than depending on
+`tili-daemon`, same precedent as the LaunchAgent paths; a config
+`session.state-path` override is honored by doctor when the config parses.
+
 `sibling_binary_path` resolves the daemon/menubar's own sibling binary path
 for `install_launch_agent`'s `ProgramArguments`, canonicalized so it lands
 inside `tili.app/Contents/MacOS/` rather than Homebrew's flat `bin/`

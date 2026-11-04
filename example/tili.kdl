@@ -108,6 +108,29 @@ settings {
     animate #false
 }
 
+// Session persistence — every field optional, defaults shown below.
+// The daemon saves managed window layout, focus, active workspace per
+// monitor, floating geometry, and special states (native fullscreen,
+// minimized, hidden app) to a versioned JSON file, then matches reopened
+// windows against it on the next start. Set `enabled #false` to disable
+// both loading and saving.
+session {
+    enabled #true
+
+    // Default: ~/Library/Application Support/tili/session.json.
+    // state-path "~/Library/Application Support/tili/session.json"
+
+    // How long startup keeps matching reopened windows after the initial
+    // scan. Late windows after this use normal rules.
+    restore-grace-ms 2000
+
+    // Layout mutations are snapshotted after this quiet period.
+    save-debounce-ms 3000
+
+    // Safety-net save interval even if the debounce never fires.
+    periodic-save-seconds 60
+}
+
 // Menu bar badge styling — every field optional, defaults shown below.
 menubar {
     // "filled" (default): solid pill with the workspace name/glyph knocked

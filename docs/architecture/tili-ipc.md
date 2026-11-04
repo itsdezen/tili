@@ -16,9 +16,10 @@ with "not implemented yet" instead of refusing to start the daemon.
 
 `Command::Doctor`'s payload, `DoctorReport`, is the one `Command` whose
 answer only the daemon can give (current Accessibility/Input Monitoring
-permission grants, and the previous config load's skipped-rule warnings) —
-`tili doctor` combines it with checks it can run without a daemon at all
-(LaunchAgent files, the socket, config syntax). See
+permission grants, the previous config load's skipped-rule warnings, and the
+last startup restore's matched/missing/deferred counts) — `tili doctor`
+combines it with checks it can run without a daemon at all (LaunchAgent
+files, the socket, config syntax, the state file). See
 [tili-cli.md](tili-cli.md) and [tili-daemon.md](tili-daemon.md).
 
 `Command::Snapshot`'s payload, `SnapshotInfo`, bundles monitors,

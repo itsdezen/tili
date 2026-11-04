@@ -25,10 +25,11 @@ shortcut.
 - **A config format that matches how you think.** [KDL](https://kdl.dev)
   instead of flat TOML tables — workspaces, keybinding modes, and floating
   rules nest the way they actually relate to each other.
+- **Session restore.** Layout, focus, active workspace per monitor,
+  floating geometry, and special states survive a restart or crash.
 - **Animation-ready architecture, not animation-as-an-afterthought.** Every
-  window-frame mutation goes through a single seam (`WindowFrameSetter`).
-  v1 ships instant moves; smooth animated transitions plug into that same
-  seam without a rewrite.
+  window-frame mutation goes through a single seam (`WindowFrameSetter`);
+  instant moves and the opt-in tweened animation both use it.
 - **No hotkey daemon required.** tili owns its own global hotkeys. One
   binary, one daemon, one config file.
 - **Open source, installed via Homebrew.** No App Store, no sandbox
@@ -38,7 +39,8 @@ shortcut.
 
 tili is daily-drivable today: tiling, workspaces, hot-reloaded config,
 built-in hotkeys, floating rules, multi-monitor, mouse/focus-follows-monitor,
-a menu bar workspace badge, and a real signed release pipeline. Pre-1.0
+session restore, a menu bar workspace badge, and a real signed release
+pipeline. Pre-1.0
 still means config schema and CLI surface can change between releases —
 check the [Roadmap](/docs/roadmap) for what's planned next, and the
 [CHANGELOG](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md) on

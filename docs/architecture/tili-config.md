@@ -36,6 +36,12 @@ so a config can be written against the full target schema before the parser
 catches up — see README.md's config preview vs. `example/tili.kdl` for
 "aspirational full schema" vs. "what's actually parsed today."
 
+`session { enabled; state-path; restore-grace-ms; save-debounce-ms;
+periodic-save-seconds }` is parsed into `SessionConfig`; every field is
+optional and defaults to on, the platform state path, 2s grace, 3s
+debounce, and 60s safety interval. `tili-daemon` owns the actual state
+file/store and matching — this crate only carries the settings.
+
 **KDL v2 booleans are `#true`/`#false`** (a `#`-prefixed keyword, to
 disambiguate from bare identifiers) — bare `true`/`false` is a parse error,
 easy to get wrong when writing test fixtures or example configs; there's a

@@ -79,6 +79,20 @@ direction `navigate`, `move`'s window-identity `swap_windows`, proportional
   `mru` child, with the same peek-padding math `layout_node` uses) but
   never yield a handle themselves — no borders in/around them, same as
   `resize_weight` skipping `Accordion` ancestors.
+- `TreeSnapshot`/`NodeSnapshot` are the serializable, `NodeId`-free view of
+  a tree used by session persistence. `Tree::snapshot()` captures layout,
+  orientation, children order, weights, and MRU; `snapshot_filtered()` drops
+  missing leaves and compacts their containers; `Tree::from_snapshot()`
+  validates duplicate windows, empty containers, weights, and MRU, then
+  rebuilds and normalizes. `NodeId`s never cross the persistence boundary:
+  leaves are real `WindowId`s, which the daemon remaps to reopened windows.
+- `TreeAnchor` (`before`/`after` sibling window ids) is captured by
+  `anchor_for` before a window leaves the tree and consumed by
+  `insert_window_at_anchor`/`insert_floating_at_anchor` when it returns from
+  native fullscreen, minimized, or hidden-application state. Missing
+  anchors fall back to the usual MRU insertion; the tree is normalized after
+  every insertion.
+
 - `Node::Floating { window }` (a third leaf kind alongside `Container`/
   `Window`) is a floating window's focus/topology placeholder: a normal
   child for `insert_floating`/`remove_window`/`window_at`/`find_node`/

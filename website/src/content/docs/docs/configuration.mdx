@@ -126,6 +126,34 @@ that multiplier in extra latency per relayout, more so at `"high"`. Try
 `"medium"` first.
 :::
 
+## `session`
+
+Persisted layout/focus/special-state snapshot, restored on the next start.
+
+```kdl
+session {
+    enabled #true
+    state-path "~/Library/Application Support/tili/session.json"
+    restore-grace-ms 2000
+    save-debounce-ms 3000
+    periodic-save-seconds 60
+}
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `#true` | Load and save the session at all. |
+| `state-path` | string | none | Override for the state file. `~` is expanded. Defaults to `~/Library/Application Support/tili/session.json`. |
+| `restore-grace-ms` | integer (ms) | `2000` | How long startup keeps matching reopened windows after the initial scan. |
+| `save-debounce-ms` | integer (ms) | `3000` | Quiet period after a layout mutation before writing state. |
+| `periodic-save-seconds` | integer | `60` | Safety-net save interval. |
+
+The state file is versioned, written atomically (`session.json.tmp` →
+rename) with a `.bak` of the previous good copy, and stored `0600`. It
+contains window titles and bundle ids but no window content. `tili
+uninstall` removes it. A corrupt/unsupported file is ignored and the daemon
+starts normally.
+
 ## `menubar`
 
 ```kdl

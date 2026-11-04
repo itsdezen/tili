@@ -147,7 +147,12 @@ signing.**
   tiled and floating windows (a floating window is a `Node::Floating` leaf
   — addressable via `workspace_focus` like any tiled one, but excluded from
   layout sizing), and a `placements` index for O(1) window→workspace
-  lookup plus disposition. `dispatch.rs` has the single
+  lookup plus disposition. `session.rs` owns the versioned, `WindowId`-based
+  session snapshot (layout/focus/floating/special states/active workspace
+  per monitor), the atomic `SessionStore` with `.bak`, and the conservative
+  hard/fallback matcher used during the startup restore grace window. It
+  contains no `AxWindow`/`WmState` code; `state.rs` extracts and applies the
+  snapshot. `dispatch.rs` has the single
   `dispatch(&mut WmState, Command) -> Response` both the socket and hotkey
   paths call, with two documented exceptions handled directly in `main.rs`'s
   loop instead: `Command::Shutdown` (process lifecycle, not a `WmState`
@@ -189,9 +194,11 @@ signing.**
 
 ## Project status
 
-tili has shipped (v0.1.x) with a complete, daily-drivable feature set —
+tili has shipped (v0.11.x) with a complete, daily-drivable feature set —
 see [ROADMAP.md](ROADMAP.md) for what's shipped and what's planned, and
-check that file before assuming a feature exists or doesn't.
+check that file before assuming a feature exists or doesn't. The upcoming
+v0.12 line adds full session state/restore (Tiles, Accordion, floating,
+tiled fullscreen, native fullscreen/minimized/hidden anchors).
 [docs/BLUEPRINT.md](docs/BLUEPRINT.md) holds the design reference for
 planned-but-unshipped features.
 
@@ -238,6 +245,12 @@ rationale (and real-hardware evidence) behind each is in
   through the seam, `unpark_all`) must call `frame_setter.finish()` first
   so a stale in-flight tween can't resume on a later tick and undo the
   direct write.
+- **Session state is startup-only, `WindowId`-based, and never blocks the
+  event loop.** `TreeSnapshot` never stores `NodeId`; restore uses a
+  conservative hard/fallback matcher and skips ambiguous matches; missing/
+  corrupt/unsupported state is ignored; writes are atomic with a `.bak` and
+  run off-loop. Do not save during restore or after a panic, and do not
+  geometry-restore `Popup`/ignored windows.
 - **Hotkey- and socket-triggered commands both go through `dispatch()`**
   — no parallel command path. The hotkey tap's `active_bindings:
   Arc<Mutex<HashSet<KeyCombo>>>` is the *one* sanctioned lock (the tap

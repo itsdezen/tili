@@ -88,8 +88,10 @@ command must not read global focus until target context has been resolved.
 - Choose the parking corner per display by probing a few points near each
   corner and selecting the one least covered by another display, using
   `combined_bounds` of all displays.
-- When the daemon disables, quits, or enters a controlled crash path,
-  unpark all windows before exit — a first-class safety requirement.
+- When the daemon disables or quits, unpark all windows before exit. An
+  unexpected crash runs no code, so the next startup's session restore /
+  normal placement is the recovery path — it must never leave matched
+  windows parked or unmatched managed windows off-screen.
 - UX docs must state that every display needs free space at a bottom
   corner for parking; "Displays have separate Spaces" often produces bad
   focus/performance behavior through public APIs.
@@ -201,9 +203,11 @@ disconnect lagging clients.
    transaction-safe arena; audit every `await`.
 2. Complete command parity from the table above, JSON schemas/versioning,
    and `subscribe` event streaming.
-3. Strengthen workspace virtualization: per-monitor parking-corner choice,
-   unpark-on-exit/crash, proportional floating restoration, and
-   monitor-arrangement diagnostics.
+3. Strengthen workspace virtualization: per-monitor parking-corner choice
+   and monitor-arrangement diagnostics. Session restore now covers
+   need-restore layout/focus, proportional floating restoration, and
+   startup recovery after an unclean exit; this item no longer includes
+   those.
 4. Make reconciliation robust: special containers, window-level/dialog
    heuristics, closed-window cache, lock-screen protection, and idempotent
    AX rescans per PID.

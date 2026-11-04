@@ -32,6 +32,10 @@ works on macOS:
 - tili being able to read window titles/positions of other apps — this is
   what the Accessibility permission grants by design.
 - The daemon needing to run continuously to manage windows.
+- The session state file containing the titles/bundle ids of managed
+  windows. It is written `0600` under
+  `~/Library/Application Support/tili/`, contains no window content, and
+  can be disabled/removed (`session { enabled #false }`, `tili uninstall`).
 
 Things that **are** in scope and worth reporting:
 

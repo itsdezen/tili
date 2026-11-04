@@ -48,10 +48,13 @@ shortcut.
 - **A config format that matches how you think.** [KDL](https://kdl.dev)
   instead of flat TOML tables — workspaces, keybinding modes, and floating
   rules nest the way they actually relate to each other.
+- **Session restore.** Layout, focus, active workspace per monitor,
+  floating geometry, and special states (native fullscreen, minimized,
+  hidden app) survive a restart or crash. Time to go back to a known-good
+  arrangement without rebuilding it by hand.
 - **Animation-ready architecture, not animation-as-an-afterthought.** Every
-  window-frame mutation goes through a single seam (`WindowFrameSetter`).
-  v1 ships instant moves; smooth animated transitions plug into that same
-  seam later without a rewrite.
+  window-frame mutation goes through a single seam (`WindowFrameSetter`);
+  instant moves and the opt-in tweened animation both use it.
 - **No hotkey daemon required.** tili owns its own global hotkeys. One binary,
   one daemon, one config file.
 - **Open source, installed via Homebrew.** No App Store, no sandbox
@@ -59,10 +62,11 @@ shortcut.
 
 ## Status
 
-tili is at `v0.1.x` and already daily-drivable: tiling, workspaces,
+tili is at `v0.11.x` and already daily-drivable: tiling, workspaces,
 hot-reloaded config, built-in hotkeys, floating rules, multi-monitor,
-mouse/focus-follows-monitor, a menu bar workspace badge, and a real signed
-release pipeline. See [ROADMAP.md](ROADMAP.md) for what's planned next.
+mouse/focus-follows-monitor, session restore, a menu bar workspace badge,
+and a real signed release pipeline. See [ROADMAP.md](ROADMAP.md) for what's
+planned next.
 Pre-1.0 still means config schema and CLI surface can change between
 releases — check [CHANGELOG.md](CHANGELOG.md) when upgrading.
 
@@ -92,6 +96,15 @@ to stop it and remove the LaunchAgent (so it stays stopped until you run
 `tili start` again), `tili status` to check whether it's running, and
 `tili --version`/`tili help` for the installed version and full command
 list.
+
+### Session state
+
+tili saves managed layout, focus, floating geometry, special states, and
+active workspace per monitor to
+`~/Library/Application Support/tili/session.json` (versioned, atomic write,
+`0600`, with a `.bak`). Disable it with `session { enabled #false }` in
+`~/.config/tili/tili.kdl`; `tili uninstall` removes both files. The state
+contains window titles and bundle ids but no window content.
 
 > [!TIP]
 > If a three-finger swipe up (Mission Control) shows tiled windows at

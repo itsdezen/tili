@@ -16,7 +16,7 @@ the dependency direction is a hard boundary, not just organization.
 | [architecture/tili-ax.md](architecture/tili-ax.md) | Accessibility API layer: window classification, frame writes, display/workspace/hotkey/mouse watchers |
 | [architecture/tili-config.md](architecture/tili-config.md) | KDL parsing (`#true`/`#false`!), rules sections, hot-reload watcher |
 | [architecture/tili-ipc.md](architecture/tili-ipc.md) | Shared `Command`/`Response` protocol, infallible `parse.rs` |
-| [architecture/tili-daemon.md](architecture/tili-daemon.md) | `WmState`, placements/floating, multi-monitor, parking, focus sync, `dispatch()`, the event loop |
+| [architecture/tili-daemon.md](architecture/tili-daemon.md) | `WmState`, placements/floating, multi-monitor, parking, session state/restore, focus sync, `dispatch()`, the event loop |
 | [architecture/tili-cli.md](architecture/tili-cli.md) | CLI surface, LaunchAgent start/stop, the two business-logic exceptions |
 | [architecture/tili-menubar.md](architecture/tili-menubar.md) | `NSStatusItem` badge, long-poll sync via `WaitForChange` |
 | [architecture/xtask-release.md](architecture/xtask-release.md) | Bundle/codesign/package, entitlements pitfalls, cert policy |
