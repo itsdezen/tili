@@ -1170,6 +1170,8 @@ impl Default for WmState {
         let focused_monitor = monitors.first().map(|m| m.id).unwrap_or(0);
         let mut active_workspace = HashMap::new();
         active_workspace.insert(focused_monitor, DEFAULT_WORKSPACE.to_string());
+        let mut workspace_monitor = HashMap::new();
+        workspace_monitor.insert(DEFAULT_WORKSPACE.to_string(), focused_monitor);
 
         Self {
             windows: HashMap::new(),
@@ -1185,7 +1187,7 @@ impl Default for WmState {
             workspace_focus: HashMap::new(),
             monitors,
             active_workspace,
-            workspace_monitor: HashMap::new(),
+            workspace_monitor,
             focused_monitor,
             frame_setter: Box::new(InstantFrameSetter),
             gaps: Gaps::default(),
