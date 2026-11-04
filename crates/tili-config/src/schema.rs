@@ -197,6 +197,37 @@ pub enum AnimationSpeed {
     High,
 }
 
+/// `session { enabled #true; state-path "..."; restore-grace-ms 2000;
+/// save-debounce-ms 3000; periodic-save-seconds 60 }` — controls the
+/// daemon's persisted layout/session state. See
+/// `docs/architecture/tili-daemon.md`'s session section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    pub enabled: bool,
+    /// Override for the state file path. `None` means the daemon's
+    /// platform default (`~/Library/Application Support/tili/session.json`).
+    pub state_path: Option<String>,
+    /// How long startup keeps matching reopened windows against the saved
+    /// session after the initial window scan.
+    pub restore_grace_ms: u64,
+    /// Debounce applied to layout mutations before writing state.
+    pub save_debounce_ms: u64,
+    /// Safety-net snapshot interval, independent of the debounce.
+    pub periodic_save_seconds: u64,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            state_path: None,
+            restore_grace_ms: 2000,
+            save_debounce_ms: 3000,
+            periodic_save_seconds: 60,
+        }
+    }
+}
+
 /// The parsed `tili.kdl` document.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -207,6 +238,7 @@ pub struct Config {
     /// `gaps { workspace "name" { ... } }` KDL shape.
     pub workspace_gaps: HashMap<String, Gaps>,
     pub settings: Settings,
+    pub session: SessionConfig,
     pub keybindings: Vec<KeybindingMode>,
     /// Matched in order — first match wins.
     pub workspace_rules: Vec<WorkspaceRule>,
@@ -297,6 +329,7 @@ pub fn parse(source: &str) -> Result<Config, ConfigError> {
         workspaces: parse_workspaces(&doc),
         default_layout: parse_default_layout(&doc),
         settings: parse_settings(&doc),
+        session: parse_session(&doc),
         keybindings: parse_keybindings(&doc),
         workspace_rules: parse_workspace_rules(&doc),
         floating_rules,
@@ -436,6 +469,29 @@ fn parse_settings(doc: &KdlDocument) -> Settings {
         };
     }
     settings
+}
+
+fn parse_session(doc: &KdlDocument) -> SessionConfig {
+    let mut session = SessionConfig::default();
+    let Some(children) = doc.get("session").and_then(KdlNode::children) else {
+        return session;
+    };
+    if let Some(v) = children.get_arg("enabled").and_then(|v| v.as_bool()) {
+        session.enabled = v;
+    }
+    if let Some(v) = children.get_arg("state-path").and_then(|v| v.as_string()) {
+        session.state_path = Some(v.to_string());
+    }
+    if let Some(v) = as_u64(children.get_arg("restore-grace-ms")) {
+        session.restore_grace_ms = v;
+    }
+    if let Some(v) = as_u64(children.get_arg("save-debounce-ms")) {
+        session.save_debounce_ms = v;
+    }
+    if let Some(v) = as_u64(children.get_arg("periodic-save-seconds")) {
+        session.periodic_save_seconds = v;
+    }
+    session
 }
 
 fn parse_menubar(doc: &KdlDocument) -> MenubarConfig {
@@ -605,6 +661,14 @@ fn as_f32(value: Option<&kdl::KdlValue>) -> Option<f32> {
 
 /// A KDL integer value as a `u32`, or `None` if it's missing, not an
 /// integer, or negative/too large to fit.
+fn as_u64(value: Option<&kdl::KdlValue>) -> Option<u64> {
+    let value = value?;
+    value
+        .as_integer()
+        .and_then(|v| u64::try_from(v).ok())
+        .or_else(|| value.as_string().and_then(|v| v.parse().ok()))
+}
+
 fn as_u32(value: Option<&kdl::KdlValue>) -> Option<u32> {
     value
         .and_then(|v| v.as_integer())
@@ -1172,6 +1236,35 @@ mod tests {
         let config = parse(source).unwrap();
         assert_eq!(config.menubar.fill, MenubarFill::Filled);
         assert_eq!(config.menubar.shape, MenubarShape::Pill);
+    }
+
+    #[test]
+    fn session_defaults_and_overrides_parse() {
+        let config = parse("").unwrap();
+        assert!(config.session.enabled);
+        assert_eq!(config.session.state_path, None);
+        assert_eq!(config.session.restore_grace_ms, 2000);
+        assert_eq!(config.session.save_debounce_ms, 3000);
+        assert_eq!(config.session.periodic_save_seconds, 60);
+
+        let source = r#"
+            session {
+                enabled #false
+                state-path "/tmp/tili-session.json"
+                restore-grace-ms 750
+                save-debounce-ms 1200
+                periodic-save-seconds 30
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert!(!config.session.enabled);
+        assert_eq!(
+            config.session.state_path.as_deref(),
+            Some("/tmp/tili-session.json")
+        );
+        assert_eq!(config.session.restore_grace_ms, 750);
+        assert_eq!(config.session.save_debounce_ms, 1200);
+        assert_eq!(config.session.periodic_save_seconds, 30);
     }
 
     #[test]
