@@ -100,6 +100,14 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
                 accessibility_granted: tili_ax::ensure_accessibility_permission(),
                 input_monitoring_granted: tili_ax::has_input_monitoring_permission(),
                 config_warnings: state.config_warnings(),
+                session_restore: state.last_restore_summary().map(|summary| {
+                    tili_ipc::SessionRestoreReport {
+                        matched: summary.matched,
+                        missing_normal: summary.missing_normal,
+                        deferred_special: summary.deferred_special,
+                        zero_match: summary.zero_match,
+                    }
+                }),
             };
             payload_response(report)
         }

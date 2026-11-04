@@ -828,6 +828,24 @@ fn default_config_path() -> std::path::PathBuf {
 /// anything above it) into a repo, rather than just `tili.kdl` inside it —
 /// `symlink_metadata(path)` resolves transparently through a symlinked
 /// parent, so the file itself still reports as an ordinary regular file.
+/// `~/Library/Application Support/tili/session.json` — duplicated from
+/// `tili-daemon::session::SessionStore::default_path` because `tili-cli`
+/// deliberately doesn't depend on the daemon crate (same precedent as the
+/// LaunchAgent paths above).
+fn default_session_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").expect("HOME must be set");
+    std::path::PathBuf::from(home).join("Library/Application Support/tili/session.json")
+}
+
+fn expand_tilde_path(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    std::path::PathBuf::from(path)
+}
+
 fn symlinked_ancestor(path: &std::path::Path) -> Option<std::path::PathBuf> {
     path.parent()?
         .ancestors()
@@ -851,6 +869,9 @@ fn uninstall() {
     let mut had_error = false;
 
     let config_path = default_config_path();
+    let configured_session_path = tili_config::load(&config_path)
+        .ok()
+        .and_then(|config| config.session.state_path.as_deref().map(expand_tilde_path));
     // `symlink_metadata` doesn't follow the link, unlike `Path::exists()` —
     // needed to tell "a real file" from "a symlink a dotfiles manager
     // (stow, chezmoi, ...) points here." Removing the symlink itself would
@@ -891,6 +912,13 @@ fn uninstall() {
     let socket_path = tili_ipc::default_socket_path();
     if socket_path.exists() && remove_file_reporting(&socket_path) {
         had_error = true;
+    }
+
+    let session_path = configured_session_path.unwrap_or_else(default_session_path);
+    for path in [&session_path, &session_path.with_extension("json.bak")] {
+        if path.exists() && remove_file_reporting(path) {
+            had_error = true;
+        }
     }
 
     // Best-effort, same as tili-daemon's own reset_accessibility_tcc — a
@@ -949,6 +977,7 @@ fn doctor(fix: bool) {
     let mut fixes: Vec<(String, Box<dyn FnOnce()>)> = Vec::new();
 
     let config_path = default_config_path();
+    let mut loaded_config = None;
     if !config_path.exists() {
         doctor_line(
             "config file",
@@ -960,11 +989,14 @@ fn doctor(fix: bool) {
         );
     } else {
         match tili_config::load(&config_path) {
-            Ok(_) => doctor_line(
-                "config file",
-                "ok",
-                &format!("{} parses", config_path.display()),
-            ),
+            Ok(config) => {
+                loaded_config = Some(config);
+                doctor_line(
+                    "config file",
+                    "ok",
+                    &format!("{} parses", config_path.display()),
+                );
+            }
             Err(e) => {
                 problems += 1;
                 doctor_line(
@@ -1081,6 +1113,54 @@ fn doctor(fix: bool) {
         doctor_line("IPC socket", "..", "not present (daemon not running)");
     }
 
+    let session_path = loaded_config
+        .as_ref()
+        .and_then(|config| config.session.state_path.as_deref())
+        .map(expand_tilde_path)
+        .unwrap_or_else(default_session_path);
+    if session_path.exists() {
+        match std::fs::read_to_string(&session_path)
+            .ok()
+            .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        {
+            Some(value) => {
+                let version = value
+                    .get("version")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let windows = value
+                    .get("windows")
+                    .and_then(serde_json::Value::as_array)
+                    .map_or(0, Vec::len);
+                doctor_line(
+                    "session state",
+                    "ok",
+                    &format!(
+                        "version {version}, {windows} window(s) at {}",
+                        session_path.display()
+                    ),
+                );
+            }
+            None => {
+                problems += 1;
+                doctor_line(
+                    "session state",
+                    "FAIL",
+                    &format!(
+                        "{} is unreadable or not valid JSON; the daemon will ignore it",
+                        session_path.display()
+                    ),
+                );
+            }
+        }
+    } else {
+        doctor_line(
+            "session state",
+            "..",
+            "none yet (will be written after changes)",
+        );
+    }
+
     // Permission grants and the last config load's semantic warnings both
     // live only in the daemon's own process — see `Command::Doctor`'s doc
     // comment for why this doesn't duplicate that check here instead.
@@ -1123,6 +1203,20 @@ fn doctor(fix: bool) {
                             for warning in &report.config_warnings {
                                 println!("                            - {warning}");
                             }
+                        }
+                        if let Some(restore) = &report.session_restore {
+                            doctor_line(
+                                "session restore",
+                                if restore.zero_match { ".." } else { "ok" },
+                                &format!(
+                                    "{} matched, {} missing, {} special deferred",
+                                    restore.matched,
+                                    restore.missing_normal,
+                                    restore.deferred_special
+                                ),
+                            );
+                        } else {
+                            doctor_line("session restore", "..", "no restore ran this start");
                         }
                     }
                     Err(_) => {

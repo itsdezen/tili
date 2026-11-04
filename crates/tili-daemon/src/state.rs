@@ -7,8 +7,15 @@ use tili_ax::{
     AxWindow, InstantFrameSetter, KeyCombo, Monitor, TweenedFrameSetter, WindowFrameSetter,
 };
 use tili_ipc::{Command, MonitorInfo, RectInfo, WindowInfo, WorkspaceInfo};
-use tili_tree::{Direction, Gaps, NodeId, Rect, Tree, WindowId};
+use tili_tree::{
+    Direction, Gaps, NodeId, NodeSnapshot, Rect, Tree, TreeAnchor, TreeSnapshot, WindowId,
+};
 
+use crate::session::{
+    CurrentWindowIdentity, RestoreMatcher, SavedActiveWorkspace, SavedFloatGeometry, SavedMonitor,
+    SavedMonitorRef, SavedPlacement, SavedRestore, SavedSession, SavedWindow, SavedWindowKind,
+    SavedWorkspace,
+};
 use crate::trace;
 
 /// The workspace new windows land in, and the one active at daemon startup.
@@ -427,6 +434,119 @@ fn restore_for(kind: &PlacementKind) -> Restore {
     }
 }
 
+fn saved_window_kind(kind: tili_ax::WindowKind) -> SavedWindowKind {
+    match kind {
+        tili_ax::WindowKind::Standard => SavedWindowKind::Standard,
+        tili_ax::WindowKind::Dialog => SavedWindowKind::Dialog,
+        tili_ax::WindowKind::Popup => SavedWindowKind::Popup,
+    }
+}
+
+fn saved_restore(restore: Restore) -> SavedRestore {
+    match restore {
+        Restore::Tiled => SavedRestore::Tiled,
+        Restore::Floating => SavedRestore::Floating,
+    }
+}
+
+fn saved_placement(kind: &PlacementKind) -> SavedPlacement {
+    match kind {
+        PlacementKind::Tiled => SavedPlacement::Tiled,
+        PlacementKind::Floating { manual } => SavedPlacement::Floating {
+            manual: manual.map(|geometry| SavedFloatGeometry {
+                rel_x: geometry.rel_x,
+                rel_y: geometry.rel_y,
+                rel_w: geometry.rel_w,
+                rel_h: geometry.rel_h,
+            }),
+        },
+        PlacementKind::NativeFullscreen(restore) => SavedPlacement::NativeFullscreen {
+            restore: saved_restore(*restore),
+        },
+        PlacementKind::Minimized(restore) => SavedPlacement::Minimized {
+            restore: saved_restore(*restore),
+        },
+        PlacementKind::HiddenApplication(restore) => SavedPlacement::HiddenApplication {
+            restore: saved_restore(*restore),
+        },
+        PlacementKind::Popup => SavedPlacement::Popup,
+    }
+}
+
+fn float_geometry_from_saved(geometry: SavedFloatGeometry) -> FloatGeometry {
+    FloatGeometry {
+        rel_x: geometry.rel_x,
+        rel_y: geometry.rel_y,
+        rel_w: geometry.rel_w,
+        rel_h: geometry.rel_h,
+    }
+}
+
+fn saved_restore_from_placement(placement: &SavedPlacement) -> Restore {
+    match placement {
+        SavedPlacement::Tiled | SavedPlacement::Popup => Restore::Tiled,
+        SavedPlacement::Floating { .. } => Restore::Floating,
+        SavedPlacement::NativeFullscreen { restore }
+        | SavedPlacement::Minimized { restore }
+        | SavedPlacement::HiddenApplication { restore } => match restore {
+            SavedRestore::Tiled => Restore::Tiled,
+            SavedRestore::Floating => Restore::Floating,
+        },
+    }
+}
+
+fn clamp_frame(mut frame: Rect, area: Rect) -> Rect {
+    frame.width = frame.width.clamp(0.0, area.width);
+    frame.height = frame.height.clamp(0.0, area.height);
+    frame.x = frame.x.clamp(area.x, area.x + area.width - frame.width);
+    frame.y = frame.y.clamp(area.y, area.y + area.height - frame.height);
+    frame
+}
+
+/// Rewrites a saved tree's leaf IDs to the current window IDs that matched
+/// them, dropping leaves that did not reopen.
+fn remap_snapshot(
+    node: &Option<NodeSnapshot>,
+    map: &HashMap<WindowId, WindowId>,
+) -> Option<NodeSnapshot> {
+    let node = node.as_ref()?;
+    match node {
+        NodeSnapshot::Window(saved) => map.get(saved).copied().map(NodeSnapshot::Window),
+        NodeSnapshot::Floating(saved) => map.get(saved).copied().map(NodeSnapshot::Floating),
+        NodeSnapshot::Container {
+            layout,
+            orientation,
+            children,
+            weights,
+            mru,
+        } => {
+            let mut kept_children = Vec::new();
+            let mut kept_weights = Vec::new();
+            let mut kept_mru = 0usize;
+            for (idx, (child, weight)) in children.iter().zip(weights.iter()).enumerate() {
+                if let Some(child) = remap_snapshot(&Some(child.clone()), map) {
+                    if idx <= *mru {
+                        kept_mru = kept_children.len();
+                    }
+                    kept_children.push(child);
+                    kept_weights.push(*weight);
+                }
+            }
+            if kept_children.is_empty() {
+                return None;
+            }
+            kept_mru = kept_mru.min(kept_children.len() - 1);
+            Some(NodeSnapshot::Container {
+                layout: *layout,
+                orientation: *orientation,
+                children: kept_children,
+                weights: kept_weights,
+                mru: kept_mru,
+            })
+        }
+    }
+}
+
 /// Bundle ids of macOS shell/system-UI processes whose windows are always
 /// transient chrome (context menus, thumbnail previews, toolbars,
 /// authorization prompts, Spotlight's search panel, notification banners)
@@ -732,6 +852,29 @@ struct CompiledFloatingRule {
     mode: tili_config::FloatingRuleMode,
 }
 
+/// One startup restore episode. Lives only from `begin_restore` until the
+/// grace deadline (or early finalization), then is replaced by
+/// `deferred_special` for windows that could not be seen yet.
+struct RestoreSession {
+    saved: SavedSession,
+    matcher: RestoreMatcher,
+    deadline: Instant,
+    /// Set once any new window has been offered to the matcher, so an empty
+    /// `remaining_normal` before the initial scan cannot finalize early.
+    saw_window: bool,
+    /// current `WindowId` -> the saved record it matched.
+    matched: HashMap<WindowId, SavedWindow>,
+}
+
+/// What the most recent restore did, exposed through `tili doctor`.
+#[derive(Clone, Debug, Default)]
+pub struct RestoreSummary {
+    pub matched: usize,
+    pub missing_normal: usize,
+    pub deferred_special: usize,
+    pub zero_match: bool,
+}
+
 /// Holds the daemon's entire mutable state. Both the socket handler and the
 /// global-hotkey handler call `dispatch` against the same `WmState`, so
 /// CLI-invoked and hotkey-invoked commands can never behave differently.
@@ -797,6 +940,10 @@ pub struct WmState {
     workspace_focus: HashMap<String, NodeId>,
     monitors: Vec<Monitor>,
     active_workspace: HashMap<u32, String>,
+    /// Last monitor a workspace was shown on, including while parked — used
+    /// by session restore so an inactive workspace returns to the display
+    /// it came from rather than the currently focused one.
+    workspace_monitor: HashMap<String, u32>,
     focused_monitor: u32,
     frame_setter: Box<dyn WindowFrameSetter>,
     gaps: Gaps,
@@ -989,6 +1136,29 @@ pub struct WmState {
     /// already uses for everything else, without a `tili-config`
     /// dependency of its own.
     menubar_style: tili_ipc::MenubarStyle,
+
+    /// Bumped whenever something a session snapshot would observe changes.
+    /// `main.rs` compares this against its last-saved revision to avoid
+    /// rewriting an unchanged session every debounce interval.
+    session_revision: u64,
+    /// `Some` while startup restore is still matching/deferring windows.
+    restore: Option<RestoreSession>,
+    /// Saved anchors for windows currently in a special placement, so they
+    /// can rejoin their old sibling slot when promoted back to Tiled or
+    /// Floating.
+    special_anchors: HashMap<WindowId, tili_tree::TreeAnchor>,
+    /// Floating geometry captured when a `Floating` window enters a special
+    /// state, so promoting it back restores the user's own frame.
+    special_float_manual: HashMap<WindowId, FloatGeometry>,
+    /// Special-state saved windows not seen during the startup grace —
+    /// they may still appear later (native fullscreen on another Space,
+    /// minimized app, ...). Matched lazily as windows show up.
+    deferred_special: Vec<SavedWindow>,
+    last_restore_summary: Option<RestoreSummary>,
+    /// Set when a restore matched zero windows: keep the previous on-disk
+    /// state rather than replacing it with an empty/partial session. Any
+    /// real user mutation clears this (via `mark_session_dirty`).
+    session_save_suppressed: bool,
 }
 
 impl Default for WmState {
@@ -1015,6 +1185,7 @@ impl Default for WmState {
             workspace_focus: HashMap::new(),
             monitors,
             active_workspace,
+            workspace_monitor: HashMap::new(),
             focused_monitor,
             frame_setter: Box::new(InstantFrameSetter),
             gaps: Gaps::default(),
@@ -1048,6 +1219,13 @@ impl Default for WmState {
             wake_lock_active: false,
             config_warnings: Vec::new(),
             menubar_style: tili_ipc::MenubarStyle::default(),
+            session_revision: 0,
+            restore: None,
+            special_anchors: HashMap::new(),
+            special_float_manual: HashMap::new(),
+            deferred_special: Vec::new(),
+            last_restore_summary: None,
+            session_save_suppressed: false,
         }
     }
 }
@@ -1102,6 +1280,7 @@ impl WmState {
             self.remove_placement(id, pid);
             self.pending_bundle_retries.remove(&id);
         }
+        self.mark_session_dirty();
         // A finalized removal changes which windows the tree lays out —
         // without this, survivors keep their pre-removal frames and the
         // closed window's slot stays an empty gap. `relayout_all_visible`,
@@ -1508,6 +1687,18 @@ impl WmState {
 
             self.windows.insert(id, window);
 
+            if is_new {
+                let restored = if self.restore_active() {
+                    self.try_restore_window(id, app_hidden, minimized, fullscreen)
+                } else {
+                    self.try_restore_deferred_special(id, app_hidden, minimized, fullscreen)
+                };
+                if restored {
+                    placed_new_window = true;
+                    continue;
+                }
+            }
+
             if !is_new {
                 if let Some(old_frame) = old_frame {
                     self.maybe_capture_manual_geometry(id, old_frame, live_frame);
@@ -1569,9 +1760,10 @@ impl WmState {
         // focused before.
         if placed_new_window {
             self.sync_focus_from_pid(pid);
+            self.mark_session_dirty();
         }
 
-        if !self.mouse_button_down {
+        if !self.mouse_button_down && !self.restore_active() {
             self.relayout_active();
         }
     }
@@ -1619,6 +1811,26 @@ impl WmState {
             tree.insert_floating(id, near, root_orientation)
         } else {
             tree.insert_window(id, near, root_orientation)
+        };
+        self.workspace_focus
+            .entry(workspace.to_string())
+            .or_insert(node);
+        node
+    }
+
+    fn insert_into_workspace_tree_at_anchor(
+        &mut self,
+        id: WindowId,
+        workspace: &str,
+        floating: bool,
+        anchor: &tili_tree::TreeAnchor,
+    ) -> NodeId {
+        let root_orientation = self.root_orientation_hint();
+        let tree = self.workspaces.entry(workspace.to_string()).or_default();
+        let node = if floating {
+            tree.insert_floating_at_anchor(id, anchor, root_orientation)
+        } else {
+            tree.insert_window_at_anchor(id, anchor, root_orientation)
         };
         self.workspace_focus
             .entry(workspace.to_string())
@@ -1737,8 +1949,33 @@ impl WmState {
                 PlacementKind::Tiled | PlacementKind::Floating { .. }
             )
         });
+        let anchor = if was_in_tree {
+            self.workspaces
+                .get(&workspace)
+                .and_then(|tree| tree.anchor_for(id))
+        } else {
+            self.special_anchors.get(&id).cloned()
+        };
+        if let Some(manual) = self
+            .placements
+            .get(&id)
+            .and_then(|placement| match placement.kind {
+                PlacementKind::Floating { manual } => manual,
+                _ => None,
+            })
+        {
+            self.special_float_manual.insert(id, manual);
+        } else if was_in_tree {
+            // A Tiled window has no manual float geometry to carry over.
+            self.special_float_manual.remove(&id);
+        }
         if was_in_tree {
             self.remove_from_tree(id, &workspace);
+        }
+        if let Some(anchor) = anchor {
+            self.special_anchors.insert(id, anchor);
+        } else {
+            self.special_anchors.remove(&id);
         }
         let kind = match special {
             SpecialKind::HiddenApplication => PlacementKind::HiddenApplication(restore),
@@ -1746,6 +1983,7 @@ impl WmState {
             SpecialKind::NativeFullscreen => PlacementKind::NativeFullscreen(restore),
         };
         self.placements.insert(id, Placement { workspace, kind });
+        self.mark_session_dirty();
     }
 
     /// Moves a window back out of a special placement state into whatever
@@ -1757,9 +1995,10 @@ impl WmState {
         let Some(workspace) = self.placements.get(&id).map(|p| p.workspace.clone()) else {
             return;
         };
+        let anchor = self.special_anchors.remove(&id).unwrap_or_default();
         match restore {
             Restore::Tiled => {
-                self.insert_into_workspace_tree(id, &workspace, false);
+                self.insert_into_workspace_tree_at_anchor(id, &workspace, false, &anchor);
                 self.placements.insert(
                     id,
                     Placement {
@@ -1769,7 +2008,8 @@ impl WmState {
                 );
             }
             Restore::Floating => {
-                self.insert_into_workspace_tree(id, &workspace, true);
+                let manual = self.special_float_manual.remove(&id);
+                self.insert_into_workspace_tree_at_anchor(id, &workspace, true, &anchor);
                 // Only write a real on-screen frame if `workspace` is
                 // actually the one showing on the focused monitor right now
                 // — same gate `place_new_window`'s `Floating` arm applies.
@@ -1783,15 +2023,20 @@ impl WmState {
                     id,
                     Placement {
                         workspace,
-                        kind: PlacementKind::Floating { manual: None },
+                        kind: PlacementKind::Floating { manual },
                     },
                 );
                 if is_active {
                     let area = self.focused_monitor_area();
-                    self.place_floating_window(id, area);
+                    if manual.is_some() {
+                        self.reposition_floating_for_monitor(self.focused_monitor);
+                    } else {
+                        self.place_floating_window(id, area);
+                    }
                 }
             }
         }
+        self.mark_session_dirty();
     }
 
     /// If `id` is a `Floating` window with no manual geometry captured yet,
@@ -1910,7 +2155,9 @@ impl WmState {
         }
         self.pending_launch_pids.remove(&pid);
         self.launch_active_workspace.remove(&pid);
+        self.deferred_special.retain(|saved| saved.pid != pid);
         self.relayout_all_visible();
+        self.mark_session_dirty();
     }
 
     /// Moves every currently-parked `Tiled`/`Floating` window back on
@@ -1961,6 +2208,650 @@ impl WmState {
             })
             .map(|(&id, _)| id)
             .collect()
+    }
+
+    /// Marks the session snapshot stale. Cheap and intentionally coarse.
+    pub fn mark_session_dirty(&mut self) {
+        self.session_revision = self.session_revision.wrapping_add(1);
+        self.session_save_suppressed = false;
+    }
+
+    pub fn session_revision(&self) -> u64 {
+        self.session_revision
+    }
+
+    pub fn session_save_suppressed(&self) -> bool {
+        self.session_save_suppressed
+    }
+
+    pub fn restore_active(&self) -> bool {
+        self.restore.is_some()
+    }
+
+    pub fn last_restore_summary(&self) -> Option<&RestoreSummary> {
+        self.last_restore_summary.as_ref()
+    }
+
+    pub fn begin_restore(&mut self, saved: SavedSession, grace: Duration) {
+        let matcher = RestoreMatcher::new(&saved.windows);
+        self.restore = Some(RestoreSession {
+            saved,
+            matcher,
+            deadline: Instant::now() + grace,
+            saw_window: false,
+            matched: HashMap::new(),
+        });
+        self.deferred_special.clear();
+        self.special_anchors.clear();
+        self.special_float_manual.clear();
+        self.session_save_suppressed = false;
+    }
+
+    /// Finalizes once the grace deadline expires, or once every normal
+    /// saved window has matched and at least one window has actually been
+    /// seen. Returns `true` when this call finalized.
+    pub fn tick_restore(&mut self) -> bool {
+        let ready = self.restore.as_ref().is_some_and(|restore| {
+            Instant::now() >= restore.deadline
+                || (restore.saw_window
+                    && restore.matcher.remaining_normal() == 0
+                    && restore.matcher.unmatched_special().is_empty())
+        });
+        if ready {
+            self.finalize_restore();
+        }
+        ready
+    }
+
+    /// Called from `apply_windows_changed` before a brand-new window's
+    /// normal placement. Returns `true` when the window was claimed by the
+    /// saved session (so the caller must skip rules/classify/place).
+    fn try_restore_window(
+        &mut self,
+        id: WindowId,
+        app_hidden: bool,
+        minimized: bool,
+        fullscreen: bool,
+    ) -> bool {
+        let Some(window) = self.windows.get(&id) else {
+            return false;
+        };
+        let identity = CurrentWindowIdentity::new(
+            id,
+            window.pid(),
+            window.bundle_id().unwrap_or_default(),
+            window.title(),
+            saved_window_kind(window.kind()),
+        );
+        let Some((saved, workspace)) = ({
+            let Some(restore) = self.restore.as_mut() else {
+                return false;
+            };
+            restore.saw_window = true;
+            restore.matcher.try_match(&identity).map(|(_, saved)| {
+                let workspace = if self.workspaces.contains_key(&saved.workspace) {
+                    saved.workspace.clone()
+                } else {
+                    self.default_workspace_name()
+                };
+                (saved, workspace)
+            })
+        }) else {
+            return false;
+        };
+
+        self.apply_restored_window(
+            id,
+            &saved,
+            &workspace,
+            special_kind(app_hidden, minimized, fullscreen),
+        );
+        true
+    }
+
+    fn apply_restored_window(
+        &mut self,
+        id: WindowId,
+        saved: &SavedWindow,
+        workspace: &str,
+        live_special: Option<SpecialKind>,
+    ) {
+        if let Some(restore) = self.restore.as_mut() {
+            restore.matched.insert(id, saved.clone());
+        }
+
+        if live_special.is_some() {
+            let restore = saved_restore_from_placement(&saved.placement);
+            let kind = match live_special {
+                Some(SpecialKind::HiddenApplication) => PlacementKind::HiddenApplication(restore),
+                Some(SpecialKind::Minimized) => PlacementKind::Minimized(restore),
+                Some(SpecialKind::NativeFullscreen) => PlacementKind::NativeFullscreen(restore),
+                None => PlacementKind::Tiled,
+            };
+            self.placements.insert(
+                id,
+                Placement {
+                    workspace: workspace.to_string(),
+                    kind,
+                },
+            );
+            let anchor = saved.anchor.clone().unwrap_or_default();
+            self.special_anchors.insert(id, anchor);
+            if let Some(manual) = saved.special_manual {
+                self.special_float_manual
+                    .insert(id, float_geometry_from_saved(manual));
+            }
+            return;
+        }
+
+        match &saved.placement {
+            SavedPlacement::Popup => {
+                self.placements.insert(
+                    id,
+                    Placement {
+                        workspace: workspace.to_string(),
+                        kind: PlacementKind::Popup,
+                    },
+                );
+            }
+            SavedPlacement::Tiled => {
+                self.insert_restored_normal(id, workspace, saved, false);
+            }
+            SavedPlacement::Floating { manual } => {
+                self.insert_restored_normal(id, workspace, saved, true);
+                self.placements.insert(
+                    id,
+                    Placement {
+                        workspace: workspace.to_string(),
+                        kind: PlacementKind::Floating {
+                            manual: manual.map(float_geometry_from_saved),
+                        },
+                    },
+                );
+            }
+            SavedPlacement::NativeFullscreen { restore }
+            | SavedPlacement::Minimized { restore }
+            | SavedPlacement::HiddenApplication { restore } => {
+                // Saved as special, but currently normal: restore the
+                // placement it was expected to return to.
+                let floating = matches!(restore, SavedRestore::Floating);
+                self.special_anchors
+                    .insert(id, saved.anchor.clone().unwrap_or_default());
+                self.insert_restored_normal(id, workspace, saved, floating);
+                self.placements.insert(
+                    id,
+                    Placement {
+                        workspace: workspace.to_string(),
+                        kind: match restore {
+                            SavedRestore::Tiled => PlacementKind::Tiled,
+                            SavedRestore::Floating => PlacementKind::Floating {
+                                manual: saved.special_manual.map(float_geometry_from_saved),
+                            },
+                        },
+                    },
+                );
+            }
+        }
+
+        if let Some(frame) = saved.frame
+            && self.restored_workspace_is_visible(workspace)
+            && let Some(monitor) = saved.monitor.as_ref().and_then(|m| self.find_monitor(m))
+        {
+            let area = self.monitor_frame(monitor).unwrap_or(frame.to_rect());
+            if let Some(window) = self.windows.get_mut(&id) {
+                window.set_frame(clamp_frame(frame.to_rect(), area));
+            }
+        }
+    }
+
+    fn insert_restored_normal(
+        &mut self,
+        id: WindowId,
+        workspace: &str,
+        saved: &SavedWindow,
+        floating: bool,
+    ) {
+        let anchor = saved.anchor.clone().unwrap_or_default();
+        let root_orientation = self.root_orientation_hint();
+        let tree = self.workspaces.entry(workspace.to_string()).or_default();
+        let node = if floating {
+            tree.insert_floating_at_anchor(id, &anchor, root_orientation)
+        } else {
+            tree.insert_window_at_anchor(id, &anchor, root_orientation)
+        };
+        self.workspace_focus
+            .entry(workspace.to_string())
+            .or_insert(node);
+        self.placements.insert(
+            id,
+            Placement {
+                workspace: workspace.to_string(),
+                kind: if floating {
+                    PlacementKind::Floating { manual: None }
+                } else {
+                    PlacementKind::Tiled
+                },
+            },
+        );
+    }
+
+    fn finalize_restore(&mut self) {
+        let Some(restore) = self.restore.take() else {
+            return;
+        };
+        let matched = restore.matched;
+        let mut saved_to_current: HashMap<WindowId, WindowId> = HashMap::new();
+        for (&current, saved) in &matched {
+            saved_to_current.insert(saved.id, current);
+        }
+
+        // Only windows that are currently normal belong in the tree; a
+        // saved-normal window that reopened in a special state stays out.
+        let mut tree_map = saved_to_current.clone();
+        for (&current, saved) in &matched {
+            if matches!(
+                saved.placement,
+                SavedPlacement::Tiled | SavedPlacement::Floating { .. }
+            ) && !matches!(
+                self.placements.get(&current).map(|p| &p.kind),
+                Some(PlacementKind::Tiled | PlacementKind::Floating { .. })
+            ) {
+                tree_map.remove(&saved.id);
+            }
+        }
+
+        for saved_workspace in &restore.saved.workspaces {
+            if !self.workspaces.contains_key(&saved_workspace.name) {
+                continue;
+            }
+            let snapshot = remap_snapshot(&saved_workspace.tree.root, &tree_map);
+            let default_layout = self
+                .workspaces
+                .get(&saved_workspace.name)
+                .map(Tree::default_layout)
+                .unwrap_or(tili_tree::Layout::Tiles);
+            let Ok(mut tree) = Tree::from_snapshot(&TreeSnapshot {
+                root: snapshot,
+                collapsed_root_layout: saved_workspace.tree.collapsed_root_layout,
+            }) else {
+                continue;
+            };
+            let collapsed = tree.collapsed_root_layout();
+            tree.set_default_layout(default_layout);
+            tree.set_collapsed_root_layout(collapsed);
+
+            // Preserve windows that were opened normally while restore was
+            // still in progress (unmatched new windows); the saved tree
+            // only contains matched leaves.
+            let existing: Vec<(WindowId, bool, TreeAnchor)> = self
+                .placements
+                .iter()
+                .filter(|(_, placement)| placement.workspace == saved_workspace.name)
+                .filter_map(|(&id, placement)| match placement.kind {
+                    PlacementKind::Tiled => Some((id, false)),
+                    PlacementKind::Floating { .. } => Some((id, true)),
+                    _ => None,
+                })
+                .filter(|(id, _)| tree.find_node(*id).is_none())
+                .map(|(id, floating)| {
+                    let anchor = self.special_anchors.get(&id).cloned().unwrap_or_default();
+                    (id, floating, anchor)
+                })
+                .collect();
+            for (id, floating, anchor) in existing {
+                let root_orientation = self.root_orientation_hint();
+                if floating {
+                    tree.insert_floating_at_anchor(id, &anchor, root_orientation);
+                } else {
+                    tree.insert_window_at_anchor(id, &anchor, root_orientation);
+                }
+            }
+
+            let focus = saved_workspace
+                .focus
+                .and_then(|saved| tree_map.get(&saved).copied())
+                .and_then(|window| tree.find_node(window))
+                .or_else(|| tree.default_focus());
+            if let Some(node) = focus {
+                self.workspace_focus
+                    .insert(saved_workspace.name.clone(), node);
+            } else {
+                self.workspace_focus.remove(&saved_workspace.name);
+            }
+
+            if let Some(saved) = saved_workspace.fullscreen {
+                if let Some(node) = tree_map
+                    .get(&saved)
+                    .copied()
+                    .and_then(|window| tree.find_node(window))
+                {
+                    self.fullscreen_focus
+                        .insert(saved_workspace.name.clone(), node);
+                } else {
+                    self.fullscreen_focus.remove(&saved_workspace.name);
+                }
+            } else {
+                self.fullscreen_focus.remove(&saved_workspace.name);
+            }
+
+            self.workspaces.insert(saved_workspace.name.clone(), tree);
+            if let Some(monitor) = saved_workspace
+                .monitor
+                .as_ref()
+                .and_then(|monitor| self.find_monitor(monitor))
+            {
+                self.workspace_monitor
+                    .insert(saved_workspace.name.clone(), monitor);
+            }
+        }
+
+        // Restore active workspaces per monitor, but only for workspaces
+        // that still exist in config. Missing monitors fall back to main.
+        if !restore.saved.active_workspaces.is_empty() {
+            self.active_workspace.clear();
+            for active in &restore.saved.active_workspaces {
+                let Some(monitor) = self.find_monitor(&active.monitor) else {
+                    continue;
+                };
+                let workspace = if self.workspaces.contains_key(&active.workspace) {
+                    active.workspace.clone()
+                } else {
+                    self.default_workspace_name()
+                };
+                self.active_workspace.insert(monitor, workspace);
+            }
+            let default_workspace = self.default_workspace_name();
+            for monitor in &self.monitors {
+                self.active_workspace
+                    .entry(monitor.id)
+                    .or_insert_with(|| default_workspace.clone());
+            }
+        }
+
+        if let Some(saved) = restore.saved.focused_monitor.as_ref()
+            && let Some(monitor) = self.find_monitor(saved)
+        {
+            self.focused_monitor = monitor;
+        } else if !self
+            .monitors
+            .iter()
+            .any(|monitor| monitor.id == self.focused_monitor)
+        {
+            self.focused_monitor = self.monitors.first().map_or(self.focused_monitor, |m| m.id);
+        }
+
+        if let Some(previous) = restore.saved.previous_workspace
+            && self.workspaces.contains_key(&previous)
+        {
+            self.previous_workspace = Some(previous);
+        }
+
+        // Special saved windows that were never seen stay available for a
+        // later appearance (native fullscreen on another Space, minimized
+        // app, ...). Normal unmatched windows are simply missing.
+        self.deferred_special = restore
+            .matcher
+            .unmatched_special()
+            .into_iter()
+            .filter(|saved| !matched.values().any(|m| m.id == saved.id))
+            .collect();
+
+        let deferred = self.deferred_special.len();
+        let matched_count = matched.len();
+        let missing_normal = restore.matcher.remaining_normal();
+        let zero_match = matched_count == 0;
+        self.last_restore_summary = Some(RestoreSummary {
+            matched: matched_count,
+            missing_normal,
+            deferred_special: deferred,
+            zero_match,
+        });
+
+        // Re-apply the final layout without animation: restored frames are
+        // already meaningful, and windows arriving from parking should snap,
+        // not slide across the screen.
+        self.frame_setter.set_suppressed(true);
+        for id in self.active_workspace.keys().copied().collect::<Vec<_>>() {
+            self.relayout_monitor(id);
+            self.reposition_floating_for_monitor(id);
+        }
+        self.frame_setter.set_suppressed(false);
+
+        // Everything not active on a monitor is parked exactly like a normal
+        // workspace switch would leave it.
+        let active: Vec<String> = self.active_workspace.values().cloned().collect();
+        let inactive: Vec<String> = self
+            .workspaces
+            .keys()
+            .filter(|name| !active.iter().any(|active| active == *name))
+            .cloned()
+            .collect();
+        for name in inactive {
+            self.park_workspace(&name);
+        }
+
+        let special_ids: HashSet<WindowId> = self
+            .placements
+            .iter()
+            .filter(|(_, placement)| {
+                matches!(
+                    placement.kind,
+                    PlacementKind::NativeFullscreen(_)
+                        | PlacementKind::Minimized(_)
+                        | PlacementKind::HiddenApplication(_)
+                )
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        self.special_anchors
+            .retain(|id, _| special_ids.contains(id));
+
+        self.mark_session_dirty();
+        self.session_save_suppressed = zero_match;
+    }
+
+    /// Called for a brand-new window after restore has finalized. Saved
+    /// special windows (native fullscreen/minimized/hidden) may appear much
+    /// later; claim them and put them back into their saved workspace.
+    fn try_restore_deferred_special(
+        &mut self,
+        id: WindowId,
+        app_hidden: bool,
+        minimized: bool,
+        fullscreen: bool,
+    ) -> bool {
+        if self.deferred_special.is_empty() {
+            return false;
+        }
+        let Some(window) = self.windows.get(&id) else {
+            return false;
+        };
+        let identity = CurrentWindowIdentity::new(
+            id,
+            window.pid(),
+            window.bundle_id().unwrap_or_default(),
+            window.title(),
+            saved_window_kind(window.kind()),
+        );
+        let mut matcher = RestoreMatcher::new(&self.deferred_special);
+        let Some((_, saved)) = matcher.try_match(&identity) else {
+            return false;
+        };
+        let workspace = if self.workspaces.contains_key(&saved.workspace) {
+            saved.workspace.clone()
+        } else {
+            self.default_workspace_name()
+        };
+        // Remove exactly the entry that matched; `try_match` returns a clone
+        // without its original index, so match by saved id/identity.
+        if let Some(pos) = self
+            .deferred_special
+            .iter()
+            .position(|entry| entry.id == saved.id)
+        {
+            self.deferred_special.remove(pos);
+        }
+        self.apply_restored_window(
+            id,
+            &saved,
+            &workspace,
+            special_kind(app_hidden, minimized, fullscreen),
+        );
+        let positionable = matches!(
+            self.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Tiled | PlacementKind::Floating { .. })
+        );
+        if positionable
+            && !self
+                .active_workspace
+                .values()
+                .any(|name| name == &workspace)
+        {
+            self.park(id);
+        }
+        self.mark_session_dirty();
+        true
+    }
+
+    fn restored_workspace_is_visible(&self, workspace: &str) -> bool {
+        let Some(restore) = &self.restore else {
+            return false;
+        };
+        restore.saved.active_workspaces.iter().any(|active| {
+            active.workspace == workspace && self.find_monitor(&active.monitor).is_some()
+        })
+    }
+
+    fn default_workspace_name(&self) -> String {
+        self.active_workspace
+            .get(&self.focused_monitor)
+            .cloned()
+            .or_else(|| self.workspaces.keys().min().cloned())
+            .unwrap_or_else(|| DEFAULT_WORKSPACE.to_string())
+    }
+
+    fn find_monitor(&self, saved: &SavedMonitorRef) -> Option<u32> {
+        if let Some(monitor) = self
+            .monitors
+            .iter()
+            .find(|monitor| monitor.id == saved.id_hint)
+        {
+            return Some(monitor.id);
+        }
+        let target = saved.frame.to_rect();
+        if let Some(monitor) = self.monitors.iter().find(|monitor| {
+            (monitor.frame.x - target.x).abs() <= 50.0 && (monitor.frame.y - target.y).abs() <= 50.0
+        }) {
+            return Some(monitor.id);
+        }
+        if saved.is_main {
+            return self
+                .monitors
+                .iter()
+                .find(|monitor| monitor.is_main)
+                .map(|monitor| monitor.id);
+        }
+        self.monitors.first().map(|monitor| monitor.id)
+    }
+
+    fn monitor_ref(&self, id: u32) -> Option<SavedMonitorRef> {
+        self.monitors
+            .iter()
+            .find(|monitor| monitor.id == id)
+            .map(|monitor| SavedMonitorRef {
+                id_hint: monitor.id,
+                frame: monitor.frame.into(),
+                is_main: monitor.is_main,
+            })
+    }
+
+    fn monitor_ref_for_workspace(&self, workspace: &str) -> Option<SavedMonitorRef> {
+        self.active_workspace
+            .iter()
+            .find(|(_, name)| name.as_str() == workspace)
+            .and_then(|(id, _)| self.monitor_ref(*id))
+            .or_else(|| self.monitor_ref(self.focused_monitor))
+    }
+
+    pub fn snapshot_session(&self) -> SavedSession {
+        let monitors: Vec<SavedMonitor> = self
+            .monitors
+            .iter()
+            .map(|monitor| SavedMonitor {
+                id_hint: monitor.id,
+                frame: monitor.frame.into(),
+                is_main: monitor.is_main,
+            })
+            .collect();
+        let focused_monitor = self.monitor_ref(self.focused_monitor);
+        let active_workspaces = self
+            .active_workspace
+            .iter()
+            .filter_map(|(&monitor, workspace)| {
+                self.monitor_ref(monitor)
+                    .map(|monitor| SavedActiveWorkspace {
+                        monitor,
+                        workspace: workspace.clone(),
+                    })
+            })
+            .collect();
+        let workspaces = self
+            .workspaces
+            .iter()
+            .map(|(name, tree)| SavedWorkspace {
+                name: name.clone(),
+                tree: tree.snapshot(),
+                focus: self
+                    .workspace_focus
+                    .get(name)
+                    .and_then(|node| tree.window_at(*node)),
+                fullscreen: self
+                    .fullscreen_focus
+                    .get(name)
+                    .and_then(|node| tree.window_at(*node)),
+                monitor: self
+                    .workspace_monitor
+                    .get(name)
+                    .and_then(|id| self.monitor_ref(*id))
+                    .or_else(|| self.monitor_ref_for_workspace(name)),
+            })
+            .collect();
+        let windows = self
+            .placements
+            .iter()
+            .filter_map(|(&id, placement)| {
+                let window = self.windows.get(&id)?;
+                Some(SavedWindow {
+                    id,
+                    pid: window.pid(),
+                    bundle_id: window.bundle_id().unwrap_or_default().to_string(),
+                    title: window.title().to_string(),
+                    kind: saved_window_kind(window.kind()),
+                    workspace: placement.workspace.clone(),
+                    placement: saved_placement(&placement.kind),
+                    anchor: self.special_anchors.get(&id).cloned(),
+                    special_manual: self.special_float_manual.get(&id).map(|geometry| {
+                        SavedFloatGeometry {
+                            rel_x: geometry.rel_x,
+                            rel_y: geometry.rel_y,
+                            rel_w: geometry.rel_w,
+                            rel_h: geometry.rel_h,
+                        }
+                    }),
+                    frame: Some(window.frame().into()),
+                    monitor: self.monitor_ref_for_workspace(&placement.workspace),
+                })
+            })
+            .collect();
+
+        SavedSession::new(
+            monitors,
+            focused_monitor,
+            active_workspaces,
+            self.previous_workspace.clone(),
+            workspaces,
+            windows,
+        )
     }
 
     pub fn list_windows(&self) -> Vec<WindowInfo> {
@@ -2350,6 +3241,11 @@ impl WmState {
             if let Some(name) = self.active_workspace.remove(&old_id) {
                 self.active_workspace.insert(new_id, name);
             }
+            for monitor in self.workspace_monitor.values_mut() {
+                if *monitor == old_id {
+                    *monitor = new_id;
+                }
+            }
             if self.focused_monitor == old_id {
                 self.focused_monitor = new_id;
             }
@@ -2368,7 +3264,8 @@ impl WmState {
         for id in diff.connected {
             let name = format!("monitor-{id}");
             self.workspaces.entry(name.clone()).or_default();
-            self.active_workspace.insert(id, name);
+            self.active_workspace.insert(id, name.clone());
+            self.workspace_monitor.insert(name, id);
         }
 
         for id in self.active_workspace.keys().copied().collect::<Vec<_>>() {
@@ -3200,6 +4097,8 @@ impl WmState {
                 Some(displaced_name) => {
                     self.active_workspace
                         .insert(old_monitor, displaced_name.clone());
+                    self.workspace_monitor
+                        .insert(displaced_name.clone(), old_monitor);
                 }
                 None => {
                     self.active_workspace.remove(&old_monitor);
@@ -3214,6 +4113,8 @@ impl WmState {
 
         self.active_workspace
             .insert(target_monitor, workspace.to_string());
+        self.workspace_monitor
+            .insert(workspace.to_string(), target_monitor);
         self.relayout_monitor(target_monitor);
         self.reposition_floating_for_monitor(target_monitor);
         if let Some(old_monitor) = current_monitor {
@@ -3372,6 +4273,8 @@ impl WmState {
             match &current {
                 Some(outgoing_name) => {
                     self.active_workspace.insert(swap_id, outgoing_name.clone());
+                    self.workspace_monitor
+                        .insert(outgoing_name.clone(), swap_id);
                 }
                 None => {
                     self.active_workspace.remove(&swap_id);
@@ -3380,6 +4283,7 @@ impl WmState {
         }
 
         self.active_workspace.insert(monitor_id, name.to_string());
+        self.workspace_monitor.insert(name.to_string(), monitor_id);
 
         // Suppressed even under `Settings::animate`: these calls reveal
         // whatever this workspace's windows were left at — for most of
@@ -3637,6 +4541,8 @@ impl WmState {
         self.floating_placed.remove(&id);
         self.floating_centered.remove(&id);
         self.force_ignored_window_ids.remove(&id);
+        self.special_anchors.remove(&id);
+        self.special_float_manual.remove(&id);
         let Some(placement) = self.placements.remove(&id) else {
             return;
         };
@@ -7526,5 +8432,135 @@ mod tests {
         assert!(state.join(Direction::Right).is_err());
         assert!(state.resize(0.1).is_err());
         assert!(state.balance_sizes(false).is_err());
+    }
+
+    fn saved_test_window(id: WindowId, placement: SavedPlacement) -> SavedWindow {
+        SavedWindow {
+            id,
+            pid: id as i32,
+            bundle_id: "com.example.app".to_string(),
+            title: format!("window {id}"),
+            kind: SavedWindowKind::Standard,
+            workspace: DEFAULT_WORKSPACE.to_string(),
+            placement,
+            anchor: None,
+            special_manual: None,
+            frame: None,
+            monitor: None,
+        }
+    }
+
+    #[test]
+    fn finalize_restore_rebuilds_tiles_accordion_and_floating() {
+        let mut state = WmState::default();
+        state.workspaces.clear();
+        state
+            .workspaces
+            .insert(DEFAULT_WORKSPACE.to_string(), Tree::new());
+        state
+            .active_workspace
+            .insert(state.focused_monitor, DEFAULT_WORKSPACE.to_string());
+
+        let saved = SavedSession {
+            version: 1,
+            saved_at_unix_ms: 0,
+            monitors: Vec::new(),
+            focused_monitor: None,
+            active_workspaces: Vec::new(),
+            previous_workspace: None,
+            workspaces: vec![SavedWorkspace {
+                name: DEFAULT_WORKSPACE.to_string(),
+                tree: TreeSnapshot {
+                    root: Some(NodeSnapshot::Container {
+                        layout: tili_tree::Layout::Accordion,
+                        orientation: tili_tree::Orientation::Horizontal,
+                        children: vec![
+                            NodeSnapshot::Window(1),
+                            NodeSnapshot::Window(2),
+                            NodeSnapshot::Floating(3),
+                        ],
+                        weights: vec![1.0, 2.0, 1.0],
+                        mru: 2,
+                    }),
+                    collapsed_root_layout: None,
+                },
+                focus: Some(2),
+                fullscreen: None,
+                monitor: None,
+            }],
+            windows: Vec::new(),
+        };
+        state.begin_restore(saved, Duration::from_secs(60));
+        {
+            let restore = state.restore.as_mut().unwrap();
+            restore
+                .matched
+                .insert(101, saved_test_window(1, SavedPlacement::Tiled));
+            restore
+                .matched
+                .insert(102, saved_test_window(2, SavedPlacement::Tiled));
+            restore.matched.insert(
+                103,
+                saved_test_window(3, SavedPlacement::Floating { manual: None }),
+            );
+        }
+        state.placements.insert(
+            101,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.placements.insert(
+            102,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.placements.insert(
+            103,
+            Placement {
+                workspace: DEFAULT_WORKSPACE.to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+
+        state.finalize_restore();
+
+        let tree = state
+            .workspaces
+            .get(DEFAULT_WORKSPACE)
+            .expect("restored workspace");
+        let mut ids = tree.window_ids();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![101, 102, 103]);
+        assert!(tree.is_root_accordion());
+        assert!(tree.find_node(103).is_some(), "floating leaf restored");
+        let focus = state.workspace_focus.get(DEFAULT_WORKSPACE).copied();
+        assert_eq!(tree.window_at(focus.unwrap()), Some(102));
+    }
+
+    #[test]
+    fn remap_snapshot_drops_missing_and_remaps_present_leaves() {
+        let snapshot = TreeSnapshot {
+            root: Some(NodeSnapshot::Container {
+                layout: tili_tree::Layout::Tiles,
+                orientation: tili_tree::Orientation::Horizontal,
+                children: vec![NodeSnapshot::Window(1), NodeSnapshot::Window(2)],
+                weights: vec![1.0, 1.0],
+                mru: 1,
+            }),
+            collapsed_root_layout: None,
+        };
+        let mut map = HashMap::new();
+        map.insert(2, 102);
+        let remapped = remap_snapshot(&snapshot.root, &map).expect("one leaf remains");
+        let placeholders = TreeSnapshot {
+            root: Some(remapped),
+            collapsed_root_layout: None,
+        };
+        let tree = Tree::from_snapshot(&placeholders).expect("valid snapshot");
+        assert_eq!(tree.window_ids(), vec![102]);
     }
 }

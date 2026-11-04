@@ -1,14 +1,17 @@
 mod dispatch;
+mod session;
 mod socket;
 mod state;
 mod trace;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use dispatch::dispatch;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+use session::{LoadOutcome, SessionStore};
 use state::WmState;
 use tili_ax::WmEvent;
 use tili_ipc::{Command, Response};
@@ -263,10 +266,53 @@ async fn async_daemon_main(
 
     let config_path = tili_config::default_config_path();
     ensure_starter_config_exists(&config_path);
+    let mut session_store: Option<SessionStore> = None;
+    let mut session_debounce = Duration::from_secs(3);
+    let mut session_periodic = Duration::from_secs(60);
     match tili_config::load(&config_path) {
         Ok(config) => {
             println!("tili-daemon: loaded config from {}", config_path.display());
+            let session_grace = Duration::from_millis(config.session.restore_grace_ms);
+            session_debounce = Duration::from_millis(config.session.save_debounce_ms);
+            session_periodic = Duration::from_secs(config.session.periodic_save_seconds.max(1));
             state.apply_config(&config);
+            if config.session.enabled {
+                let path = config
+                    .session
+                    .state_path
+                    .as_deref()
+                    .map(expand_tilde)
+                    .unwrap_or_else(SessionStore::default_path);
+                let store = SessionStore::new(path);
+                match store.load() {
+                    LoadOutcome::Loaded(saved) => {
+                        println!(
+                            "tili-daemon: restoring session from {} ({} saved window(s))",
+                            store.path().display(),
+                            saved.windows.len()
+                        );
+                        state.begin_restore(saved, session_grace);
+                    }
+                    LoadOutcome::Missing => {
+                        println!(
+                            "tili-daemon: no session state at {}",
+                            store.path().display()
+                        );
+                    }
+                    LoadOutcome::Corrupt(error) => {
+                        eprintln!("tili-daemon: ignoring corrupt session state: {error}");
+                    }
+                    LoadOutcome::UnsupportedVersion(version) => {
+                        eprintln!(
+                            "tili-daemon: ignoring session state version {version} (expected {})",
+                            session::SESSION_VERSION
+                        );
+                    }
+                }
+                session_store = Some(store);
+            } else {
+                println!("tili-daemon: session persistence disabled by config");
+            }
         }
         Err(e) => eprintln!(
             "tili-daemon: failed to load {}: {e} (using defaults)",
@@ -275,6 +321,14 @@ async fn async_daemon_main(
     }
     sync_active_combos(&active_combos, &state);
     sync_animation_tick(&mut animation_tick, &mut animation_tick_period, &state);
+
+    // Session save scheduler: snapshot on the event loop, write off-loop.
+    // `last_saved_revision` is captured when a write is *started*, so a
+    // mutation that lands while the writer runs stays dirty for the next
+    // debounce.
+    let mut last_saved_revision = state.session_revision();
+    let mut last_save_at = Instant::now();
+    let mut session_save_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Single loop, no locks around WmState: every source of change (client
     // connections, background AX/NSWorkspace events, config reloads,
@@ -375,6 +429,7 @@ async fn async_daemon_main(
                         // untouched, and `tili-menubar`'s refresh issues one
                         // of those (`Snapshot`) every time it wakes up.
                         if mutates {
+                            state.mark_session_dirty();
                             sync_active_combos(&active_combos, &state);
                         }
                         changed = mutates || pids_changed;
@@ -394,6 +449,12 @@ async fn async_daemon_main(
                             event,
                             WmEvent::WindowsChanged { .. } | WmEvent::AppTerminated { .. }
                         );
+                        let session_event = matches!(
+                            event,
+                            WmEvent::WindowsChanged { .. }
+                                | WmEvent::AppTerminated { .. }
+                                | WmEvent::FrontmostAppChanged { .. }
+                        );
                         handle_event(
                             &mut state,
                             &mut pending_pids,
@@ -403,6 +464,9 @@ async fn async_daemon_main(
                             event,
                         )
                         .await;
+                        if session_event {
+                            state.mark_session_dirty();
+                        }
                     }
                     None => eprintln!("tili-daemon: event watcher channel closed unexpectedly"),
                 }
@@ -411,9 +475,37 @@ async fn async_daemon_main(
                 state.step_animations();
             }
             _ = maintenance_tick.tick() => {
+                // Finish a previous off-loop save before considering another.
+                if session_save_task.as_ref().is_some_and(|task| task.is_finished()) {
+                    if let Some(task) = session_save_task.take() {
+                        let _ = task.await;
+                    }
+                    last_save_at = Instant::now();
+                }
+
                 let pids_changed = drain_pending_windows(&mut state, &mut pending_pids);
                 state.finalize_expired_removals();
                 state.finalize_expired_launches();
+                let restore_finalized = state.tick_restore();
+
+                let session_due = last_save_at.elapsed() >= session_periodic
+                    || (state.session_revision() != last_saved_revision
+                        && last_save_at.elapsed() >= session_debounce);
+                if let (Some(store), true) = (&session_store, session_save_task.is_none())
+                    && !state.restore_active()
+                    && !state.session_save_suppressed()
+                    && session_due
+                {
+                    let snapshot = state.snapshot_session();
+                    let store = store.clone();
+                    last_saved_revision = state.session_revision();
+                    last_save_at = Instant::now();
+                    session_save_task = Some(tokio::task::spawn_blocking(move || {
+                        if let Err(error) = store.save(&snapshot) {
+                            eprintln!("tili-daemon: failed to save session state: {error}");
+                        }
+                    }));
+                }
 
                 // Checked after the pids above so a WindowsChanged for a
                 // just-launched pid that lands in the same tick the
@@ -431,11 +523,12 @@ async fn async_daemon_main(
                         state.reveal_current_frontmost(pending_reveal_allow_unchanged);
                     }
                 }
-                changed = pids_changed || reveal_due;
+                changed = pids_changed || reveal_due || restore_finalized;
             }
             Some(config) = config_updates.recv() => {
                 println!("tili-daemon: config reloaded from {}", config_path.display());
                 state.apply_config(&config);
+                state.mark_session_dirty();
                 sync_active_combos(&active_combos, &state);
                 sync_animation_tick(&mut animation_tick, &mut animation_tick_period, &state);
                 changed = true;
@@ -477,6 +570,7 @@ async fn async_daemon_main(
                     if auto_exits {
                         state.exit_mode();
                     }
+                    state.mark_session_dirty();
                     changed = true;
                 }
                 sync_active_combos(&active_combos, &state);
@@ -485,6 +579,7 @@ async fn async_daemon_main(
                 // A monitor connected/disconnected/reconfigured (M9) — the
                 // callback doesn't say which, so just re-enumerate.
                 state.on_displays_changed();
+                state.mark_session_dirty();
                 changed = true;
             }
             Some(signal) = mouse_events.recv() => {
@@ -504,6 +599,7 @@ async fn async_daemon_main(
                     }
                     tili_ax::MouseSignal::ButtonUp => {
                         state.on_mouse_button_up();
+                        state.mark_session_dirty();
                         // Catches a Dock icon click reactivating an app
                         // that was already the OS's nominal frontmost
                         // application (common when the current workspace
@@ -525,8 +621,27 @@ async fn async_daemon_main(
         }
     }
 
+    if let Some(task) = session_save_task.take() {
+        let _ = task.await;
+    }
+    if let Some(store) = &session_store
+        && !state.restore_active()
+        && !state.session_save_suppressed()
+        && let Err(error) = store.save(&state.snapshot_session())
+    {
+        eprintln!("tili-daemon: failed to save session on shutdown: {error}");
+    }
     let _ = std::fs::remove_file(tili_ipc::default_socket_path());
     Ok(())
+}
+
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    std::path::PathBuf::from(path)
 }
 
 /// Unloads and removes this daemon's own LaunchAgent, the same end-state as

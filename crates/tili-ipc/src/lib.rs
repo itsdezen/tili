@@ -249,6 +249,18 @@ pub struct DoctorReport {
     /// undeclared workspace in `workspace-rules`, or an invalid regex in
     /// `floating-rules`. Empty if the last load had none to skip.
     pub config_warnings: Vec<String>,
+    /// What the most recent startup session restore did, if one ran.
+    #[serde(default)]
+    pub session_restore: Option<SessionRestoreReport>,
+}
+
+/// `tili doctor`'s view of the last session restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRestoreReport {
+    pub matched: usize,
+    pub missing_normal: usize,
+    pub deferred_special: usize,
+    pub zero_match: bool,
 }
 
 /// Whether the badge pill is drawn solid (with the text/glyph knocked out
