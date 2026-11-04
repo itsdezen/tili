@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use slotmap::{SlotMap, new_key_type};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -10,7 +12,7 @@ pub struct Rect {
     pub height: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Orientation {
     /// Children arranged side by side (varies x, splits width) — i3 calls
     /// this "splith".
@@ -50,7 +52,7 @@ pub struct ResizeHandle {
 /// Which of a container's two rendering modes is active — orthogonal to
 /// `Orientation` (a container has both, independently: layout and
 /// orientation vary separately).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Layout {
     #[default]
     Tiles,
@@ -110,6 +112,67 @@ pub enum Node {
         window: WindowId,
     },
 }
+
+/// A serializable, [`NodeId`]-free description of a [`Tree`].
+///
+/// `NodeId`s are SlotMap keys and are not stable across process restarts;
+/// session persistence stores [`WindowId`] leaves instead and rebuilds the
+/// tree with [`Tree::from_snapshot`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TreeSnapshot {
+    pub root: Option<NodeSnapshot>,
+    /// Layout remembered for the next container after a workspace
+    /// collapsed to a lone window (see `Tree::collapsed_root_layout`).
+    #[serde(default)]
+    pub collapsed_root_layout: Option<Layout>,
+}
+
+/// One node in a [`TreeSnapshot`]. Mirrors [`Node`] but carries no internal
+/// IDs — containers own ordered children recursively, and leaves carry the
+/// real macOS [`WindowId`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum NodeSnapshot {
+    Container {
+        layout: Layout,
+        orientation: Orientation,
+        children: Vec<NodeSnapshot>,
+        weights: Vec<f32>,
+        mru: usize,
+    },
+    Window(WindowId),
+    Floating(WindowId),
+}
+
+/// A position relative to the surviving siblings of a window, captured
+/// before that window leaves the tree (native fullscreen, minimized, hidden
+/// application). Used to put it back where it was when it returns.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeAnchor {
+    pub before: Option<WindowId>,
+    pub after: Option<WindowId>,
+}
+
+/// Why a [`TreeSnapshot`] could not be rebuilt into a [`Tree`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SnapshotError {
+    DuplicateWindow(WindowId),
+    EmptyContainer,
+    InvalidWeights,
+    InvalidMru,
+}
+
+impl fmt::Display for SnapshotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateWindow(window) => write!(f, "duplicate window id {window}"),
+            Self::EmptyContainer => write!(f, "container has no children"),
+            Self::InvalidWeights => write!(f, "container weights do not match its children"),
+            Self::InvalidMru => write!(f, "container mru is out of range"),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotError {}
 
 /// The container tree for one workspace: an n-ary tree of containers with
 /// windows at the leaves. Pure data + algorithms — no macOS/AX types appear
@@ -174,6 +237,331 @@ impl Tree {
     pub fn set_default_layout(&mut self, layout: Layout) {
         self.default_layout = layout;
         self.collapsed_root_layout = None;
+    }
+
+    /// Layout the next root container will be created with. Exposed so a
+    /// session restore can rebuild a tree without losing the workspace's
+    /// configured default layout.
+    pub fn default_layout(&self) -> Layout {
+        self.default_layout
+    }
+
+    pub fn collapsed_root_layout(&self) -> Option<Layout> {
+        self.collapsed_root_layout
+    }
+
+    /// Restores the remembered collapsed-root layout after a session
+    /// restore has set the config-derived default via `set_default_layout`
+    /// (which deliberately clears it for a normal config reload).
+    pub fn set_collapsed_root_layout(&mut self, layout: Option<Layout>) {
+        self.collapsed_root_layout = layout;
+    }
+
+    /// Serializable view of the whole tree. Every leaf is a real
+    /// [`WindowId`]; no `NodeId` escapes this crate.
+    pub fn snapshot(&self) -> TreeSnapshot {
+        TreeSnapshot {
+            root: self.root.and_then(|root| self.snapshot_node(root)),
+            collapsed_root_layout: self.collapsed_root_layout,
+        }
+    }
+
+    /// Snapshot with leaves filtered out: used during startup restore to
+    /// drop saved windows that no longer exist. Empty containers collapse,
+    /// and every surviving container's weights/mru are adjusted to match.
+    pub fn snapshot_filtered(&self, keep: &dyn Fn(WindowId) -> bool) -> TreeSnapshot {
+        TreeSnapshot {
+            root: self
+                .root
+                .and_then(|root| self.snapshot_node_filtered(root, keep)),
+            collapsed_root_layout: self.collapsed_root_layout,
+        }
+    }
+
+    fn snapshot_node(&self, node: NodeId) -> Option<NodeSnapshot> {
+        match self.nodes.get(node)? {
+            Node::Container {
+                layout,
+                orientation,
+                children,
+                weights,
+                mru,
+            } => Some(NodeSnapshot::Container {
+                layout: *layout,
+                orientation: *orientation,
+                children: children
+                    .iter()
+                    .filter_map(|&child| self.snapshot_node(child))
+                    .collect(),
+                weights: weights.clone(),
+                mru: *mru,
+            }),
+            Node::Window { window } => Some(NodeSnapshot::Window(*window)),
+            Node::Floating { window } => Some(NodeSnapshot::Floating(*window)),
+        }
+    }
+
+    fn snapshot_node_filtered(
+        &self,
+        node: NodeId,
+        keep: &dyn Fn(WindowId) -> bool,
+    ) -> Option<NodeSnapshot> {
+        match self.nodes.get(node)? {
+            Node::Container {
+                layout,
+                orientation,
+                children,
+                weights,
+                mru,
+            } => {
+                let mut kept_children = Vec::with_capacity(children.len());
+                let mut kept_weights = Vec::with_capacity(children.len());
+                let mut kept_mru = 0usize;
+                for (idx, (&child, &weight)) in children.iter().zip(weights.iter()).enumerate() {
+                    if let Some(snapshot) = self.snapshot_node_filtered(child, keep) {
+                        if idx <= *mru {
+                            kept_mru = kept_children.len();
+                        }
+                        kept_children.push(snapshot);
+                        kept_weights.push(weight);
+                    }
+                }
+                if kept_children.is_empty() {
+                    return None;
+                }
+                kept_mru = kept_mru.min(kept_children.len() - 1);
+                Some(NodeSnapshot::Container {
+                    layout: *layout,
+                    orientation: *orientation,
+                    children: kept_children,
+                    weights: kept_weights,
+                    mru: kept_mru,
+                })
+            }
+            Node::Window { window } => keep(*window).then_some(NodeSnapshot::Window(*window)),
+            Node::Floating { window } => keep(*window).then_some(NodeSnapshot::Floating(*window)),
+        }
+    }
+
+    /// Rebuilds a tree from a snapshot. The resulting tree is normalized
+    /// (single-child containers flatten, redundant same-orientation Tiles
+    /// containers merge) exactly like any other tree mutation.
+    pub fn from_snapshot(snapshot: &TreeSnapshot) -> Result<Self, SnapshotError> {
+        let mut tree = Self {
+            collapsed_root_layout: snapshot.collapsed_root_layout,
+            ..Self::default()
+        };
+        let Some(root) = snapshot.root.as_ref() else {
+            return Ok(tree);
+        };
+        let mut seen = std::collections::HashSet::new();
+        let root_id =
+            Self::build_snapshot_node(&mut tree.nodes, &mut tree.parents, root, &mut seen)?;
+        tree.root = Some(root_id);
+        tree.normalize();
+        Ok(tree)
+    }
+
+    fn build_snapshot_node(
+        nodes: &mut SlotMap<NodeId, Node>,
+        parents: &mut HashMap<NodeId, NodeId>,
+        snapshot: &NodeSnapshot,
+        seen: &mut std::collections::HashSet<WindowId>,
+    ) -> Result<NodeId, SnapshotError> {
+        match snapshot {
+            NodeSnapshot::Window(window) => {
+                if !seen.insert(*window) {
+                    return Err(SnapshotError::DuplicateWindow(*window));
+                }
+                Ok(nodes.insert(Node::Window { window: *window }))
+            }
+            NodeSnapshot::Floating(window) => {
+                if !seen.insert(*window) {
+                    return Err(SnapshotError::DuplicateWindow(*window));
+                }
+                Ok(nodes.insert(Node::Floating { window: *window }))
+            }
+            NodeSnapshot::Container {
+                layout,
+                orientation,
+                children,
+                weights,
+                mru,
+            } => {
+                if children.is_empty() {
+                    return Err(SnapshotError::EmptyContainer);
+                }
+                if children.len() != weights.len()
+                    || weights
+                        .iter()
+                        .any(|weight| !weight.is_finite() || *weight <= 0.0)
+                {
+                    return Err(SnapshotError::InvalidWeights);
+                }
+                if *mru >= children.len() {
+                    return Err(SnapshotError::InvalidMru);
+                }
+                let child_ids = children
+                    .iter()
+                    .map(|child| Self::build_snapshot_node(nodes, parents, child, seen))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let container = nodes.insert(Node::Container {
+                    layout: *layout,
+                    orientation: *orientation,
+                    children: child_ids.clone(),
+                    weights: weights.clone(),
+                    mru: *mru,
+                });
+                for child in child_ids {
+                    parents.insert(child, container);
+                }
+                Ok(container)
+            }
+        }
+    }
+
+    /// Position of `window` relative to its nearest sibling leaves, if it is
+    /// in this tree. Used to put a window back after a native-fullscreen,
+    /// minimized, or hidden-application round trip.
+    pub fn anchor_for(&self, window: WindowId) -> Option<TreeAnchor> {
+        let node = self.find_node(window)?;
+        let Some(&parent) = self.parents.get(&node) else {
+            return Some(TreeAnchor::default());
+        };
+        let Node::Container { children, .. } = self.nodes.get(parent)? else {
+            return Some(TreeAnchor::default());
+        };
+        let idx = children.iter().position(|&child| child == node)?;
+        let before = idx
+            .checked_sub(1)
+            .and_then(|i| children.get(i))
+            .and_then(|&child| self.last_leaf_window(child));
+        let after = children
+            .get(idx + 1)
+            .and_then(|&child| self.first_leaf_window(child));
+        Some(TreeAnchor { before, after })
+    }
+
+    fn first_leaf_window(&self, mut node: NodeId) -> Option<WindowId> {
+        loop {
+            match self.nodes.get(node)? {
+                Node::Window { window } | Node::Floating { window } => return Some(*window),
+                Node::Container { children, .. } => node = *children.first()?,
+            }
+        }
+    }
+
+    fn last_leaf_window(&self, mut node: NodeId) -> Option<WindowId> {
+        loop {
+            match self.nodes.get(node)? {
+                Node::Window { window } | Node::Floating { window } => return Some(*window),
+                Node::Container { children, .. } => node = *children.last()?,
+            }
+        }
+    }
+
+    /// Inserts a tiled window relative to [`TreeAnchor`] captured by
+    /// [`anchor_for`]. Missing anchors fall back to the usual MRU insertion.
+    pub fn insert_window_at_anchor(
+        &mut self,
+        window: WindowId,
+        anchor: &TreeAnchor,
+        root_orientation: Orientation,
+    ) -> NodeId {
+        self.insert_leaf_at_anchor(Node::Window { window }, anchor, root_orientation)
+    }
+
+    /// Floating-leaf variant of [`insert_window_at_anchor`].
+    pub fn insert_floating_at_anchor(
+        &mut self,
+        window: WindowId,
+        anchor: &TreeAnchor,
+        root_orientation: Orientation,
+    ) -> NodeId {
+        self.insert_leaf_at_anchor(Node::Floating { window }, anchor, root_orientation)
+    }
+
+    fn insert_leaf_at_anchor(
+        &mut self,
+        leaf: Node,
+        anchor: &TreeAnchor,
+        root_orientation: Orientation,
+    ) -> NodeId {
+        let before_node = anchor.before.and_then(|window| self.find_node(window));
+        let after_node = anchor.after.and_then(|window| self.find_node(window));
+        let (near, before) = match (before_node, after_node) {
+            (Some(node), _) => (Some(node), false),
+            (None, Some(node)) => (Some(node), true),
+            (None, None) => (None, false),
+        };
+        self.insert_leaf_near(leaf, near, before, root_orientation)
+    }
+
+    fn insert_leaf_near(
+        &mut self,
+        leaf: Node,
+        near: Option<NodeId>,
+        before: bool,
+        root_orientation: Orientation,
+    ) -> NodeId {
+        let new_leaf = self.nodes.insert(leaf);
+
+        let Some(root) = self.root else {
+            self.root = Some(new_leaf);
+            return new_leaf;
+        };
+
+        let target = near
+            .filter(|&node| self.nodes.contains_key(node))
+            .unwrap_or(root);
+        let target = self.mru_leaf(target);
+
+        match self.parents.get(&target).copied() {
+            Some(parent) => {
+                if let Some(Node::Container {
+                    children,
+                    weights,
+                    mru,
+                    ..
+                }) = self.nodes.get_mut(parent)
+                {
+                    let idx = children
+                        .iter()
+                        .position(|&child| child == target)
+                        .unwrap_or(children.len().saturating_sub(1));
+                    let weight = weights.get(idx).copied().unwrap_or(1.0);
+                    let insert_idx = if before { idx } else { idx + 1 };
+                    children.insert(insert_idx, new_leaf);
+                    weights.insert(insert_idx, weight);
+                    *mru = insert_idx;
+                }
+                self.parents.insert(new_leaf, parent);
+            }
+            None => {
+                let layout = self
+                    .collapsed_root_layout
+                    .take()
+                    .unwrap_or(self.default_layout);
+                let children = if before {
+                    vec![new_leaf, target]
+                } else {
+                    vec![target, new_leaf]
+                };
+                let new_root = self.nodes.insert(Node::Container {
+                    layout,
+                    orientation: root_orientation,
+                    children,
+                    weights: vec![1.0, 1.0],
+                    mru: usize::from(!before),
+                });
+                self.parents.insert(target, new_root);
+                self.parents.insert(new_leaf, new_root);
+                self.root = Some(new_root);
+            }
+        }
+
+        self.normalize();
+        new_leaf
     }
 
     /// A reasonable node to focus when this tree becomes the active
@@ -2620,5 +3008,106 @@ mod tests {
         assert_eq!(tree.window_at(f), Some(1));
         assert!(tree.layout(area(), Gaps::default()).is_empty());
         assert_eq!(tree.default_focus(), Some(f));
+    }
+
+    #[test]
+    fn snapshot_round_trips_tiles_accordion_and_floating() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        let second = insert(&mut tree, 2, Some(first));
+        tree.toggle_layout(second);
+        tree.insert_floating(3, Some(second), Orientation::Horizontal);
+        tree.resize_weight(second, 0.2);
+
+        let snapshot = tree.snapshot();
+        let restored = Tree::from_snapshot(&snapshot).expect("snapshot should restore");
+
+        assert_eq!(restored.snapshot(), snapshot);
+        assert_eq!(restored.window_ids().len(), 3);
+        assert!(restored.is_root_accordion());
+        assert_eq!(
+            restored.layout(area(), Gaps::default()).len(),
+            2,
+            "floating leaves do not occupy layout space"
+        );
+    }
+
+    #[test]
+    fn snapshot_filtered_drops_missing_windows_and_compacts() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
+        insert(&mut tree, 3, Some(first));
+
+        let snapshot = tree.snapshot_filtered(&|window| window != 2);
+        let restored = Tree::from_snapshot(&snapshot).expect("filtered snapshot should restore");
+        assert_eq!(restored.window_ids().len(), 2);
+        assert!(restored.window_ids().contains(&1));
+        assert!(restored.window_ids().contains(&3));
+    }
+
+    #[test]
+    fn snapshot_preserves_collapsed_root_layout() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
+        tree.toggle_layout(first);
+        tree.remove_window(2);
+        assert!(tree.collapsed_root_layout() == Some(Layout::Accordion));
+
+        let restored = Tree::from_snapshot(&tree.snapshot()).expect("restore");
+        let first = restored.root().expect("lone root");
+        let mut restored = restored;
+        restored.insert_window(3, Some(first), Orientation::Horizontal);
+        assert!(restored.is_root_accordion());
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_windows_and_invalid_containers() {
+        let duplicate = TreeSnapshot {
+            root: Some(NodeSnapshot::Container {
+                layout: Layout::Tiles,
+                orientation: Orientation::Horizontal,
+                children: vec![NodeSnapshot::Window(1), NodeSnapshot::Window(1)],
+                weights: vec![1.0, 1.0],
+                mru: 0,
+            }),
+            collapsed_root_layout: None,
+        };
+        assert!(matches!(
+            Tree::from_snapshot(&duplicate),
+            Err(SnapshotError::DuplicateWindow(1))
+        ));
+
+        let bad_weights = TreeSnapshot {
+            root: Some(NodeSnapshot::Container {
+                layout: Layout::Tiles,
+                orientation: Orientation::Horizontal,
+                children: vec![NodeSnapshot::Window(1)],
+                weights: vec![],
+                mru: 0,
+            }),
+            collapsed_root_layout: None,
+        };
+        assert!(matches!(
+            Tree::from_snapshot(&bad_weights),
+            Err(SnapshotError::InvalidWeights)
+        ));
+    }
+
+    #[test]
+    fn anchor_round_trips_a_window_to_its_original_sibling_slot() {
+        let mut tree = Tree::new();
+        let first = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(first));
+        insert(&mut tree, 3, Some(first));
+
+        let anchor = tree.anchor_for(2).expect("window 2 should have an anchor");
+        tree.remove_window(2);
+        tree.insert_window_at_anchor(2, &anchor, Orientation::Horizontal);
+
+        let layout = tree.layout(area(), Gaps::default());
+        let ids: Vec<_> = layout.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![1, 3, 2]);
     }
 }

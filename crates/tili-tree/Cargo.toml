@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 slotmap = "1"
+serde.workspace = true
 
 [dev-dependencies]
 # Plots and the parallel harness aren't needed for a CI-runnable timing
