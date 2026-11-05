@@ -194,11 +194,11 @@ signing.**
 
 ## Project status
 
-tili has shipped (v0.11.x) with a complete, daily-drivable feature set —
+tili has shipped (v0.12.x) with a complete, daily-drivable feature set —
 see [ROADMAP.md](ROADMAP.md) for what's shipped and what's planned, and
-check that file before assuming a feature exists or doesn't. The upcoming
-v0.12 line adds full session state/restore (Tiles, Accordion, floating,
-tiled fullscreen, native fullscreen/minimized/hidden anchors).
+check that file before assuming a feature exists or doesn't. v0.12 adds
+full session state/restore (Tiles, Accordion, floating, tiled fullscreen,
+native fullscreen/minimized/hidden anchors).
 [docs/BLUEPRINT.md](docs/BLUEPRINT.md) holds the design reference for
 planned-but-unshipped features.
 

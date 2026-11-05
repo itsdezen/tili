@@ -8,6 +8,8 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-05
+
 ### Added
 
 - **Full session state and restore.** tili now persists managed layout and
@@ -22,6 +24,22 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   preserves the previous state. Configure with `session { ... }` in
   `tili.kdl`; `tili doctor` reports the file/restore summary and
   `tili uninstall` removes it.
+- **Deferred windows survive native-fullscreen/Space transitions.** A saved
+  window that is alive but temporarily unenumerable at startup (native
+  fullscreen on another Space, minimized, or another macOS Space) is kept
+  in the next snapshot and retried through the normal window-change path
+  every 5s for up to 10 minutes instead of being reclassified as a new
+  window and losing its workspace placement. This fixes layout loss when
+  restarting tili while a native-fullscreen window is open.
+
+### Fixed
+
+- A corrupt primary session file falls back to `session.json.bak` and
+  removes the corrupt primary, so a later save cannot rotate garbage over
+  the good backup.
+- Zero-match session suppression is no longer cleared by automatic window
+  placement; only a real user action (command, hotkey, mouse release,
+  config/display change) resumes writing.
 
 ### Changed
 

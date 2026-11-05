@@ -21,6 +21,10 @@ feature set:
 - Mouse-follows-focus and focus-follows-monitor.
 - Native and tiled fullscreen, window close, and `summon` (find-and-raise
   by title/bundle id).
+- Session state and recovery: Tiles/Accordion layout, focus, active
+  workspace per monitor, floating geometry, tiled fullscreen, and
+  native-fullscreen/minimized/hidden anchors across restart or crash;
+  versioned atomic state with startup matching and crash recovery.
 - A menu bar workspace badge (`tili-menubar`) that stays in sync with the
   daemon over an event-driven long-poll, not polling.
 - LaunchAgent-managed `start`/`stop`/`uninstall`, the latter leaving
@@ -31,13 +35,6 @@ feature set:
 See the
 [CHANGELOG](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md) on
 GitHub for the full itemized list.
-
-## Upcoming
-
-- **Session state and recovery.** Persist/restore Tiles and Accordion
-  layout, focus, active workspace per monitor, floating geometry, tiled
-  fullscreen, and native-fullscreen/minimized/hidden anchors; versioned
-  atomic state with startup matching and crash recovery.
 
 ## Planned
 

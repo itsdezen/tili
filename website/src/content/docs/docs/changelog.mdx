@@ -17,6 +17,8 @@ full below, earlier ones collapsed further down.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-05
+
 ### Added
 
 - **Full session state and restore.** Tiles/Accordion trees, focus, active
@@ -24,7 +26,8 @@ full below, earlier ones collapsed further down.
   native-fullscreen/minimized/hidden anchors now persist across restart or
   crash. Versioned atomic `session.json` with `.bak`, startup grace window,
   conservative window matching, `tili doctor` reporting, and clean
-  `tili uninstall` cleanup.
+  `tili uninstall` cleanup. Windows alive but unenumerable across Spaces
+  are kept deferred and retried instead of being reclassified as new.
 
 ## [0.10.0] - 2026-09-03
 
