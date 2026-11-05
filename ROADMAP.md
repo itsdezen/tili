@@ -1,63 +1,19 @@
 # Roadmap
 
-## v0.1.0 — first release
+## Shipped
 
-tili shipped its first public release with a complete, daily-drivable
-feature set:
-
-- BSP tiling (`Tiles`) and Accordion layouts, with i3-style directional
-  focus/move, join, resize, and balance.
-- Named workspaces, off-screen virtualization, and full multi-monitor
-  support (hot-plug/unplug safe).
-- KDL config with file-watch hot-reload — no daemon restart needed.
-- Built-in global hotkeys, with switchable keybinding modes.
-- Floating rules (auto-center/size on creation, runtime tile/float
-  toggle, per-rule mode override).
-- Workspace rules — auto-assign an app's first window to a specific
-  workspace on creation, independent of whether it tiles or floats; a
-  later window from an already-running instance opens wherever the active
-  workspace already is, unless the rule sets `always`.
-- Mouse-follows-focus and focus-follows-monitor.
-- Native and tiled fullscreen, window close, and `summon` (find-and-raise
-  by title/bundle id).
-- A menu bar workspace badge (`tili-menubar`) that stays in sync with the
-  daemon over an event-driven long-poll, not polling.
-- LaunchAgent-managed `start`/`stop`/`uninstall`, the latter leaving
-  nothing behind — config, logs, socket, and the Accessibility grant are
-  all cleaned up automatically.
-- A real, signed release pipeline (`xtask` + a stable self-signed
-  identity + Homebrew tap).
-
-See [CHANGELOG.md](CHANGELOG.md) for the full itemized list.
-
-## v0.12.0 — session state and recovery
-
-- Persist and restore Tiles/Accordion trees, focus, active workspace per
-  monitor, floating geometry, and special states (native fullscreen,
-  minimized, hidden application) across restart or crash.
-- Versioned, atomic `session.json` with a `.bak`, written off the event loop;
-  startup grace window and conservative hard/fallback window matching.
-- `tili doctor` reports the state file and last restore summary;
-  `tili uninstall` removes the state files.
+- **v0.13.0** — home-display workspace routing, global southeast parking,
+  JSON query/subscribe, window metadata and rule ergonomics, native-tab
+  guard, `toggle-floating`, and configurable AX timeout.
+- **v0.12.0** — session state and recovery.
+- Earlier releases — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Planned
 
-Nothing here is scheduled — this is the backlog of ideas judged worth
-doing eventually, roughly in the order they'd likely land:
-
-- **Third-party status bar integration (e.g. SketchyBar).** Right now
-  only `tili-menubar` can show live workspace state, via an in-process
-  long-poll. Two directions are already scoped from building that:
-  a `tili subscribe` push protocol external tools can connect to over
-  the existing socket, or a simpler synchronous exec-hook
-  (`on-workspace-change` calling out to a user script) for tools that
-  would rather not speak tili's protocol at all.
-- **Tabbed/stacked containers.** A third container kind between `Tiles`
-  and `Accordion` — tabs instead of full-window stacking.
-- **Sticky windows.** Windows that stay visible across workspace
-  switches instead of parking.
-- **Native-tab support.** Deferred until macOS's native-tab semantics
-  can be relied on consistently across apps.
+- **Tabbed/stacked containers.** Third container kind; design spike first.
+- **Full native-tab support.** Only if the guard proves insufficient;
+  depends on reliable AX tab semantics.
+- **Sticky windows.** Stay visible across workspace switches.
 
 ## Design principles
 

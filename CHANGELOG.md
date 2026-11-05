@@ -6,7 +6,55 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
-## [Unreleased]
+## [0.13.0] - 2026-11-05
+
+### Added
+
+- **Global southeast parking.** Every parked window — from any workspace —
+  now parks at the bottom-right corner of the southeast-most connected
+  display instead of on its own workspace's display. Parking is re-applied
+  after connect/disconnect, arrangement, resolution/scale, display-id
+  rename, and session restore, so a parked window can't reappear on another
+  monitor after the layout changes.
+- **JSON query and subscription.** `tili query state --json` (plus
+  `windows`/`workspaces`/`monitors`) and `tili subscribe --json`, which
+  streams a versioned `snapshot` event followed by coalesced
+  `state_changed` events with a monotonic `seq`. Window payloads now
+  include `bundle_id`, `workspace`, `focused`, `role`, and `subrole`.
+- **Copy-rule ergonomics.** `tili rule [--workspace <name>] [--copy]`
+  prints/copies a ready-to-paste `floating-rules` or `workspace-rules`
+  snippet for the focused window; the menu bar exposes the same action.
+- **`role`/`subrole` rule matchers.** `floating-rules` and
+  `workspace-rules` accept optional exact-match AX role/subrole fields.
+- **Native-tab guard.** Opening, closing, or switching an app-owned native
+  tab no longer creates a placement, re-applies rules, cascades, or
+  relayouts. The active tab replaces the managed window id in place;
+  background tabs stay owned by the app. Disable with
+  `settings { native-tabs #false }`.
+- **`tili toggle-floating`** and a default `alt-shift-f` binding.
+- **Configurable AX timeout.** `settings { ax-timeout-ms 500 }` controls
+  the per-app Accessibility messaging timeout (clamped to 50–5000ms).
+- **Multi-monitor workspace routing.** Every connected display gets an
+  active workspace at startup; `workspace "x" monitor="main|12"` pins are
+  honored; fallback workspaces use the monitor's pretty name
+  (`Sidecar Display`, `DELL U2720Q`) or `Display N`, and are renumbered
+  on layout changes. Empty fallbacks are removed on disconnect; non-empty
+  ones migrate their windows to the main/focused workspace before removal.
+  `tili focus-monitor [main|next|prev|id]` focuses a specific display.
+- **Home-display workspace flow.** Every workspace now has a home display:
+  `tili workspace <name>` goes there (or focuses the display already showing
+  it) and never materializes a parked workspace on an unrelated display.
+  `tili workspace-here <name>` explicitly pulls a workspace to the focused
+  display, swapping with its occupant. `tili move-workspace-to-monitor
+  next|prev|main` pushes the active workspace (swap) or moves a parked
+  workspace's home without disturbing the target. `tili workspace-back` now
+  restores the previous `(display, workspace)` pair instead of following a
+  workspace that may have moved displays. Default binds:
+  `alt-ctrl-comma`/`alt-ctrl-period`/`alt-ctrl-m` for previous/next/main,
+  and `alt-ctrl-<workspace>` for `workspace-here`.
+- **Floating windows re-anchor on display changes.** Rule-placed floating
+  windows no longer keep coordinates from the previous monitor after a
+  workspace moves or a display reconnects.
 
 ## [0.12.0] - 2026-11-05
 

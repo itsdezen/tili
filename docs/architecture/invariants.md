@@ -199,6 +199,72 @@ low-fps on real hardware.
 - `Popup`/ignored windows may be recorded but are never geometry-restored;
   tili does not own their placement.
 
+## One active workspace per connected display
+
+- Every connected display gets exactly one active workspace at startup and
+  on `on_displays_changed`. Assignment order is pinned workspace, last
+  workspace on that display, first free declared workspace in config order,
+  then a synthetic `display-<ordinal>` fallback.
+- A workspace is never active on two displays at once. Each workspace has a
+  **home display**: the display showing it, a connected pin, or the display
+  it last lived on. `switch_workspace` goes to that home (focusing an
+  already-visible workspace, or showing a parked one there and parking the
+  display's previous workspace). It never materializes a parked workspace on
+  an unrelated display; a never-shown workspace is assigned to the focused
+  display on first use.
+- `switch_workspace_here` is the explicit local verb: it shows the workspace
+  on the focused display, swapping with its occupant when the workspace lives
+  elsewhere. `move-workspace-to-monitor next|prev|main` pushes the active
+  workspace (swap) or only changes a parked workspace's home.
+- `workspace-back` restores the previous `(display, workspace)` pair. It
+  undoes a `workspace-here` swap locally when still on the same display, but
+  returning from a cross-display jump only focuses the remembered display and
+  never rearranges another screen.
+- Pins (`workspace "x" monitor="main|id"`) reserve the workspace even while
+  the target display is disconnected. A pinned workspace cannot be moved off
+  its pin by `workspace-here` or `move-workspace-to-monitor`; a synthetic
+  display fallback cannot be relocated at all.
+- Synthetic fallbacks are marked, use the monitor's pretty name
+  (`NSScreen.localizedName` fallback `Display N`), are renumbered when the
+  layout changes, and are never persisted empty. On disconnect an empty
+  fallback is deleted; a non-empty one has its windows migrated to the
+  main/focused workspace first.
+- Floating windows are re-anchored whenever their workspace changes
+  display, including rule-placed floating windows that otherwise keep
+  their one derived frame.
+
+## Parking is global and re-applied after display changes
+
+- Every parked `Tiled`/`Floating` window — from any workspace — targets the
+  one bottom-right corner of the southeast-most connected display
+  (`max x + width`, tie `max y + height`, tie id). No per-display or
+  per-workspace parking coordinate exists.
+- `park`/`park_concurrently` write that same coordinate, so parking and
+  re-parking are idempotent (`set_position` no-ops on an unchanged frame).
+- `on_displays_changed_with` calls `repark_parked_windows()` after updating
+  monitors, workspaces, and active layouts. Connect, disconnect,
+  arrangement, resolution/scale, display-id rename, and SE-display removal
+  therefore all move parked windows to the new corner before they can be
+  seen on another monitor.
+- `finalize_restore` re-asserts the corner after session restore; a
+  zero-monitor enumeration is sleep and skips parking.
+- `Minimized`/`NativeFullscreen`/`HiddenApplication`/`Popup` placements are
+  never parked or reparked (they were never moved off-screen by `park`).
+
+## Native tabs are opaque to the daemon
+
+- A brand-new window that matches a managed same-app/same-frame sibling
+  (old window no longer enumerable, or an explicit `AXTabGroup`) is the
+  active member of an app-owned tab group, not a new managed window.
+- The daemon swaps the existing tree leaf's `WindowId` and per-window maps
+  in place. It never inserts a tile/float, applies rules, cascades, or
+  relayouts, so opening/closing/switching a tab cannot move or resize the
+  app's window.
+- Ambiguous candidates are skipped; `settings { native-tabs #false }` is the
+  escape hatch. Background tabs are intentionally untracked (the app owns
+  them; session persistence keeps only the visible tab).
+- This is a compatibility guard, not full tab-group membership/restore.
+
 ## One dispatch path, one sanctioned Mutex
 
 Hotkey-triggered and socket-triggered commands both go through `dispatch()`

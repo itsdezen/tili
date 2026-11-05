@@ -62,10 +62,13 @@ shortcut.
 
 ## Status
 
-tili is at `v0.12.x` and already daily-drivable: tiling, workspaces,
-hot-reloaded config, built-in hotkeys, floating rules, multi-monitor,
-mouse/focus-follows-monitor, session restore, a menu bar workspace badge,
-and a real signed release pipeline. See [ROADMAP.md](ROADMAP.md) for what's
+tili is at `v0.13.0` and already daily-drivable: tiling, workspaces,
+hot-reloaded config, built-in hotkeys, floating rules, multi-monitor
+(home-display workspace flow, global southeast parking, monitor-pinned
+workspaces, display-aware fallback workspaces), mouse/focus-follows-monitor,
+session restore, JSON
+query/subscribe, a native-tab guard, a menu bar workspace badge, and a real
+signed release pipeline. See [ROADMAP.md](ROADMAP.md) for what's
 planned next.
 Pre-1.0 still means config schema and CLI surface can change between
 releases — check [CHANGELOG.md](CHANGELOG.md) when upgrading.
@@ -106,6 +109,24 @@ active workspace per monitor to
 `~/.config/tili/tili.kdl`; `tili uninstall` removes both files. The state
 contains window titles and bundle ids but no window content.
 
+### JSON query and subscriptions
+
+```sh
+tili query state --json          # full snapshot: monitors, workspaces, windows
+tili query windows --json
+tili subscribe --json            # one JSON event per line until interrupted
+```
+
+`query state` is versioned (`"version": 1`) and includes each window's
+`bundle_id`, `workspace`, `focused`, `role`, and `subrole` alongside its
+placement and frame. `subscribe` emits a compact `"snapshot"` event first,
+then a `"state_changed"` event with a monotonic `seq` whenever state
+changes — enough for a status bar without reserializing every window.
+
+`tili rule` prints a ready-to-paste `floating-rules` snippet for the
+focused window; `--workspace <name>` emits a `workspace-rules` snippet,
+and `--copy` puts it on the clipboard.
+
 > [!TIP]
 > If a three-finger swipe up (Mission Control) shows tiled windows at
 > tiny or wildly mismatched sizes, enable **Group windows by
@@ -113,12 +134,51 @@ contains window titles and bundle ids but no window content.
 > Control** — this is a macOS Mission Control layout setting, not
 > something tili controls.
 
+### Multi-monitor
+
+Every connected display gets an active workspace at startup (not just the
+main one). A workspace can be pinned with
+`workspace "entertain" monitor="main"` or `monitor="12"`; pinned workspaces
+are never assigned to another display, including while that display is
+temporarily disconnected.
+
+If every declared workspace is already in use, tili creates a temporary
+fallback workspace for the display, displayed by its pretty name
+(`Sidecar Display`, `DELL U2720Q`) or `Display 2`/`Display 3` when the
+monitor reports no name. Empty fallbacks disappear when the display
+disconnects; a non-empty one has its windows moved to the main/focused
+workspace before cleanup, so no window is silently closed or orphaned.
+
+Each workspace has a **home display** — the display currently showing it, a
+connected `monitor="..."` pin, or the display it last lived on. A workspace
+used for the first time is assigned to the focused display, so it still feels
+local. `tili workspace <name>` always goes to that home (focusing the display
+if the workspace is already visible there, or showing it there and parking the
+display's previous workspace). It never materializes a parked workspace on an
+unrelated display.
+
+Use `tili workspace-here <name>` to change the display you are on: it pulls the
+workspace here, swapping with whatever this display currently shows.
+`tili move-workspace-to-monitor next|prev|main` pushes the active workspace to
+another display (swapping with its occupant); moving a parked workspace only
+changes its home, so the target's screen is untouched. `tili workspace-back`
+returns to the previous `(display, workspace)` pair rather than following a
+workspace that may have moved.
+
+Parking is global: every inactive workspace's windows sit at the bottom-right
+corner of the southeast-most display, and are re-parked whenever displays
+connect/disconnect or the arrangement changes. This keeps parked windows from
+ever appearing on another monitor, including in diagonal arrangements, at the
+cost of moving them between displays when you switch workspaces.
+
 ## Menu bar badge
 
 `tili start` also installs and starts `tili-menubar` alongside the daemon —
 a small `NSStatusItem` badge showing the active workspace on your focused
-monitor. Click it to switch workspaces, open your config file, or quit
-(which stops the daemon too). It starts/stops/uninstalls automatically with
+monitor. An auto-created display fallback is shown by the monitor's pretty
+name (`Sidecar Display`, `DELL U2720Q`, or `Display 2`). Click the badge to
+switch workspaces, copy a rule snippet for the focused window, open your
+config file, or quit (which stops the daemon too). It starts/stops/uninstalls automatically with
 `tili start`/`stop`/`uninstall`, so there's nothing extra to run, and it
 hides itself entirely whenever the daemon isn't reachable rather than
 showing stale state.
@@ -154,7 +214,7 @@ copy-pasteable version:
 ```kdl
 workspaces {
     workspace "work"
-    workspace "entertain" layout="accordion"
+    workspace "entertain" layout="accordion" monitor="main"
     workspace "random"
 }
 
@@ -167,13 +227,20 @@ settings {
     auto-reload #true
     mouse-follows-focus #false
     focus-follows-monitor #false
+    ax-timeout-ms 500
+    native-tabs #true
 }
 
 keybindings mode="main" {
     bind "alt-h" "focus left"
     bind "alt-shift-h" "move left"
     bind "alt-w" "workspace work"
+    bind "alt-ctrl-w" "workspace-here work"
+    bind "alt-ctrl-comma" "move-workspace-to-monitor prev"
+    bind "alt-ctrl-period" "move-workspace-to-monitor next"
+    bind "alt-ctrl-m" "move-workspace-to-monitor main"
     bind "alt-slash" "layout toggle"
+    bind "alt-shift-f" "toggle-floating"
     bind "alt-m" "focus-monitor"
 }
 
@@ -212,13 +279,18 @@ keybindings in your config resolve to (e.g. `bind "alt-h" "focus left"`).
 | `tili fullscreen [--native]` | Toggle the focused window fullscreen (tiled, or `--native` for a separate Space) |
 | `tili close` | Close the focused window (best-effort) |
 | `tili summon <query>` | Focus (and raise) the first known window whose title or bundle id matches `query` |
-| `tili set-floating <on\|off>` | Toggle the focused window between tiled and floating at runtime |
-| `tili workspace <name>` | Switch the active workspace (created if new) |
-| `tili workspace-back` | Switch back to whichever workspace was active before this one |
+| `tili set-floating <on\|off>` | Set the focused window's tiled/floating placement |
+| `tili toggle-floating` | Flip the focused window between tiled and floating |
+| `tili query [state\|windows\|workspaces\|monitors] [--json]` | Print a machine-readable JSON snapshot |
+| `tili subscribe [--json]` | Stream JSON state events until interrupted |
+| `tili rule [--workspace <name>] [--copy]` | Print/copy a rule snippet for the focused window |
+| `tili workspace <name>` | Go to the workspace's home display (or focus the display already showing it) |
+| `tili workspace-here <name>` | Switch the focused display to the workspace, pulling/swapping it here |
+| `tili workspace-back` | Return to the previous display+workspace pair |
 | `tili move-to-workspace <name>` | Move the focused window to another workspace |
-| `tili move-workspace-to-monitor <target> [--workspace <name>]` | Move a workspace to a different monitor without switching focus; defaults to the workspace currently active on the focused monitor |
+| `tili move-workspace-to-monitor <next\|prev\|main\|id> [--workspace <name>]` | Push a workspace to another monitor without switching focus; active workspaces swap, parked ones only change home |
 | `tili list-workspaces` | List workspaces, with active/monitor markers |
-| `tili focus-monitor` | Cycle which connected monitor commands target |
+| `tili focus-monitor [target]` | Cycle monitors, or focus `main`, `next`, `prev`, or a display id |
 | `tili list-monitors` | List connected monitors |
 | `tili list-windows` | List known windows (tiled/floating, frame, pid) |
 

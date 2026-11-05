@@ -589,6 +589,25 @@ impl Tree {
         })
     }
 
+    /// Replaces `old` with `new` in place, preserving the leaf's `NodeId`,
+    /// parent, weights, and MRU — used by the daemon's native-tab guard when
+    /// macOS swaps which member of an app-owned tab group is the visible
+    /// window. Structural layout never changes, so this is O(n) in node
+    /// count but never triggers a relayout or normalization. Returns
+    /// `false` if `old` isn't a leaf in this tree.
+    pub fn replace_window(&mut self, old: WindowId, new: WindowId) -> bool {
+        for node in self.nodes.values_mut() {
+            match node {
+                Node::Window { window } | Node::Floating { window } if *window == old => {
+                    *window = new;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Every window currently in the tree, tiled or floating, in no
     /// particular order.
     pub fn window_ids(&self) -> Vec<WindowId> {
@@ -2958,6 +2977,45 @@ mod tests {
         // fills the whole area, as if the floating one weren't there.
         let layout = tree.layout(area(), Gaps::default());
         assert_eq!(layout, vec![(1, area())]);
+    }
+
+    #[test]
+    fn replace_window_preserves_leaf_identity_and_layout() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        insert(&mut tree, 2, Some(w1));
+        let node = tree.node_for_window(2).expect("window 2 should exist");
+        let before = tree
+            .layout(area(), Gaps::default())
+            .into_iter()
+            .find(|(window, _)| *window == 2)
+            .map(|(_, rect)| rect)
+            .expect("window 2 should have a layout rect");
+
+        assert!(tree.replace_window(2, 22));
+        assert_eq!(tree.window_at(node), Some(22));
+        assert_eq!(tree.node_for_window(2), None);
+        assert_eq!(tree.node_for_window(22), Some(node));
+        let after = tree
+            .layout(area(), Gaps::default())
+            .into_iter()
+            .find(|(window, _)| *window == 22)
+            .map(|(_, rect)| rect)
+            .expect("replacement should occupy the same slot");
+        assert_eq!(after, before);
+        assert!(!tree.replace_window(2, 23), "old id is gone");
+    }
+
+    #[test]
+    fn replace_window_works_for_a_floating_leaf() {
+        let mut tree = Tree::new();
+        let w1 = insert(&mut tree, 1, None);
+        let f = tree.insert_floating(2, Some(w1), Orientation::Horizontal);
+
+        assert!(tree.replace_window(2, 22));
+        assert_eq!(tree.window_at(f), Some(22));
+        assert_eq!(tree.tiled_window_ids(), vec![1]);
+        assert_eq!(tree.window_ids().len(), 2);
     }
 
     #[test]

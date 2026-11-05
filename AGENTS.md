@@ -141,7 +141,9 @@ signing.**
   plus socket path/framing. Protocol changes belong here, never duplicated
   in both binaries. `parse.rs` is infallible by design — unknown command
   strings become `Command::Raw` and fail at `dispatch()` time, so a typo'd
-  config still loads.
+  config still loads. `QueryState` is the versioned external snapshot;
+  `SubscribeEvent` is the streamed event payload (handled by the daemon's
+  event loop, not `dispatch()`).
 - **`tili-daemon`** — the window manager process. `state.rs` holds
   `WmState`: live `AxWindow` handles, one `Tree` per workspace holding both
   tiled and floating windows (a floating window is a `Node::Floating` leaf
@@ -194,11 +196,14 @@ signing.**
 
 ## Project status
 
-tili has shipped (v0.12.x) with a complete, daily-drivable feature set —
+tili has shipped (v0.13.0) with a complete, daily-drivable feature set —
 see [ROADMAP.md](ROADMAP.md) for what's shipped and what's planned, and
-check that file before assuming a feature exists or doesn't. v0.12 adds
-full session state/restore (Tiles, Accordion, floating, tiled fullscreen,
-native fullscreen/minimized/hidden anchors).
+check that file before assuming a feature exists or doesn't. v0.12 added
+full session state/restore. v0.13 adds global southeast parking, display-aware
+workspace assignment/pins, JSON query/subscribe, role/subrole rules,
+copy-rule, AX timeout configuration, `toggle-floating`, and the native-tab
+guard (one managed window follows the active app-owned tab; opening/
+closing/switching tabs never places or relayouts).
 [docs/BLUEPRINT.md](docs/BLUEPRINT.md) holds the design reference for
 planned-but-unshipped features.
 
@@ -254,6 +259,30 @@ rationale (and real-hardware evidence) behind each is in
   through the ordinary `WindowsChanged` path — never reclassified as new
   windows. Do not save during restore or after a panic, and do not
   geometry-restore `Popup`/ignored windows.
+- **Every connected display has one active workspace, and never a
+  duplicate.** Startup/`on_displays_changed` assign a pinned workspace,
+  then the last workspace on that display, then the first free declared
+  workspace (config order), and only then an auto-created fallback
+  (`display-<ordinal>`). Fallback workspaces are marked synthetic, use the
+  monitor's `NSScreen.localizedName` for display, are renumbered when the
+  layout changes, and are removed after their windows are migrated when
+  the display disconnects. Empty synthetic workspaces are never persisted.
+- **Workspaces have a home display.** `workspace <name>` goes there — the
+  display already showing it, a connected `monitor="..."` pin, or the
+  display it last lived on — and never materializes a parked workspace on an
+  unrelated display. `workspace-here <name>` is the explicit local verb
+  (pull/swap onto the focused display); `move-workspace-to-monitor
+  next|prev|main` pushes the active workspace or changes a parked one's home
+  only. `workspace-back` restores the previous `(display, workspace)` pair
+  and never steals a layout from another display.
+- **Native tabs are app-owned and opaque to tili.** A brand-new window
+  matching a managed same-app/same-frame sibling (with the old window no
+  longer enumerable, or an explicit `AXTabGroup`) is folded into that
+  existing placement by replacing the tree leaf's `WindowId` — never
+  inserted as a new tile/float, never rule-matched, never relaid out.
+  Ambiguous matches are skipped. `settings { native-tabs #false }` is the
+  escape hatch. Do not turn this into full tab-group membership/restore
+  without a separate design.
 - **Hotkey- and socket-triggered commands both go through `dispatch()`**
   — no parallel command path. The hotkey tap's `active_bindings:
   Arc<Mutex<HashSet<KeyCombo>>>` is the *one* sanctioned lock (the tap

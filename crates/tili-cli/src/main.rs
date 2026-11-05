@@ -1,12 +1,13 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use tili_ipc::{
-    Command, Direction, DoctorReport, LayoutKind, MonitorInfo, PlacementInfo, Response, WindowInfo,
-    WorkspaceInfo,
+    Command, Direction, DoctorReport, LayoutKind, MonitorInfo, PlacementInfo, QueryState, Response,
+    SubscribeEvent, WindowInfo, WorkspaceInfo,
 };
 
 #[derive(Parser)]
@@ -62,6 +63,14 @@ enum OnOffArg {
     Off,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum QueryArg {
+    State,
+    Windows,
+    Workspaces,
+    Monitors,
+}
+
 impl From<OnOffArg> for bool {
     fn from(state: OnOffArg) -> Self {
         matches!(state, OnOffArg::On)
@@ -83,6 +92,31 @@ enum Commands {
     Ping,
     /// List currently known windows.
     ListWindows,
+    /// Print a machine-readable snapshot. `state` includes every window;
+    /// `windows`/`workspaces`/`monitors` print just that array. Always JSON.
+    Query {
+        #[arg(value_enum, default_value = "state")]
+        what: QueryArg,
+        /// Accepted for clarity; this command only emits JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stream state changes as newline-delimited JSON until interrupted.
+    Subscribe {
+        /// Accepted for clarity; this command only emits JSON lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a ready-to-paste `floating-rules` (or, with --workspace, a
+    /// `workspace-rules`) snippet for the focused window.
+    Rule {
+        /// Emit a workspace-rules snippet targeting this workspace.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Copy the snippet to the clipboard instead of printing it.
+        #[arg(long)]
+        copy: bool,
+    },
     /// Move focus to the window in the given direction.
     Focus { direction: DirArg },
     /// Move the focused window one step in the given direction, re-parenting
@@ -96,9 +130,12 @@ enum Commands {
     Resize { amount: f32 },
     /// List workspaces, marking which one is active.
     ListWorkspaces,
-    /// Switch the active workspace. Errors if `name` isn't declared in
-    /// config — workspaces are never created on the fly.
+    /// Switch to a workspace's home display (or focus the display already
+    /// showing it). Errors if `name` isn't declared in config.
     Workspace { name: String },
+    /// Switch the focused display to a workspace, pulling it here (and
+    /// swapping with whatever this display currently shows).
+    WorkspaceHere { name: String },
     /// Move the focused window to another workspace without following it.
     MoveToWorkspace { name: String },
     /// Toggle, or explicitly set, the focused window's container layout.
@@ -110,8 +147,12 @@ enum Commands {
         #[arg(long)]
         root: bool,
     },
-    /// Cycle which connected monitor commands act on.
-    FocusMonitor,
+    /// Cycle which connected monitor commands act on, or focus a specific
+    /// monitor (`main`, `next`, `prev`, or a display id).
+    FocusMonitor {
+        /// Optional monitor id, `main`, `next`, or `prev`; omit to cycle.
+        target: Option<String>,
+    },
     /// List connected monitors, marking which one is focused.
     ListMonitors,
     /// Reset every child weight of the focused window's parent container
@@ -138,8 +179,8 @@ enum Commands {
     /// contains the given text.
     Summon { query: String },
     /// Move a workspace to a different monitor without switching focus to
-    /// it. Target is a monitor id, "next", or "main". Defaults to whatever
-    /// workspace is currently active on the focused monitor; pass
+    /// it. Target is a monitor id, "next", "prev", or "main". Defaults to
+    /// whatever workspace is currently active on the focused monitor; pass
     /// `--workspace` to name a different (possibly parked) one.
     MoveWorkspaceToMonitor {
         target: String,
@@ -148,8 +189,11 @@ enum Commands {
     },
     /// Switch back to whichever workspace was active before this one.
     WorkspaceBack,
-    /// Toggle the focused window between tiled and floating at runtime.
+    /// Set the focused window's tiled/floating placement.
     SetFloating { state: OnOffArg },
+    /// Flip the focused window between tiled and floating — the hotkey
+    /// command's CLI counterpart.
+    ToggleFloating,
     /// Fully tear down tili's local state: stops both LaunchAgents, then
     /// removes the config file, logs, IPC socket, and the Accessibility
     /// permission grant. Doesn't touch a Homebrew install itself — run
@@ -231,6 +275,18 @@ fn main() {
             doctor(*fix);
             return;
         }
+        Commands::Query { what, .. } => {
+            query(*what);
+            return;
+        }
+        Commands::Subscribe { .. } => {
+            subscribe();
+            return;
+        }
+        Commands::Rule { workspace, copy } => {
+            rule(workspace.as_deref(), *copy);
+            return;
+        }
         _ => {}
     }
 
@@ -243,6 +299,7 @@ fn main() {
         Commands::Resize { amount } => (Command::ResizeRatio { amount }, ExpectedPayload::None),
         Commands::ListWorkspaces => (Command::ListWorkspaces, ExpectedPayload::Workspaces),
         Commands::Workspace { name } => (Command::WorkspaceSwitch(name), ExpectedPayload::None),
+        Commands::WorkspaceHere { name } => (Command::WorkspaceHere(name), ExpectedPayload::None),
         Commands::MoveToWorkspace { name } => {
             (Command::MoveNodeToWorkspace(name), ExpectedPayload::None)
         }
@@ -261,7 +318,18 @@ fn main() {
             };
             (command, ExpectedPayload::None)
         }
-        Commands::FocusMonitor => (Command::FocusMonitor, ExpectedPayload::None),
+        Commands::FocusMonitor { target } => match target {
+            Some(target) => {
+                let target = parse_monitor_target(&target).unwrap_or_else(|| {
+                    eprintln!(
+                        "tili: invalid monitor target '{target}' (expected a monitor id, 'next', 'prev', or 'main')"
+                    );
+                    std::process::exit(1);
+                });
+                (Command::FocusMonitorTarget(target), ExpectedPayload::None)
+            }
+            None => (Command::FocusMonitor, ExpectedPayload::None),
+        },
         Commands::ListMonitors => (Command::ListMonitors, ExpectedPayload::Monitors),
         Commands::Balance { root } => (Command::BalanceSizes { root }, ExpectedPayload::None),
         Commands::Flatten => (Command::Flatten, ExpectedPayload::None),
@@ -273,7 +341,7 @@ fn main() {
         Commands::MoveWorkspaceToMonitor { workspace, target } => {
             let target = parse_monitor_target(&target).unwrap_or_else(|| {
                 eprintln!(
-                    "tili: invalid monitor target '{target}' (expected a monitor id, 'next', or 'main')"
+                    "tili: invalid monitor target '{target}' (expected a monitor id, 'next', 'prev', or 'main')"
                 );
                 std::process::exit(1);
             });
@@ -286,11 +354,15 @@ fn main() {
         Commands::SetFloating { state } => {
             (Command::SetFloating(state.into()), ExpectedPayload::None)
         }
+        Commands::ToggleFloating => (Command::ToggleFloating, ExpectedPayload::None),
         Commands::Start => unreachable!("handled above before the socket connection"),
         Commands::Stop => unreachable!("handled above before the socket connection"),
         Commands::Status => unreachable!("handled above before the socket connection"),
         Commands::Uninstall => unreachable!("handled above before the socket connection"),
         Commands::Doctor { .. } => unreachable!("handled above before the socket connection"),
+        Commands::Query { .. } => unreachable!("handled above before the socket connection"),
+        Commands::Subscribe { .. } => unreachable!("handled above before the socket connection"),
+        Commands::Rule { .. } => unreachable!("handled above before the socket connection"),
     };
 
     match send(command) {
@@ -379,8 +451,10 @@ fn print_windows(payload: serde_json::Value) {
         Ok(windows) => {
             for w in windows {
                 let placement = placement_label(w.placement);
+                let marker = if w.focused { "*" } else { " " };
+                let workspace = w.workspace.as_deref().unwrap_or("-");
                 println!(
-                    "{:>10}  pid={:<8} {placement} {:.0}x{:.0}+{:.0}+{:.0}  {}",
+                    "{marker}{:>10}  pid={:<8} {placement} {:.0}x{:.0}+{:.0}+{:.0}  [{workspace}] {}",
                     w.id, w.pid, w.frame.width, w.frame.height, w.frame.x, w.frame.y, w.title
                 );
             }
@@ -408,10 +482,20 @@ fn print_workspaces(payload: serde_json::Value) {
                 let monitor = w
                     .monitor
                     .map(|id| format!("monitor={id}"))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        w.last_monitor
+                            .map(|id| format!("last={id}"))
+                            .unwrap_or_default()
+                    });
+                let label = match w.display_name.as_deref() {
+                    Some(display) if display != w.name => {
+                        format!("{display} ({})", w.name)
+                    }
+                    _ => w.name.clone(),
+                };
                 println!(
-                    "{marker} {:<20} {} window(s)  {monitor}",
-                    w.name, w.window_count
+                    "{marker} {:<24} {} window(s)  {monitor}",
+                    label, w.window_count
                 );
             }
         }
@@ -499,6 +583,7 @@ fn homebrew_stable_equivalent(real_exe: &std::path::Path) -> Option<std::path::P
 fn parse_monitor_target(s: &str) -> Option<tili_ipc::MonitorTarget> {
     match s {
         "next" => Some(tili_ipc::MonitorTarget::Next),
+        "prev" => Some(tili_ipc::MonitorTarget::Prev),
         "main" => Some(tili_ipc::MonitorTarget::Main),
         _ => s.parse::<u32>().ok().map(tili_ipc::MonitorTarget::Id),
     }
@@ -946,14 +1031,212 @@ fn print_monitors(payload: serde_json::Value) {
                 let marker = if m.focused { "*" } else { " " };
                 let main = if m.is_main { "main" } else { "    " };
                 let workspace = m.active_workspace.unwrap_or_else(|| "-".to_string());
+                let label = if m.pretty_name.is_empty() {
+                    format!("#{}", m.ordinal)
+                } else {
+                    m.pretty_name.clone()
+                };
                 println!(
-                    "{marker} {:<10} {main}  {:.0}x{:.0}+{:.0}+{:.0}  {workspace}",
-                    m.id, m.frame.width, m.frame.height, m.frame.x, m.frame.y
+                    "{marker} {:<10} {main}  {:<24} {:.0}x{:.0}+{:.0}+{:.0}  {workspace}",
+                    m.id, label, m.frame.width, m.frame.height, m.frame.x, m.frame.y
                 );
             }
         }
         Err(_) => println!("(response payload not recognized)"),
     }
+}
+
+fn query(what: QueryArg) {
+    let command = match what {
+        QueryArg::State => Command::QueryState,
+        QueryArg::Windows => Command::ListWindows,
+        QueryArg::Workspaces => Command::ListWorkspaces,
+        QueryArg::Monitors => Command::ListMonitors,
+    };
+    match send(command) {
+        Ok(Response::OkWithPayload(payload)) => {
+            println!(
+                "{}",
+                serde_json::to_string(&payload).unwrap_or_else(|_| "null".into())
+            );
+        }
+        Ok(Response::Err { message }) => {
+            eprintln!("tili: {message}");
+            std::process::exit(1);
+        }
+        Ok(Response::Ok) => println!("null"),
+        Err(e) => fail_unreachable(e),
+    }
+}
+
+fn subscribe() {
+    let Ok(mut stream) = UnixStream::connect(tili_ipc::default_socket_path()) else {
+        fail_unreachable(io::Error::last_os_error());
+    };
+    let _ = stream.set_write_timeout(Some(SOCKET_TIMEOUT));
+    // No read timeout: the stream is idle between changes by design.
+    let _ = stream.set_read_timeout(None);
+    if let Err(e) = write_framed(&mut stream, &Command::Subscribe) {
+        eprintln!("tili: couldn't send subscribe: {e}");
+        std::process::exit(1);
+    }
+    loop {
+        let buf = match read_framed(&mut stream) {
+            Ok(buf) => buf,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return,
+            Err(e) => {
+                eprintln!("tili: subscribe stream failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        let response: Response = match serde_json::from_slice(&buf) {
+            Ok(response) => response,
+            Err(e) => {
+                eprintln!("tili: invalid subscribe frame: {e}");
+                std::process::exit(1);
+            }
+        };
+        match response {
+            Response::OkWithPayload(payload) => {
+                let event: SubscribeEvent = match serde_json::from_value(payload) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        eprintln!("tili: invalid subscribe event: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string(&event).unwrap_or_else(|_| "null".into())
+                );
+                let _ = io::stdout().flush();
+            }
+            Response::Err { message } => {
+                eprintln!("tili: {message}");
+                std::process::exit(1);
+            }
+            Response::Ok => {}
+        }
+    }
+}
+
+fn rule(workspace: Option<&str>, copy: bool) {
+    let Ok(Response::OkWithPayload(payload)) = send(Command::QueryState) else {
+        eprintln!("tili: couldn't query the focused window");
+        std::process::exit(1);
+    };
+    let state: QueryState = match serde_json::from_value(payload) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("tili: invalid query payload: {e}");
+            std::process::exit(1);
+        }
+    };
+    let Some(window) = state.focused_window else {
+        eprintln!("tili: no window is focused");
+        std::process::exit(1);
+    };
+    if window.bundle_id.as_deref().unwrap_or("").is_empty() {
+        eprintln!("tili: focused window has no resolvable bundle id");
+        std::process::exit(1);
+    }
+    let snippet = rule_snippet(&window, workspace);
+    if copy {
+        if let Err(e) = copy_to_clipboard(&snippet) {
+            eprintln!("tili: couldn't copy rule: {e}");
+            print!("{snippet}");
+            std::process::exit(1);
+        }
+        println!("tili: copied rule for {} to the clipboard", window.title);
+    } else {
+        print!("{snippet}");
+    }
+}
+
+/// Builds the copy-pasteable rule snippet. `role`/`subrole`/`title` are
+/// emitted as comments inside the rule so the user can narrow it without
+/// accidentally excluding the very window they copied it from.
+fn rule_snippet(window: &WindowInfo, workspace: Option<&str>) -> String {
+    let app_id = window.bundle_id.as_deref().unwrap_or("");
+    if let Some(workspace) = workspace {
+        return format!(
+            "workspace-rules {{\n    rule app-id=\"{}\" workspace=\"{}\"\n}}\n",
+            escape_kdl(app_id),
+            escape_kdl(workspace)
+        );
+    }
+    let mut out = format!(
+        "floating-rules {{\n    rule app-id=\"{}\" {{\n",
+        escape_kdl(app_id)
+    );
+    if !window.title.is_empty() {
+        let title = window.title.replace(['\n', '\r'], " ");
+        out.push_str(&format!(
+            "        // title \"^{}$\"\n",
+            escape_regex(&title)
+        ));
+    }
+    if !window.role.is_empty() {
+        out.push_str(&format!(
+            "        // role \"{}\"\n",
+            escape_kdl(&window.role)
+        ));
+    }
+    if let Some(subrole) = &window.subrole {
+        out.push_str(&format!("        // subrole \"{}\"\n", escape_kdl(subrole)));
+    }
+    out.push_str("        // width 900\n        // height 600\n        // center #true\n");
+    out.push_str("    }\n}\n");
+    out
+}
+
+fn escape_kdl(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|c| match c {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect(),
+            '\n' => "\\n".chars().collect(),
+            '\r' => "\\r".chars().collect(),
+            '\t' => "\\t".chars().collect(),
+            other => vec![other],
+        })
+        .collect()
+}
+
+fn escape_regex(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if "\\.^$|?*+()[]{}".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn copy_to_clipboard(text: &str) -> io::Result<()> {
+    let mut child = ProcessCommand::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("pbcopy exited non-zero"))
+    }
+}
+
+fn fail_unreachable(e: io::Error) -> ! {
+    eprintln!(
+        "tili: couldn't reach tili-daemon at {}: {e}\n\
+         (is the daemon running? try `tili start`)",
+        tili_ipc::default_socket_path().display()
+    );
+    std::process::exit(1);
 }
 
 /// One line of `tili doctor`'s report — `status` is `"ok"`, `"FAIL"`, or
@@ -1398,6 +1681,59 @@ mod tests {
 
         assert_eq!(homebrew_stable_equivalent(&daemon), None);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rule_snippet_escapes_titles_and_includes_optional_matchers() {
+        let window = WindowInfo {
+            id: 1,
+            pid: 2,
+            title: "a \"quoted\" title".to_string(),
+            bundle_id: Some("com.example.app".to_string()),
+            workspace: Some("work".to_string()),
+            focused: true,
+            role: "AXWindow".to_string(),
+            subrole: Some("AXDialog".to_string()),
+            placement: PlacementInfo::Floating,
+            frame: tili_ipc::RectInfo {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+        };
+        let snippet = rule_snippet(&window, None);
+        assert!(snippet.contains("floating-rules"));
+        assert!(snippet.contains("rule app-id=\"com.example.app\""));
+        assert!(snippet.contains("// subrole \"AXDialog\""));
+        assert!(snippet.contains("a \"quoted\" title"));
+        let parsed = tili_config::parse(&snippet);
+        assert!(parsed.is_ok(), "snippet must be valid KDL: {parsed:?}");
+    }
+
+    #[test]
+    fn workspace_rule_snippet_contains_the_target_workspace() {
+        let window = WindowInfo {
+            id: 1,
+            pid: 2,
+            title: "x".to_string(),
+            bundle_id: Some("com.example.app".to_string()),
+            workspace: None,
+            focused: true,
+            role: "AXWindow".to_string(),
+            subrole: None,
+            placement: PlacementInfo::Tiled,
+            frame: tili_ipc::RectInfo {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+        };
+        let snippet = rule_snippet(&window, Some("work"));
+        assert!(snippet.contains("workspace-rules"));
+        assert!(snippet.contains("workspace=\"work\""));
+        assert!(tili_config::parse(&snippet).is_ok());
     }
 
     #[test]

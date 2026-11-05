@@ -17,7 +17,13 @@ workspaces {
     // Overrides `default-layout` for this workspace only — its first
     // container is created as Accordion instead of Tiles. Only affects
     // future windows; doesn't relayout ones already tiled.
+    //
+    // Optional `monitor="main"` (or a numeric display id) pins the
+    // workspace to that display. Pinned workspaces are never auto-assigned
+    // to another monitor; if the display is absent, the workspace stays
+    // parked until it returns.
     workspace "entertain" layout="accordion"
+    // workspace "pinned" monitor="main"
 
     workspace "random"
 
@@ -106,6 +112,18 @@ settings {
     // Chromium apps) pays that multiplier in extra latency per relayout,
     // more so at "high". Try "medium" first.
     animate #false
+
+    // Messaging timeout for each Accessibility app connection, in
+    // milliseconds. Lower values keep the daemon responsive when one app
+    // is hung; too low risks treating a slow app as unresponsive. Clamped
+    // to 50–5000 by the AX layer.
+    ax-timeout-ms 500
+
+    // Treat an app's native macOS tab group as one opaque window: opening,
+    // closing, or switching tabs must not create placements or trigger a
+    // relayout. Set `#false` to restore the old "every tab is a new
+    // window" behavior if an app is detected incorrectly.
+    native-tabs #true
 }
 
 // Session persistence — every field optional, defaults shown below.
@@ -166,12 +184,17 @@ menubar {
 //   move <dir>                      move the focused window itself
 //   join <dir>                      wrap focused window + neighbor in a new
 //                                    perpendicular container
-//   workspace <name>                switch to a declared workspace
-//   workspace-back                  switch back to the previously-active one
+//   workspace <name>                go to a workspace's home display, or
+//                                   focus the display already showing it
+//   workspace-here <name>           switch the focused display to the
+//                                   workspace, pulling/ swapping it here
+//   workspace-back                  return to the previous display+workspace
 //   move-node-to-workspace <name>   move the focused window to a workspace
-//   move-workspace-to-monitor next|main
+//   move-workspace-to-monitor next|prev|main
 //                                   move the active (or a named) workspace
-//                                   to another connected monitor
+//                                   to another connected monitor; an active
+//                                   workspace swaps, a parked one only
+//                                   changes its home display
 //   layout toggle[ root]            flip focused container Tiles<->Accordion
 //   layout tiles[ root]             set focused container to Tiles
 //   layout accordion[ root]         set focused container to Accordion
@@ -191,10 +214,11 @@ menubar {
 //   close                           close the focused window
 //   summon <text>                   focus+switch to the first window whose
 //                                   title or bundle id contains <text>
-//   set-floating on|off             toggle the focused window between
-//                                   tiled and floating at runtime
-//   focus-monitor                   cycle which connected monitor commands
-//                                   target (no-op with only one monitor)
+//   set-floating on|off             set the focused window's placement
+//   toggle-floating                 flip the focused window between tiled
+//                                   and floating (hotkey-friendly)
+//   focus-monitor [target]           cycle monitors, or focus "main",
+//                                   "next", "prev", or a numeric display id
 //   mode <name>                     switch to a named keybindings mode
 //   mode exit                       return to the default ("main") mode
 //
@@ -216,20 +240,33 @@ keybindings mode="main" {
     // one with its left neighbor.
     bind "alt-shift-g" "join left"
 
+    // Alt = go to the workspace's home display (or focus the display
+    // already showing it). A parked workspace returns to the display it
+    // belongs to, never to whichever display happens to be focused.
     bind "alt-w" "workspace work"
     bind "alt-e" "workspace entertain"
     bind "alt-r" "workspace random"
+
+    // Alt+Ctrl = move workspaces between displays.
+    // Pull a workspace to the focused display (swap if it lives elsewhere).
+    bind "alt-ctrl-w" "workspace-here work"
+    bind "alt-ctrl-e" "workspace-here entertain"
+    bind "alt-ctrl-r" "workspace-here random"
+
+    // Push the active workspace to the previous/next display, or to main.
+    // An active workspace swaps with the target; a parked one only changes
+    // its home display.
+    bind "alt-ctrl-comma" "move-workspace-to-monitor prev"
+    bind "alt-ctrl-period" "move-workspace-to-monitor next"
+    bind "alt-ctrl-m" "move-workspace-to-monitor main"
 
     bind "alt-shift-w" "move-node-to-workspace work"
     bind "alt-shift-e" "move-node-to-workspace entertain"
     bind "alt-shift-r" "move-node-to-workspace random"
 
-    // Switches back to whichever workspace was active before this one.
+    // Returns to the display+workspace pair you were looking at before the
+    // last navigation command.
     bind "alt-tab" "workspace-back"
-
-    // Moves the current workspace to the next connected monitor — a no-op
-    // with only one monitor.
-    bind "alt-shift-tab" "move-workspace-to-monitor next"
 
     bind "alt-slash" "layout toggle"
 
@@ -243,6 +280,10 @@ keybindings mode="main" {
     bind "alt-shift-minus" "resize -0.1"
     bind "alt-shift-equal" "resize 0.1"
     bind "alt-shift-0" "balance"
+
+    // Flip the focused window between tiled and floating without needing
+    // to remember its current state.
+    bind "alt-shift-f" "toggle-floating"
 
     // Cycles which connected monitor the above all target — a no-op with
     // only one monitor. See ROADMAP.md M9.
@@ -293,6 +334,8 @@ keybindings mode="manage" auto-exit=#true {
 //              `osascript -e 'id of app "Finder"'` or `mdls -name
 //              kMDItemCFBundleIdentifier /Applications/Finder.app`).
 //   workspace  required. Must name a workspace declared above.
+//   role       optional. Exact AX role match (normally "AXWindow").
+//   subrole    optional. Exact AX subrole match.
 //   always     optional, defaults to #false. Auto-routes every new window
 //              from this app, not just its first — the old behavior.
 workspace-rules {
@@ -310,6 +353,9 @@ workspace-rules {
 //   title      optional. A regex matched against the window title, for
 //              narrowing a rule to specific dialogs of an app that should
 //              otherwise tile normally.
+//   role       optional. Exact AX role match (normally "AXWindow").
+//   subrole    optional. Exact AX subrole match, e.g. "AXStandardWindow"
+//              or "AXDialog". Useful for floating only an app's dialogs.
 //   mode       optional, one of "float" (default)/"tile"/"ignore" —
 //              overrides tili's own guess at whether the window should
 //              float, tile, or be left completely untouched. Useful for an

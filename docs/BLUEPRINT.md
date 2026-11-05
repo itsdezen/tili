@@ -85,9 +85,12 @@ command must not read global focus until target context has been resolved.
 
 ### Parking refinements
 
-- Choose the parking corner per display by probing a few points near each
-  corner and selecting the one least covered by another display, using
-  `combined_bounds` of all displays.
+- Park only at the bottom-right corner of the southeast-most display
+  (highest `x + width`, tie highest `y + height`, tie id), never on a
+  per-workspace/per-display corner. The window body extends in +x/+y, so
+  this corner keeps it outside every other display. Re-park all parked
+  windows after connect/disconnect, arrangement, resolution, or id changes.
+  (Shipped in 0.13.)
 - When the daemon disables or quits, unpark all windows before exit. An
   unexpected crash runs no code, so the next startup's session restore /
   normal placement is the recovery path — it must never leave matched
@@ -201,24 +204,27 @@ disconnect lagging clients.
 
 1. Move `tree` to a persistent/single-linked representation or
    transaction-safe arena; audit every `await`.
-2. Complete command parity from the table above, JSON schemas/versioning,
-   and `subscribe` event streaming.
-3. Strengthen workspace virtualization: per-monitor parking-corner choice
-   and monitor-arrangement diagnostics. Session restore now covers
-   need-restore layout/focus, proportional floating restoration, and
-   startup recovery after an unclean exit; this item no longer includes
-   those.
+2. Complete remaining command parity from the table above and config-v2
+   diagnostics. JSON schemas/versioning and `subscribe` event streaming
+   shipped in 0.13; session state/restore shipped in 0.12.
+3. Strengthen workspace virtualization: monitor-arrangement diagnostics.
+   Global southeast parking and session restore shipped in 0.13/0.12.
 4. Make reconciliation robust: special containers, window-level/dialog
    heuristics, closed-window cache, lock-screen protection, and idempotent
    AX rescans per PID.
 5. Add config v2: strict diagnostics and migration, ordered callback/rule
    AST, target-context propagation, and safe environment expansion.
-6. Improve multi-monitor correctness: pinned workspace policy, swap
-   semantics, hot-plug race tests, and a real usable display rectangle
-   once coordinate conversion is thoroughly tested.
+6. Improve multi-monitor correctness further: hot-plug race tests and a
+   real usable display rectangle once coordinate conversion is thoroughly
+   tested. Pinned workspace policy, focus-display targets, fallback
+   cleanup, global southeast parking, home-display routing
+   (`workspace`/`workspace-here`/`move-workspace-to-monitor`), pair-based
+   `workspace-back`, and the switch-vs-move semantics shipped in 0.13.
 7. Add advanced features after the core: tabbed/stacked variants, sticky
-   windows, per-app default workspace, and native-tab support only when
-   its semantics are reliable.
+   windows, per-app default workspace, and full native-tab support only
+   when its semantics are reliable. The v0.13 native-tab guard already
+   makes app-owned tabs opaque to tili; full tab membership/restore remains
+   future work.
 
 ## Test matrix and definition of done
 

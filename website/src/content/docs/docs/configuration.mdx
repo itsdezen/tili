@@ -34,10 +34,13 @@ workspaces {
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `workspace`'s name (1st positional arg) | string | yes | — | The workspace's name. A `workspace` line with no name is skipped. |
-| `monitor` | string attribute | no | none | Pins the workspace to a specific monitor. Not validated against connected monitors by this crate. |
+| `monitor` | string attribute | no | none | Pins the workspace to `"main"` or a numeric display id. The workspace is never auto-assigned to another display, including while its target display is disconnected. |
 
 Switching only ever works for a workspace declared here — workspaces are
 never created on the fly by a `workspace <name>` command or keybinding.
+`workspace <name>` goes to the workspace's home display (the display
+currently showing it, a connected `monitor` pin, or the display it last
+lived on); `workspace-here <name>` pulls it onto the focused display.
 
 ## `default-layout`
 
@@ -99,6 +102,8 @@ settings {
     default-root-orientation "auto"
     mouse-resize-step 0.1
     animate #false
+    ax-timeout-ms 500
+    native-tabs #true
 }
 ```
 
@@ -111,6 +116,8 @@ settings {
 | `default-root-orientation` | string | `"auto"` | Orientation a workspace's root container gets when it's created for its second window: `"horizontal"`, `"vertical"`, or `"auto"` (derived from the target monitor's aspect ratio). Any other string is treated as `"auto"` by `tili-daemon`. |
 | `mouse-resize-step` | float (accepts a bare integer too) | `0.1` | Weight-space grid a mouse-drag tile resize snaps its result to, so a released size always matches some whole number of `resize <amount>` keypresses at this same step. |
 | `animate` | `#true` / `#false` / `"medium"` / `"high"` | `#false` (off) | Eases tiled relayout and floating placement into their new frame instead of jumping straight there. `#true` resolves to `"medium"`. Any unrecognized string value falls back to off. See the animation cost note below. |
+| `ax-timeout-ms` | integer (ms) | `500` | Per-app Accessibility messaging timeout. Lower values keep the daemon responsive when one app is hung; too low risks treating a slow app as unresponsive. Clamped to 50–5000. |
+| `native-tabs` | boolean | `#true` | Treat an app-owned native tab group as one opaque window: tab open/close/switch never creates placements or relayouts. Set `#false` if an app is detected incorrectly. |
 
 Every key here is independently optional — an invalid or unrecognized
 value for one key (e.g. `animate "ludicrous"`) falls back to that key's own
@@ -186,6 +193,7 @@ mistakable for "everything's fine."
 ```kdl
 keybindings mode="main" {
     bind "alt-h" "focus left"
+    bind "alt-shift-f" "toggle-floating"
     bind "alt-shift-semicolon" "mode resize"
 }
 
@@ -255,8 +263,10 @@ monitor right now, the window is parked until you switch to it.
 |---|---|---|---|
 | `app-id` | string attribute | **yes** | The target app's bundle identifier (find one with `osascript -e 'id of app "Finder"'` or `mdls -name kMDItemCFBundleIdentifier /Applications/Finder.app`). |
 | `workspace` | string attribute | **yes** | Must name a workspace declared in `workspaces`, though this crate doesn't itself validate that — `tili-daemon` does, the same way it resolves `settings.default-workspace`. |
+| `role` | string attribute | no | Exact AX role match, normally `"AXWindow"`. |
+| `subrole` | string attribute | no | Exact AX subrole match, e.g. `"AXStandardWindow"` or `"AXDialog"`. |
 
-A `rule` missing either attribute is silently skipped.
+A `rule` missing `app-id` or `workspace` is silently skipped.
 
 ## `floating-rules`
 
@@ -290,6 +300,8 @@ order, first match wins.
 |---|---|---|---|
 | `app-id` | string attribute | **yes** | The target app's bundle identifier. A `rule` missing this is skipped entirely. |
 | `title` | string attribute (regex) | no | A regex matched against the window title — compiled by `tili-daemon`, not this crate — for narrowing a rule to specific dialogs of an app that should otherwise tile normally. |
+| `role` | string attribute | no | Exact AX role match, normally `"AXWindow"`. |
+| `subrole` | string attribute | no | Exact AX subrole match, e.g. `"AXDialog"`/`"AXStandardWindow"`; useful for floating only an app's dialogs. |
 | `mode` | `"float"` / `"tile"` / `"ignore"` string attribute | no, defaults to `"float"` | Overrides tili's own AX-based guess at whether the window should float, tile, or be left completely untouched. An unrecognized `mode` value falls back to `"float"`. |
 
 ### `rule`'s `{ }` body (only meaningful when `mode` is `"float"`, the default)

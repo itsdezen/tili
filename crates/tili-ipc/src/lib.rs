@@ -33,6 +33,10 @@ pub enum MonitorTarget {
     Id(u32),
     /// Whichever monitor `Command::FocusMonitor` would cycle to next.
     Next,
+    /// Whichever monitor is one step before the current one in the
+    /// deterministic display order (`main`, then left-to-right). Used by
+    /// `focus-monitor prev` and `move-workspace-to-monitor prev`.
+    Prev,
     /// The main display.
     Main,
 }
@@ -57,6 +61,11 @@ pub enum Command {
     /// perpendicular container.
     Join(Direction),
     WorkspaceSwitch(String),
+    /// Switches the currently focused monitor to `name`, pulling the
+    /// workspace to this display (swapping with whatever is there) instead
+    /// of navigating to the workspace's home display. This is the explicit
+    /// "change this screen" counterpart to `WorkspaceSwitch`'s "go to X".
+    WorkspaceHere(String),
     MoveNodeToWorkspace(String),
     /// `root: true` targets the workspace's root tiling container instead
     /// of the focused window's immediate parent. Still a single-container
@@ -125,9 +134,17 @@ pub enum Command {
     /// Toggles the focused window between tiled and floating at runtime
     /// (independent of any `floating-rules` match at creation time).
     SetFloating(bool),
+    /// Flips the focused window between tiled and floating, without the
+    /// caller having to know its current placement — the hotkey-friendly
+    /// counterpart to `SetFloating`.
+    ToggleFloating,
     /// Cycles which connected monitor `Focus`/`Move`/`WorkspaceSwitch`/etc.
     /// operate on. A no-op with fewer than two monitors connected.
     FocusMonitor,
+    /// Focuses a specific connected monitor (`main`, `next`, `prev`, or a display id)
+    /// instead of cycling. Used by `tili focus-monitor <target>`; the
+    /// cycle-only `FocusMonitor` remains the hotkey-friendly default.
+    FocusMonitorTarget(MonitorTarget),
     ListMonitors,
     /// Deliberately a no-op placeholder, same reasoning as `Flatten`: config
     /// already reloads automatically via file-watching
@@ -157,6 +174,16 @@ pub enum Command {
     /// costs no focus query at all. Read-only, so it's excluded from
     /// `WaitForChange` change-detection alongside those four.
     Snapshot,
+    /// One versioned, machine-readable snapshot for `tili query state --json`
+    /// and any other external integration. Unlike `Snapshot` (the compact
+    /// menu-bar refresh payload), this includes every tracked window with
+    /// its workspace, placement, identity, and AX role/subrole.
+    QueryState,
+    /// Keeps the connection open and streams versioned events as
+    /// newline-delimited JSON from the CLI. Handled directly in the daemon's
+    /// main loop (like `WaitForChange`), never through `dispatch()`: it
+    /// installs a subscriber rather than producing one response.
+    Subscribe,
     /// Gracefully stops the daemon: responds `Ok` (so a client waiting on
     /// the reply doesn't hang) before the process exits. Handled directly
     /// in `tili-daemon`'s main loop, not through `dispatch()` — it isn't a
@@ -218,6 +245,24 @@ pub struct WindowInfo {
     pub id: u32,
     pub pid: i32,
     pub title: String,
+    /// The owning application's bundle id, when resolvable. `None` for
+    /// unbundled helpers and during the short window after launch before
+    /// `NSRunningApplication` registers the process.
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+    /// The workspace this window is assigned to, even while parked.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Whether this is tili's currently focused window.
+    #[serde(default)]
+    pub focused: bool,
+    /// Accessibility role (normally `AXWindow`).
+    #[serde(default)]
+    pub role: String,
+    /// Accessibility subrole (`AXStandardWindow`, `AXDialog`, ...), when
+    /// the app reports one.
+    #[serde(default)]
+    pub subrole: Option<String>,
     /// Which of `tili-daemon`'s placement states this window is currently
     /// in — see `PlacementInfo`. Replaces the old plain `floating: bool`
     /// now that placement has more than two states.
@@ -229,12 +274,24 @@ pub struct WindowInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     pub name: String,
+    /// User-facing label: a monitor's pretty name for synthetic workspaces,
+    /// `None` for config-declared workspaces (clients fall back to `name`).
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Whether this workspace was auto-created for a connected display
+    /// rather than declared in config.
+    #[serde(default)]
+    pub synthetic: bool,
     pub active: bool,
     pub window_count: usize,
     /// Which monitor this workspace is currently shown on, if any (M9).
     /// `None` for a workspace that exists but is parked (not visible on
     /// any connected monitor right now).
     pub monitor: Option<u32>,
+    /// Last monitor this workspace was shown on, including while parked.
+    /// `None` only if it has never been shown since startup.
+    #[serde(default)]
+    pub last_monitor: Option<u32>,
 }
 
 /// `Command::Doctor`'s payload. `tili-cli` combines this (when the daemon
@@ -315,12 +372,55 @@ pub struct SnapshotInfo {
     pub style: Option<MenubarStyle>,
 }
 
+/// `Command::QueryState`'s payload — a complete, versioned snapshot for
+/// scripts and status bars. `tili query state --json` prints this verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryState {
+    /// Snapshot schema version. Bump only for a breaking shape change.
+    pub version: u32,
+    pub monitors: Vec<MonitorInfo>,
+    pub workspaces: Vec<WorkspaceInfo>,
+    pub windows: Vec<WindowInfo>,
+    pub mode: String,
+    pub focused_window: Option<WindowInfo>,
+}
+
+/// The compact state included with every `SubscribeEvent`: enough to drive
+/// a status bar without shipping the full window list on every event.
+/// Consumers that need windows can issue `QueryState` on demand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeState {
+    pub monitors: Vec<MonitorInfo>,
+    pub workspaces: Vec<WorkspaceInfo>,
+    pub mode: String,
+    pub focused_window: Option<WindowInfo>,
+}
+
+/// One event in `Command::Subscribe`'s stream. The CLI decodes the
+/// daemon's length-prefixed frames and prints each event as one JSON line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeEvent {
+    pub version: u32,
+    /// Monotonic per-daemon sequence number. Consumers can use it to detect
+    /// missed events (for example after a slow-client lag).
+    pub seq: u64,
+    /// `"snapshot"` for the initial event, `"state_changed"` thereafter.
+    pub event: String,
+    pub state: SubscribeState,
+}
+
 /// A connected display as reported by `Command::ListMonitors` (M9).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorInfo {
     /// `CGDirectDisplayID` — not guaranteed stable across sleep/wake or
     /// hot unplug+replug, see `tili_ax::Monitor`'s docs.
     pub id: u32,
+    /// One-based display position (main is always 1).
+    #[serde(default)]
+    pub ordinal: u32,
+    /// Human-readable display name (`Sidecar Display`, `DELL U2720Q`, ...).
+    #[serde(default)]
+    pub pretty_name: String,
     pub is_main: bool,
     /// Whether `Focus`/`Move`/`WorkspaceSwitch`/etc. currently target this
     /// monitor.
@@ -333,9 +433,11 @@ pub struct MonitorInfo {
 ///
 /// Wire format over this socket (both directions): a 4-byte big-endian
 /// length prefix followed by that many bytes of JSON-encoded `Command` or
-/// `Response`. `tili-daemon` and `tili-cli` each implement this framing
-/// directly (one async via tokio, one sync via `std::io`) rather than
-/// sharing code here, since the contract is simpler than a shared
+/// `Response`. Normal commands get exactly one response; `Command::Subscribe`
+/// instead streams one framed `SubscribeEvent` payload after another until
+/// the client disconnects. `tili-daemon` and `tili-cli` each implement this
+/// framing directly (one async via tokio, one sync via `std::io`) rather
+/// than sharing code here, since the contract is simpler than a shared
 /// sync/async abstraction would be.
 pub fn default_socket_path() -> std::path::PathBuf {
     dirs_socket_dir().join("tili.sock")
@@ -359,6 +461,60 @@ mod tests {
     }
 
     #[test]
+    fn query_state_and_subscribe_event_roundtrip_through_json() {
+        let info = QueryState {
+            version: 1,
+            monitors: Vec::new(),
+            workspaces: Vec::new(),
+            windows: vec![WindowInfo {
+                id: 7,
+                pid: 42,
+                title: "x".to_string(),
+                bundle_id: Some("com.example.app".to_string()),
+                workspace: Some("work".to_string()),
+                focused: true,
+                role: "AXWindow".to_string(),
+                subrole: Some("AXStandardWindow".to_string()),
+                placement: PlacementInfo::Tiled,
+                frame: RectInfo {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 20.0,
+                },
+            }],
+            mode: "main".to_string(),
+            focused_window: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: QueryState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, 1);
+        assert_eq!(
+            back.windows[0].bundle_id.as_deref(),
+            Some("com.example.app")
+        );
+        assert_eq!(back.windows[0].workspace.as_deref(), Some("work"));
+        assert!(back.windows[0].focused);
+        assert_eq!(back.windows[0].subrole.as_deref(), Some("AXStandardWindow"));
+
+        let event = SubscribeEvent {
+            version: 1,
+            seq: 3,
+            event: "state_changed".to_string(),
+            state: SubscribeState {
+                monitors: Vec::new(),
+                workspaces: Vec::new(),
+                mode: "main".to_string(),
+                focused_window: None,
+            },
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: SubscribeEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.seq, 3);
+        assert_eq!(back.event, "state_changed");
+    }
+
+    #[test]
     fn snapshot_command_and_payload_roundtrip_through_json() {
         let cmd = Command::Snapshot;
         let json = serde_json::to_string(&cmd).unwrap();
@@ -368,6 +524,8 @@ mod tests {
         let info = SnapshotInfo {
             monitors: vec![MonitorInfo {
                 id: 7,
+                ordinal: 1,
+                pretty_name: "Main Display".to_string(),
                 is_main: true,
                 focused: true,
                 active_workspace: Some("work".to_string()),
@@ -380,9 +538,12 @@ mod tests {
             }],
             workspaces: vec![WorkspaceInfo {
                 name: "work".to_string(),
+                display_name: None,
+                synthetic: false,
                 active: true,
                 window_count: 3,
                 monitor: Some(7),
+                last_monitor: Some(7),
             }],
             mode: "resize".to_string(),
             style: Some(MenubarStyle {

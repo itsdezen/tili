@@ -82,6 +82,13 @@ pub struct SavedActiveWorkspace {
     pub workspace: String,
 }
 
+/// Per-monitor back-and-forth history (`workspace-back`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedPreviousWorkspace {
+    pub monitor: SavedMonitorRef,
+    pub workspace: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedWorkspace {
     pub name: String,
@@ -92,6 +99,10 @@ pub struct SavedWorkspace {
     /// that has no entry in `active_workspaces`.
     #[serde(default)]
     pub monitor: Option<SavedMonitorRef>,
+    /// Auto-created display fallback workspace (cleaned up on disconnect)
+    /// rather than a config-declared workspace.
+    #[serde(default)]
+    pub synthetic: bool,
 }
 
 /// A window's placement state, serialized independently of the live
@@ -161,7 +172,11 @@ pub struct SavedSession {
     pub monitors: Vec<SavedMonitor>,
     pub focused_monitor: Option<SavedMonitorRef>,
     pub active_workspaces: Vec<SavedActiveWorkspace>,
+    /// Legacy single-monitor field, still read for old state files.
+    #[serde(default)]
     pub previous_workspace: Option<String>,
+    #[serde(default)]
+    pub previous_workspaces: Vec<SavedPreviousWorkspace>,
     pub workspaces: Vec<SavedWorkspace>,
     pub windows: Vec<SavedWindow>,
 }
@@ -171,7 +186,7 @@ impl SavedSession {
         monitors: Vec<SavedMonitor>,
         focused_monitor: Option<SavedMonitorRef>,
         active_workspaces: Vec<SavedActiveWorkspace>,
-        previous_workspace: Option<String>,
+        previous_workspaces: Vec<SavedPreviousWorkspace>,
         workspaces: Vec<SavedWorkspace>,
         windows: Vec<SavedWindow>,
     ) -> Self {
@@ -181,7 +196,8 @@ impl SavedSession {
             monitors,
             focused_monitor,
             active_workspaces,
-            previous_workspace,
+            previous_workspace: None,
+            previous_workspaces,
             workspaces,
             windows,
         }
@@ -529,13 +545,14 @@ mod tests {
             vec![],
             None,
             vec![],
-            None,
+            vec![],
             vec![SavedWorkspace {
                 name: "main".to_string(),
                 tree: TreeSnapshot::default(),
                 focus: None,
                 fullscreen: None,
                 monitor: None,
+                synthetic: false,
             }],
             vec![saved_window(1, SavedPlacement::Tiled)],
         );
@@ -625,7 +642,7 @@ mod tests {
             }],
             None,
             vec![],
-            None,
+            vec![],
             vec![SavedWorkspace {
                 name: "main".to_string(),
                 tree: TreeSnapshot {
@@ -644,6 +661,7 @@ mod tests {
                 focus: Some(1),
                 fullscreen: Some(1),
                 monitor: None,
+                synthetic: false,
             }],
             windows,
         );
@@ -664,7 +682,7 @@ mod tests {
         ));
         let path = dir.join("session.json");
         let store = SessionStore::new(path.clone());
-        let session = SavedSession::new(vec![], None, vec![], None, vec![], vec![]);
+        let session = SavedSession::new(vec![], None, vec![], vec![], vec![], vec![]);
         store.save(&session).expect("save");
         store.save(&session).expect("create backup");
         std::fs::write(&path, b"{ not json").expect("corrupt primary");

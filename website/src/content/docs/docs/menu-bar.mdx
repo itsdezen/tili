@@ -12,8 +12,13 @@ monitor.
 - The badge title is the focused monitor's active workspace name — the
   unambiguous "current workspace" for a single badge, since more than one
   monitor's workspace can independently be "active" at once.
+- The badge shows the focused display's active workspace. If that workspace
+  is an auto-created display fallback, it shows the monitor's pretty name
+  (`Sidecar Display`, `DELL U2720Q`, or `Display 2`) instead of an internal
+  id.
 - The dropdown menu lists every workspace with its window count (a `✓`
-  suffix marks the current one), then **Open Settings** and **Quit tili**.
+  suffix marks the current one), then **Copy rule for focused window**,
+  **Open Settings**, and **Quit tili**.
 - The badge's shape/fill/casing is configurable — see [`menubar` in
   Configuration](/docs/configuration#menubar).
 - When the daemon isn't reachable — including when it's stopped from
@@ -25,7 +30,8 @@ monitor.
 
 | Item | Behavior |
 |---|---|
-| A workspace name | Switches the active workspace to it. |
+| A workspace name | Goes to that workspace's home display (or focuses the display already showing it). |
+| **Copy rule for focused window** | Runs `tili rule --copy`, putting a ready-to-paste `floating-rules` snippet on the clipboard. |
 | **Open Settings** | Opens `~/.config/tili/tili.kdl`, trying `$EDITOR` first (if set), then `open <path>` (Launch Services' registered default for `.kdl`), then `open -a TextEdit <path>` as a last resort that's guaranteed to work. |
 | **Quit tili** | Runs `tili stop` (stopping the daemon too, not just this process) and then exits. |
 

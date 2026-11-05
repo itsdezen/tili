@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use axuielement::AXError;
 use axuielement::AXUIElement;
 use axuielement::ax_attribute::roles::AX_WINDOW_ROLE;
@@ -93,22 +95,44 @@ unsafe extern "C" {
 /// the purposes of skipping a redundant AX write — see `AxWindow::set_frame`.
 const FRAME_EPSILON: f64 = 0.5;
 
-/// Messaging timeout applied to every `AXUIElement` app connection this
-/// crate opens (`AXUIElementSetMessagingTimeout`, `AXUIElement::set_timeout`)
-/// — without it, a call into an unresponsive/hung app's AX connection blocks
-/// its calling thread indefinitely, which for the synchronous calls made
-/// directly from `tili-daemon`'s single event loop (`enumerate::list_windows_for_pid`
-/// in particular) means one hung app freezes the entire daemon. Short enough
-/// that a genuinely hung app doesn't stall the daemon noticeably, long
-/// enough not to false-positive on an app that's merely doing legitimate
-/// slow work when queried.
-pub(crate) const AX_CALL_TIMEOUT_SECS: f32 = 1.0;
+/// Default messaging timeout (milliseconds) applied to every `AXUIElement`
+/// app connection this crate opens (`AXUIElementSetMessagingTimeout`,
+/// `AXUIElement::set_timeout`). Without one, a call into an unresponsive/
+/// hung app blocks its calling thread indefinitely; for the synchronous
+/// calls made directly from `tili-daemon`'s single event loop
+/// (`enumerate::list_windows_for_pid` in particular) that means one hung app
+/// freezes the entire daemon. 500ms is a deliberate midpoint: short enough
+/// that a genuinely hung app can't stall the daemon for long, long enough
+/// that an app doing legitimate slow work isn't misclassified as hung.
+pub const AX_CALL_TIMEOUT_MS_DEFAULT: u64 = 500;
+
+/// Runtime override, set from `settings { ax-timeout-ms N }` on config load.
+/// An atomic rather than a parameter because the timeout is set on each
+/// per-app `AXUIElement` connection at creation time, including from
+/// background watcher threads that don't borrow `WmState`.
+static AX_CALL_TIMEOUT_MS: AtomicU64 = AtomicU64::new(AX_CALL_TIMEOUT_MS_DEFAULT);
+
+/// Clamps `millis` to a sane range and stores it for subsequent app
+/// connections. Existing connections keep the timeout they were opened
+/// with; a config reload therefore applies to the next AX connection.
+pub fn set_call_timeout_ms(millis: u64) {
+    AX_CALL_TIMEOUT_MS.store(clamp_call_timeout_ms(millis), Ordering::Relaxed);
+}
+
+fn clamp_call_timeout_ms(millis: u64) -> u64 {
+    millis.clamp(50, 5_000)
+}
+
+/// The currently configured timeout, for diagnostics/tests.
+pub fn call_timeout_ms() -> u64 {
+    AX_CALL_TIMEOUT_MS.load(Ordering::Relaxed)
+}
 
 /// Best-effort: a failure to set the timeout just means this connection
 /// keeps the (effectively unbounded) default — not worth failing the whole
 /// lookup over.
 pub(crate) fn apply_call_timeout(app: &AXUIElement) {
-    let _ = app.set_timeout(AX_CALL_TIMEOUT_SECS);
+    let _ = app.set_timeout(call_timeout_ms() as f32 / 1000.0);
 }
 
 /// Whether `element` has a given child attribute at all (e.g. a chrome
@@ -163,6 +187,8 @@ pub struct AxWindow {
     frame: Rect,
     element: AXUIElement,
     kind: WindowKind,
+    role: String,
+    subrole: Option<String>,
     has_zoom_button: bool,
     is_resizable: bool,
     minimized: bool,
@@ -250,10 +276,9 @@ impl AxWindow {
     /// either way, since `_AXUIElementGetWindow` works on any element and
     /// returns the `CGWindowID` of whatever window contains it.
     pub fn system_focused_id() -> Option<WindowId> {
-        let focused = axuielement::system_wide()?
-            .focused_ui_element()
-            .ok()
-            .flatten()?;
+        let system = axuielement::system_wide()?;
+        apply_call_timeout(&system);
+        let focused = system.focused_ui_element().ok().flatten()?;
         Self::resolve_window_id(&focused)
     }
 
@@ -338,6 +363,8 @@ impl AxWindow {
             frame,
             element,
             kind,
+            role: role.unwrap_or_default(),
+            subrole,
             has_zoom_button,
             is_resizable,
             minimized,
@@ -359,6 +386,36 @@ impl AxWindow {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The window's AX role (normally `AXWindow`); retained so window rules
+    /// can match it and `tili query` can expose it.
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    /// The window's AX subrole (`AXStandardWindow`, `AXDialog`, ...), when
+    /// the app reports one.
+    pub fn subrole(&self) -> Option<&str> {
+        self.subrole.as_deref()
+    }
+
+    /// Whether this window exposes an `AXTabGroup` child — a strong signal
+    /// that it belongs to an app-owned native tab group. Read lazily (only
+    /// for brand-new windows during native-tab detection), not on every
+    /// enumeration, so steady-state scanning pays nothing for it.
+    pub fn has_tab_group(&self) -> bool {
+        let Ok(children) = self.element.element_array_attribute("AXChildren") else {
+            return false;
+        };
+        children.iter().any(|child| {
+            child
+                .string_attribute(AX_ROLE_ATTRIBUTE)
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("AXTabGroup")
+        })
     }
 
     pub fn frame(&self) -> Rect {
@@ -737,6 +794,13 @@ mod tests {
             ),
             WindowKind::Popup
         );
+    }
+
+    #[test]
+    fn ax_timeout_is_clamped_to_a_sane_range() {
+        assert_eq!(clamp_call_timeout_ms(0), 50);
+        assert_eq!(clamp_call_timeout_ms(500), 500);
+        assert_eq!(clamp_call_timeout_ms(99_999), 5_000);
     }
 
     #[test]

@@ -22,6 +22,35 @@ combines it with checks it can run without a daemon at all (LaunchAgent
 files, the socket, config syntax, the state file). See
 [tili-cli.md](tili-cli.md) and [tili-daemon.md](tili-daemon.md).
 
+`WorkspaceInfo` now carries `display_name`/`synthetic` (auto-created
+display fallbacks expose the monitor's pretty name) and `last_monitor`
+(the display a parked workspace returns to — its home). `MonitorInfo`
+carries `ordinal` and `pretty_name` so clients can render `Display
+2`/`Sidecar Display` without a second query.
+
+`MonitorTarget` includes `Next` and `Prev`, and `Command::WorkspaceHere(name)`
+is the explicit local-switch counterpart to `WorkspaceSwitch(name)`'s home
+navigation. The keybinding parser accepts `workspace-here <name>` and
+`move-workspace-to-monitor ... prev`.
+
+`Command::QueryState`'s payload, `QueryState`, is the external-integration
+snapshot: versioned, and unlike `SnapshotInfo` it includes every tracked
+window with `bundle_id`, `workspace`, `focused`, accessibility
+`role`/`subrole`, placement, and frame. `tili query state --json` prints it
+verbatim; `tili query windows|workspaces|monitors` print the matching
+sub-array as JSON.
+
+`Command::Subscribe` is a streaming command handled directly by the
+daemon's event loop, not `dispatch()`: the daemon sends an initial
+`SubscribeEvent { event: "snapshot" }`, then a `state_changed` event per
+coalesced change. Each event carries a monotonic `seq` and the compact
+`SubscribeState` (monitors, workspaces, mode, focused window) rather than
+the full window list, so a busy workspace doesn't reserialize every window
+on every change. The CLI prints each event as one JSON line; consumers that
+need windows issue `QueryState` on demand. Subscribers use a small bounded
+broadcast channel and are independent spawned tasks, so a slow client can't
+block the main loop.
+
 `Command::Snapshot`'s payload, `SnapshotInfo`, bundles monitors,
 workspaces, the active mode, and the menubar style into one read. It exists
 purely so `tili-menubar`'s refresh costs one socket connection and one

@@ -3,7 +3,10 @@
 Part of the [architecture notes](../ARCHITECTURE.md).
 
 An `NSStatusItem` badge showing the focused monitor's active workspace,
-plus a dropdown to switch workspaces, open the config file, or quit.
+plus a dropdown to switch workspaces, copy a rule, open the config file, or
+quit. The badge/menu label prefers `WorkspaceInfo.display_name` when the
+daemon supplies one (synthetic display fallbacks use the monitor's pretty
+name), falling back to the workspace id.
 
 - `src/badge.rs`'s `image_for` renders the badge as a solid rounded-pill
   `NSImage` with the text "knocked out"
@@ -14,7 +17,8 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   baseline offset so it lines up with the workspace name's visual center
   instead of sitting low.
 - `src/menu.rs`'s `MenuState` tracks the last-applied `(current workspace,
-  workspace name list, mode)` key so `apply_snapshot` only rebuilds the live
+  current display label, workspace name/display-name list, mode)` key so
+  `apply_snapshot` only rebuilds the live
   `NSMenu` when that key actually changes (rebuilding unconditionally on
   every tick previously caused menu clicks to fire on their own with zero
   user interaction) — the badge title and visibility are still updated
@@ -123,8 +127,10 @@ plus a dropdown to switch workspaces, open the config file, or quit.
   the default filled pill — so a user's chosen fill/shape can't double as
   the "everything's fine" indicator, which would defeat the point of it
   being visually distinct.
-- `src/actions.rs` handles menu clicks (`workspace:<name>` switches,
-  `open-settings` opens the config via `$EDITOR`/`open`/`open -a TextEdit`
-  in that fallback order, `quit` runs `tili stop` before exiting this
-  process too) on its own background thread, since none of those reactions
-  need the main thread.
+- `src/actions.rs` handles menu clicks (`workspace:<name>` sends
+  `WorkspaceSwitch`; the daemon goes to that workspace's home display (or
+  focuses the display already showing it) rather than swapping layouts,
+  `copy-rule` runs `tili rule --copy`, `open-settings` opens the config via
+  `$EDITOR`/`open`/`open -a TextEdit` in that fallback order, `quit` runs
+  `tili stop` before exiting this process too) on its own background
+  thread, since none of those reactions need the main thread.

@@ -8,8 +8,8 @@ pub mod window;
 pub mod workspace;
 
 pub use display::{
-    Monitor, MonitorDiff, list_monitors, main_display_frame, match_monitors, parking_position,
-    spawn_display_watcher,
+    Monitor, MonitorDiff, list_monitors, main_display_frame, match_monitors, southeast_monitor,
+    southeast_parking_position, spawn_display_watcher,
 };
 pub use enumerate::{list_windows, list_windows_for_pid};
 pub use frame_setter::{InstantFrameSetter, TweenedFrameSetter, WindowFrameSetter};
@@ -19,7 +19,10 @@ pub use hotkey::{
 };
 pub use mouse::{MouseSignal, spawn_mouse_watcher, warp_cursor_to};
 pub use watch::{WmEvent, spawn_event_watcher};
-pub use window::{AxWindow, WindowKind, WindowProbeHandle};
+pub use window::{
+    AX_CALL_TIMEOUT_MS_DEFAULT, AxWindow, WindowKind, WindowProbeHandle, call_timeout_ms,
+    set_call_timeout_ms,
+};
 pub use workspace::{AppEvent, bundle_id_for_pid, is_app_hidden, register_on_main};
 
 /// Checks Accessibility permission, prompting the user via the system

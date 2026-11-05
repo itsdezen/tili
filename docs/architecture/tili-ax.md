@@ -72,6 +72,14 @@ occasionally missing a truly non-resizable one. `tili-daemon`'s
 regardless of `kind` or any matching floating rule — see
 `docs/architecture/tili-daemon.md`.
 
+Every per-app `AXUIElement` connection gets a messaging timeout via
+`AXUIElementSetMessagingTimeout` (`apply_call_timeout`), because a hung app
+would otherwise block `tili-daemon`'s single event loop indefinitely. The
+default is 500ms; `settings { ax-timeout-ms N }` overrides a process-wide
+atomic (clamped to 50–5000ms) and applies to connections opened after the
+next config load, not to already-open ones. `tili-ax` also exposes
+`call_timeout_ms()` for diagnostics.
+
 `AxWindow::set_frame`/`set_position`/`set_size`/`focus` are the only place
 real windows get moved/resized/raised — `set_frame` sets position before
 size (some apps clamp size based on current position), `set_position` only
@@ -140,9 +148,9 @@ so `InstantFrameSetter` needs no changes:
   from wherever one of these direct writes just put it.
 - `set_suppressed` — while true, `set_frame` writes instantly (same as
   `InstantFrameSetter`) and drops any tween already running for that
-  window, regardless of `Settings::animate`. `WmState::switch_workspace`
+  window, regardless of `Settings::animate`. `WmState::switch_on_monitor`
   wraps its reveal-the-incoming-workspace calls
-  (`relayout_active`/`reposition_floating_in_active_workspace`) in
+  (`relayout_monitor`/`reposition_floating_for_monitor` variants) in
   `set_suppressed(true)`/`set_suppressed(false)`: those calls are showing
   windows at wherever `park` last left them, and a parked position was
   never meant to be seen, so there's no meaningful start point to ease
@@ -178,6 +186,15 @@ but requires flipping between `NSScreen`'s bottom-left-origin coordinate
 space and AX/`CGDisplay`'s top-left-origin one — judged not worth the risk
 for what M9 needs).
 
+Each `Monitor` also carries `pretty_name` and `ordinal`: the name comes from
+`NSScreen.localizedName` (AirPlay suffix stripped, empty names falling back
+to `Main Display`/`Display N`, duplicate model names suffixed `(2)`), and
+the ordinal is one-based in a deterministic order — main first, then
+remaining displays left-to-right/top-to-bottom. This is display metadata,
+not identity: `id` remains the stable per-session key, and `ordinal` may
+change when the layout changes. Synthetic fallback workspaces use the
+ordinal for `display-<n>` and the pretty name for their label.
+
 Each `Monitor` also carries `notch: f64` — how much *additional* top inset
 (beyond whatever `frame` already excludes) is needed to also clear that
 display's notch, `0.0` if it has none. `list_monitors()` computes this as
@@ -209,6 +226,18 @@ it. `tili-daemon`'s `tiled_layout_inputs` is what actually folds this
 height into the effective top gap (gated by the `gaps` config's
 `ignore-notch` flag) — `Monitor.notch` is already the correct amount to
 add there, with no further adjustment needed on the daemon side.
+
+`southeast_monitor(monitors)` returns the display with the greatest right
+edge (`x + width`), breaking ties by greatest bottom edge (`y + height`)
+and then id; `southeast_parking_position(monitors)` parks a window one point
+inside that display's bottom-right corner. Every parked window in
+`tili-daemon` uses this same global corner, whatever workspace or display it
+came from, so a window's body (which extends in +x/+y) can never reappear
+on another monitor even in a diagonal arrangement. The functions return
+`None`/`(0.0, 0.0)` for an empty monitor list; the daemon treats a
+zero-display enumeration as sleep and doesn't park then. The one-point inset
+is the same AppKit-clamp workaround described in
+[tili-daemon.md](tili-daemon.md)'s parking section.
 
 `spawn_display_watcher()` registers a
 `CGDisplayRegisterReconfigurationCallback` on its own dedicated `CFRunLoop`

@@ -22,7 +22,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 const MENU_BAR_HEIGHT: f64 = 25.0;
 
 /// One connected, active display.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Monitor {
     /// `CGDirectDisplayID` — stable for as long as the display stays
     /// connected, but not guaranteed to survive sleep/wake or a hot
@@ -42,6 +42,15 @@ pub struct Monitor {
     /// a caller adding this straight to a configured gap (as
     /// `tili-daemon`'s `tiled_layout_inputs` does) would double-count it.
     pub notch: f64,
+    /// Human-readable display name from `NSScreen.localizedName`, normalized
+    /// by `list_monitors` (AirPlay suffix stripped, empty/duplicate names
+    /// resolved). Never empty.
+    pub pretty_name: String,
+    /// One-based position in the deterministic display ordering: main is
+    /// always 1, then remaining displays sorted left-to-right / top-to-bottom.
+    /// Recomputed on every enumeration; used only for display labels and
+    /// synthetic workspace ids, never as a stable display identity.
+    pub ordinal: u32,
 }
 
 fn to_rect(bounds: core_graphics::geometry::CGRect) -> Rect {
@@ -58,7 +67,7 @@ fn to_rect(bounds: core_graphics::geometry::CGRect) -> Rect {
 /// calling this again.
 pub fn list_monitors() -> Vec<Monitor> {
     let main_id = CGDisplay::main().id;
-    let notches = notch_heights();
+    let metadata = screen_metadata();
     let mut monitors: Vec<Monitor> = CGDisplay::active_displays()
         .unwrap_or_default()
         .into_iter()
@@ -76,18 +85,60 @@ pub fn list_monitors() -> Vec<Monitor> {
                 bounds
             };
             let baseline_inset = if is_main { MENU_BAR_HEIGHT } else { 0.0 };
-            let raw_notch = notches.get(&id).copied().unwrap_or(0.0);
+            let raw_notch = metadata.notches.get(&id).copied().unwrap_or(0.0);
             let notch = extra_notch_inset(raw_notch, baseline_inset);
             Monitor {
                 id,
                 frame,
                 is_main,
                 notch,
+                pretty_name: metadata.names.get(&id).cloned().unwrap_or_default(),
+                // Filled in after sorting.
+                ordinal: 0,
             }
         })
         .collect();
-    monitors.sort_by_key(|m| std::cmp::Reverse(m.is_main));
+    // Main first; remaining displays in a predictable visual order
+    // (left-to-right, then top-to-bottom) so "Display 2" really is the
+    // second display rather than a raw CGDirectDisplayID.
+    monitors.sort_by(|a, b| {
+        b.is_main
+            .cmp(&a.is_main)
+            .then_with(|| a.frame.x.total_cmp(&b.frame.x))
+            .then_with(|| a.frame.y.total_cmp(&b.frame.y))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    normalize_pretty_names(&mut monitors);
     monitors
+}
+
+/// Resolves the final user-facing name for every monitor and assigns its
+/// ordinal. Empty names fall back to `Main Display`/`Display N`; duplicate
+/// model names get a `(2)`, `(3)` suffix so two identical panels remain
+/// distinguishable.
+fn normalize_pretty_names(monitors: &mut [Monitor]) {
+    let mut seen: HashMap<String, u32> = HashMap::new();
+    for (index, monitor) in monitors.iter_mut().enumerate() {
+        monitor.ordinal = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        let raw = monitor.pretty_name.trim();
+        let raw = raw.strip_suffix(" (AirPlay)").unwrap_or(raw).trim();
+        let base = if raw.is_empty() {
+            if monitor.is_main {
+                "Main Display".to_string()
+            } else {
+                format!("Display {}", monitor.ordinal)
+            }
+        } else {
+            raw.to_string()
+        };
+        let count = seen.entry(base.clone()).or_default();
+        *count += 1;
+        monitor.pretty_name = if *count == 1 {
+            base
+        } else {
+            format!("{base} ({count})")
+        };
+    }
 }
 
 /// How much of `raw_notch` (a display's raw `NSScreen.safeAreaInsets.top`)
@@ -99,7 +150,7 @@ fn extra_notch_inset(raw_notch: f64, baseline_inset: f64) -> f64 {
     (raw_notch - baseline_inset).max(0.0)
 }
 
-/// How long `notch_heights` waits for its main-thread query to answer
+/// How long `screen_metadata` waits for its main-thread query to answer
 /// before giving up and returning an empty map (every display then falls
 /// back to `0.0`, same as before notch-awareness existed). Not a
 /// legitimate-main-thread-is-slow allowance — a real `NSApplication` event
@@ -130,10 +181,16 @@ const NOTCH_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 /// `LSMinimumSystemVersion` (`xtask/src/main.rs`) is already 12.0, the OS
 /// version `safeAreaInsets` shipped in, so no availability check is needed
 /// before calling it.
-fn notch_heights() -> HashMap<u32, f64> {
+#[derive(Default)]
+struct ScreenMetadata {
+    notches: HashMap<u32, f64>,
+    names: HashMap<u32, String>,
+}
+
+fn screen_metadata() -> ScreenMetadata {
     let (tx, rx) = std::sync::mpsc::channel();
     DispatchQueue::main().exec_async(move || {
-        let mut heights = HashMap::new();
+        let mut metadata = ScreenMetadata::default();
         if let Some(mtm) = MainThreadMarker::new() {
             let screen_number_key = NSString::from_str("NSScreenNumber");
             for screen in NSScreen::screens(mtm).to_vec() {
@@ -144,10 +201,14 @@ fn notch_heights() -> HashMap<u32, f64> {
                 else {
                     continue;
                 };
-                heights.insert(number.unsignedIntValue(), screen.safeAreaInsets().top);
+                let id = number.unsignedIntValue();
+                metadata.notches.insert(id, screen.safeAreaInsets().top);
+                metadata
+                    .names
+                    .insert(id, screen.localizedName().to_string());
             }
         }
-        let _ = tx.send(heights);
+        let _ = tx.send(metadata);
     });
     rx.recv_timeout(NOTCH_QUERY_TIMEOUT).unwrap_or_default()
 }
@@ -176,38 +237,52 @@ pub fn main_display_frame() -> Rect {
 /// regardless of how far outside it's requested — AppKit only constrains a
 /// window's *origin* to stay reachable on some real display, it doesn't
 /// care whether the window's full frame does. So instead of fighting that
-/// clamp, `parking_position` exploits it — a technique other AX-based
+/// clamp, `southeast_parking_position` exploits it — a technique other AX-based
 /// tiling WMs use too: keep the origin legitimately on-screen, just
 /// barely, and let the window's own size push everything past it off the
 /// edge. A larger value here doesn't hide more — it would just be a wider
 /// on-screen sliver, the opposite of what parking wants.
 const PARK_EPSILON: f64 = 1.0;
 
-/// Computes where to position a window so only a `PARK_EPSILON` sliver of
-/// it remains on-screen, hugging the main monitor's (or the first
-/// available one's) bottom-right corner. `size` isn't actually needed for
-/// this corner specifically — the window's own top-left lands just inside
-/// the corner, and its body (extending in the +x/+y direction from there)
-/// does all the hiding regardless of how big it is — but is taken anyway
-/// so this signature doesn't need to change if a different corner (one
-/// that actually needs it, e.g. a bottom-left variant) is ever added.
+/// The connected display furthest down-and-to-the-right: highest
+/// `x + width` (right edge), then highest `y + height` (bottom edge), then
+/// highest id as a deterministic tie-break. This is the one display where
+/// *all* parked windows go.
 ///
-/// Doesn't need to check other connected monitors: `PARK_EPSILON` is tiny
-/// enough that this point is always deep inside the main monitor's own
-/// bounds, never anywhere close to a neighboring display's — unlike the
-/// previous far-outside-every-bound approach, which genuinely could land
-/// on a different physical monitor depending on arrangement.
-pub fn parking_position(monitors: &[Monitor], _size: (f64, f64)) -> (f64, f64) {
-    let Some(main) = monitors
-        .iter()
-        .find(|m| m.is_main)
-        .or_else(|| monitors.first())
-    else {
+/// Picking the southeast-most display rather than a workspace's own
+/// display matters because a parked window's body extends in the +x/+y
+/// direction from its origin: starting at this display's bottom-right
+/// corner pushes the body past every other display's right and bottom
+/// edges too, so no part of it can reappear on a differently-arranged
+/// monitor. Parking on a workspace's own display could not guarantee that
+/// (a display down-and-right of it would sit exactly where the body goes).
+pub fn southeast_monitor(monitors: &[Monitor]) -> Option<&Monitor> {
+    monitors.iter().max_by(|a, b| {
+        (a.frame.x + a.frame.width)
+            .total_cmp(&(b.frame.x + b.frame.width))
+            .then_with(|| (a.frame.y + a.frame.height).total_cmp(&(b.frame.y + b.frame.height)))
+            .then_with(|| a.id.cmp(&b.id))
+    })
+}
+
+/// Computes where to position a window so only a `PARK_EPSILON` sliver of
+/// it remains on-screen, hugging the southeast-most monitor's bottom-right
+/// corner. Every parked window — from any workspace — targets this same
+/// coordinate, so parking stays consistent and idempotent: a re-park (after
+/// a display change) either writes the same point or the new southeast
+/// corner, never a per-workspace variant. The window's own size isn't
+/// needed: its top-left lands just inside the corner and its body
+/// (extending in +x/+y) does all the hiding regardless of how big it is.
+///
+/// Returns `(0.0, 0.0)` with no connected monitors (a momentary zero-display
+/// enumeration is treated as sleep by the daemon, which skips parking then).
+pub fn southeast_parking_position(monitors: &[Monitor]) -> (f64, f64) {
+    let Some(target) = southeast_monitor(monitors) else {
         return (0.0, 0.0);
     };
     (
-        main.frame.x + main.frame.width - PARK_EPSILON,
-        main.frame.y + main.frame.height - PARK_EPSILON,
+        target.frame.x + target.frame.width - PARK_EPSILON,
+        target.frame.y + target.frame.height - PARK_EPSILON,
     )
 }
 
@@ -369,6 +444,8 @@ mod tests {
             },
             is_main: id == 1,
             notch: 0.0,
+            pretty_name: format!("Display {id}"),
+            ordinal: id,
         }
     }
 
@@ -398,36 +475,134 @@ mod tests {
     #[test]
     fn single_monitor_parks_one_epsilon_inside_its_bottom_right_corner() {
         let monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
-        let (x, y) = parking_position(&monitors, (400.0, 300.0));
-        assert_eq!(x, 1919.0);
-        assert_eq!(y, 1079.0);
+        assert_eq!(southeast_parking_position(&monitors), (1919.0, 1079.0));
     }
 
     #[test]
-    fn side_by_side_pair_still_parks_at_the_main_monitors_own_corner() {
+    fn side_by_side_pair_parks_on_the_rightmost_monitor() {
         let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 0.0, 2560.0, 1440.0),
+        ];
+        assert_eq!(
+            southeast_monitor(&monitors).map(|m| m.id),
+            Some(2),
+            "the rightmost display wins even though display 1 is main"
+        );
+        assert_eq!(southeast_parking_position(&monitors), (4479.0, 1439.0));
+    }
+
+    #[test]
+    fn equal_right_edges_break_the_tie_by_bottom_edge() {
+        // Stacked displays share a right edge; the lower one is southeast.
+        let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 0.0, 1080.0, 1920.0, 1080.0),
+        ];
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(2));
+        assert_eq!(southeast_parking_position(&monitors), (1919.0, 2159.0));
+    }
+
+    #[test]
+    fn equal_edges_break_the_tie_by_id() {
+        let monitors = [
+            monitor(4, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(7, 0.0, 0.0, 1920.0, 1080.0),
+        ];
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(7));
+    }
+
+    #[test]
+    fn diagonal_arrangement_parks_on_the_lower_right_display() {
+        // The case the old per-display parking exposed: a display
+        // down-and-right of the workspace's own display sat exactly where
+        // the parked window's body extends.
+        let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 1080.0, 1280.0, 800.0),
+        ];
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(2));
+        assert_eq!(southeast_parking_position(&monitors), (3199.0, 1879.0));
+    }
+
+    #[test]
+    fn a_display_above_and_right_is_only_chosen_when_it_reaches_further_right() {
+        // Right edge dominates: display 2 is higher up but further right.
+        let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, -800.0, 2560.0, 800.0),
+        ];
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(2));
+        assert_eq!(southeast_parking_position(&monitors), (4479.0, -1.0));
+    }
+
+    #[test]
+    fn main_flag_does_not_affect_southeast_selection() {
+        let mut monitors = [
             monitor(1, 0.0, 0.0, 1920.0, 1080.0),
             monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
         ];
-        let (x, y) = parking_position(&monitors, (400.0, 300.0));
-        assert_eq!(x, 1919.0);
-        assert_eq!(y, 1079.0);
-    }
-
-    #[test]
-    fn falls_back_to_the_first_monitor_when_none_is_main() {
-        let mut monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
         monitors[0].is_main = false;
-        let (x, y) = parking_position(&monitors, (400.0, 300.0));
-        assert_eq!(x, 1919.0);
-        assert_eq!(y, 1079.0);
+        monitors[1].is_main = true;
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(2));
     }
 
     #[test]
-    fn no_monitors_parks_at_the_origin() {
-        let (x, y) = parking_position(&[], (400.0, 300.0));
-        assert_eq!(x, 0.0);
-        assert_eq!(y, 0.0);
+    fn no_monitors_have_no_southeast_corner() {
+        assert!(southeast_monitor(&[]).is_none());
+        assert_eq!(southeast_parking_position(&[]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn monitor_names_are_normalized_and_deduplicated() {
+        let mut monitors = vec![
+            Monitor {
+                id: 1,
+                frame: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1280.0,
+                    height: 800.0,
+                },
+                is_main: true,
+                notch: 0.0,
+                pretty_name: String::new(),
+                ordinal: 0,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect {
+                    x: 1280.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+                notch: 0.0,
+                pretty_name: "DELL U2720Q (AirPlay)".to_string(),
+                ordinal: 0,
+            },
+            Monitor {
+                id: 3,
+                frame: Rect {
+                    x: 3200.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+                notch: 0.0,
+                pretty_name: "DELL U2720Q".to_string(),
+                ordinal: 0,
+            },
+        ];
+        normalize_pretty_names(&mut monitors);
+        assert_eq!(monitors[0].pretty_name, "Main Display");
+        assert_eq!(monitors[0].ordinal, 1);
+        assert_eq!(monitors[1].pretty_name, "DELL U2720Q");
+        assert_eq!(monitors[1].ordinal, 2);
+        assert_eq!(monitors[2].pretty_name, "DELL U2720Q (2)");
+        assert_eq!(monitors[2].ordinal, 3);
     }
 
     #[test]

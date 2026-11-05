@@ -15,7 +15,42 @@ This page mirrors the repository's
 directly rather than a separate hand-written summary — recent releases in
 full below, earlier ones collapsed further down.
 
-## [Unreleased]
+## [0.13.0] - 2026-11-05
+
+### Added
+
+- **Global southeast parking.** Every parked window — from any workspace —
+  parks at the bottom-right corner of the southeast-most connected display,
+  and is re-parked after connect/disconnect, arrangement, resolution, or
+  display-id changes so it can't reappear on another monitor.
+- **JSON query/subscribe.** `tili query state --json` plus
+  `tili subscribe --json` (versioned `snapshot` then coalesced
+  `state_changed` events). Window JSON now includes `bundle_id`,
+  `workspace`, `focused`, `role`, and `subrole`.
+- **Copy-rule and role/subrole rules.** `tili rule` (and the menu bar)
+  emits a ready-to-paste rule; both rule sections accept `role`/`subrole`.
+- **Native-tab guard.** Tab open/close/switch no longer creates placements
+  or relayouts; the active tab replaces the managed window id in place.
+  Disable with `settings { native-tabs #false }`.
+- **`toggle-floating`** plus a default `alt-shift-f` binding.
+- **Configurable AX timeout** (`settings { ax-timeout-ms 500 }`).
+- **Multi-monitor workspace routing.** Every display gets an active
+  workspace at startup; `monitor="main|12"` pins are honored; fallback
+  workspaces use the monitor's pretty name or `Display N` and are cleaned
+  up on disconnect (windows migrate to the main/focused workspace).
+  `tili focus-monitor [main|next|prev|id]` targets a specific display.
+- **Home-display workspace flow.** Each workspace has a home display:
+  `tili workspace <name>` goes there (or focuses the display already showing
+  it) and never shows a parked workspace on an unrelated display.
+  `tili workspace-here <name>` pulls a workspace to the focused display,
+  swapping with its occupant; `move-workspace-to-monitor next|prev|main`
+  pushes the active workspace or moves a parked one's home without
+  disturbing the target. `workspace-back` restores the previous
+  `(display, workspace)` pair. Default binds: `alt-ctrl-comma` /
+  `alt-ctrl-period` / `alt-ctrl-m`, and `alt-ctrl-<workspace>` for
+  `workspace-here`.
+- **Floating windows re-anchor** after workspace/display moves instead of
+  keeping the old monitor's coordinates.
 
 ## [0.12.0] - 2026-11-05
 

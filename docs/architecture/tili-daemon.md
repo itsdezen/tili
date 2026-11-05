@@ -333,28 +333,70 @@ workspace absent from this map is parked, wherever it last was.
 `Focus`/`Move`/`WorkspaceSwitch`/layout commands actually target;
 `relayout_active`/`active_tree`/`active_tree_mut` all resolve through it
 (via `active_workspace_name()`), so most of the pre-M9 code didn't need to
-change — only `switch_workspace`, `apply_windows_changed`, and
-`move_focused_to_workspace` needed to become monitor-name-aware.
+change.
 
-`Command::FocusMonitor` (`focus_monitor_next`) is the *only* thing that
-changes `focused_monitor` (besides M10's focus-follows-monitor); it cycles
-through `self.monitors`, no-op under two. `switch_workspace` swaps with
-whatever monitor is already showing the target workspace, if any — two
-monitors can never display the same workspace at once, since each has its
-own `Tree` layout computed against its own frame.
+`ensure_monitor_workspaces` runs after config/session load and after every
+display change. It gives every connected display one active workspace, in
+this order: a `workspace "x" monitor="..."` pin, the workspace last active
+on that display, the first free config-declared workspace (config order),
+and only then an auto-created fallback named `display-<ordinal>`. Pinned
+workspaces are reserved even while their target display is disconnected.
+Fallback workspaces are tracked in `synthetic_workspaces`: empty ones are
+not persisted, are removed when switched away from or when their display
+disconnects, and a non-empty one is migrated to the main/focused active
+workspace before removal (never closing windows). Display names come from
+`NSScreen.localizedName`, stripped of `(AirPlay)`, fall back to
+`Main Display`/`Display N`, and get a `(2)` suffix when two panels share a
+model; synthetic ids are renumbered `display-<ordinal>` when the layout
+changes.
+
+`Command::FocusMonitor` (`focus_monitor_next`) cycles monitors;
+`Command::FocusMonitorTarget` focuses `main`/`next`/`prev`/a specific id.
+M10's focus-follows-monitor also changes `focused_monitor`.
+
+Workspaces have a **home display**, resolved by `workspace_home` as:
+the display currently showing it, then a connected `monitor="..."` pin,
+then `workspace_monitor`'s last display. `switch_workspace` goes there:
+an already-visible workspace just focuses its display; a parked one is shown
+on its home (parking that display's previous workspace) and the display is
+focused. A never-shown workspace is assigned to the focused display on first
+use. It never materializes a parked workspace on an unrelated display, and a
+pin whose display is disconnected is an error instead of a silent fallback.
+
+`switch_workspace_here` is the explicit local verb: it shows the workspace
+on the focused display, swapping with whatever is there when the workspace
+lives on another display, and parking the current workspace when the target
+was parked. `move-workspace-to-monitor next|prev|main` pushes the active
+workspace (swap with the target) or, for a parked workspace, only changes its
+home — the target's current screen is untouched. `next`/`prev` are resolved
+relative to the workspace's own display through `resolve_monitor_target_from`.
+Pinned and synthetic workspaces are refused by both relocation paths, and a
+swap is refused when it would push a pinned/synthetic workspace off its
+display.
+
+`previous_focus: Option<(monitor, workspace)>` backs `workspace-back`: it
+records the pair before each navigation (`workspace`, `workspace-here`,
+`focus-monitor`) and restores it. If the remembered workspace is still on the
+remembered display it just focuses it; if it is parked it is shown there; if
+it was swapped to another display from the *current* display (the
+`workspace-here` case) the swap is undone locally. Returning from a
+cross-display jump only focuses the remembered display and never rearranges
+another screen. The older per-monitor `previous_workspaces` map is still
+persisted for session compatibility and as a fallback.
 
 `on_displays_changed` (called from `main.rs` on every
 `spawn_display_watcher` signal) is the hot-plug/unplug handler: a
-disconnected monitor's workspace gets parked and its slot dropped (same
-mechanics as switching away from it — nothing is lost, just no longer shown
-anywhere); a newly connected monitor gets a fresh empty `"monitor-<id>"`
-workspace; every still-visible workspace gets re-laid-out afterward since
-frames may have changed even for monitors that stayed connected. It returns
-immediately on a fully empty enumeration without touching `self.monitors`
-(0.1.6) — the display callback fires a momentary zero-display enumeration
-as the system sleeps, and committing it wiped the snapshot
-`match_monitors`'s origin-distance rename-pairing needs to recognize "same
-physical display, new `CGDirectDisplayID`" across sleep/wake.
+disconnected monitor's active workspace is parked, its synthetic
+workspaces are migrated/cleaned, and `last_active_workspace` keeps the
+declared workspace ready for a same-display reconnect; a newly connected
+monitor gets its pinned/last/free workspace (synthetic only as a last
+resort); every still-visible workspace is re-laid-out afterward since
+frames may have changed. It returns immediately on a fully empty
+enumeration without touching `self.monitors` (0.1.6) — the display callback
+fires a momentary zero-display enumeration as the system sleeps, and
+committing it wiped the snapshot `match_monitors`'s origin-distance
+rename-pairing needs to recognize "same physical display, new
+`CGDirectDisplayID`" across sleep/wake.
 
 `relayout_active`/`relayout_monitor`/`relayout_all_visible` are three
 thicknesses of "recompute and apply frames" — most callers only need the
@@ -421,23 +463,49 @@ unconditional `relayout_active()` call, so siblings only ever move once —
 straight to their final frames — on mouse-up, never live during the drag
 itself.
 
-`park()` targets `tili_ax::parking_position` — a window's origin lands just
-a point inside the main monitor's own bottom-right corner (not pushed
-*outside* every monitor's bounds, `combined_bounds`'s original purpose):
-confirmed on real hardware that AppKit clamps a `kAXPositionAttribute`
-write requesting somewhere totally unreachable back to near a real screen's
-edge regardless of how far outside it's requested (it only constrains the
-origin, not the window's full frame). Keeping the origin legitimately
-on-screen and letting the window's own size extend past the corner (a
-technique other AX-based tiling WMs use too) avoids that clamp entirely
-instead of fighting it. Every parked window — however many are parked at
-once — targets this exact same coordinate; an earlier version offset each
+`park()` targets `tili_ax::southeast_parking_position` — a window's origin
+lands just a point inside the bottom-right corner of the **southeast-most
+connected display**, regardless of which workspace the window belongs to or
+which display that workspace last lived on. `southeast_monitor` picks the
+display with the greatest right edge (`x + width`), breaking ties by
+greatest bottom edge (`y + height`) and then id. A parked window's body
+extends in the +x/+y direction from that origin, so starting at the
+southeast-most display's corner pushes it past every other display's right
+and bottom edges too: no part of it can reappear on another monitor even
+when the arrangement is diagonal and a display sits down-and-right of the
+workspace's own display (the bug per-display parking had). The trade-off is
+intentional: switching a workspace on the main display moves its windows
+back from the southeast display rather than parking locally, in exchange
+for one consistent parking corner and a global "never visible elsewhere"
+guarantee.
+
+`on_displays_changed_with` calls `repark_parked_windows()` after updating
+monitors/workspaces and re-laying-out the active ones. Connect, disconnect,
+arrangement, resolution/scale, and id-rename events can all change which
+display is southeast-most; windows parked at the old corner would otherwise
+sit exactly where a newly-arranged monitor is. `finalize_restore` re-asserts
+the corner too, covering a display connected between restore start and
+finalization. Reparking is skipped while the user is mid-drag
+(`mouse_button_down`), and is a no-op write when the corner didn't move
+(`AxWindow::set_position` ignores an unchanged frame).
+
+Parking is not pushed *outside* every monitor's bounds (`combined_bounds`'s
+original purpose): confirmed on real hardware
+that AppKit clamps a `kAXPositionAttribute` write requesting somewhere
+totally unreachable back to near a real screen's edge regardless of how far
+outside it's requested (it only constrains the origin, not the window's full
+frame). Keeping the origin legitimately on-screen and letting the window's
+own size extend past the corner (a technique other AX-based tiling WMs use
+too) avoids that clamp entirely instead of fighting it. Every parked window
+in the daemon — however many workspaces have windows parked at once —
+targets that one global coordinate; an earlier version offset each
 additional one inward by a step so they wouldn't all land on the identical
-point, but that shift moves the origin off the one spot the "hidden
-regardless of size" guarantee depends on, exposing a real on-screen strip
-as wide as the shift. Nothing actually needs parked windows to be
-spatially distinct (they're all invisible at the same point regardless of
-how many share it), so the offsetting was simply removed. This also keeps
+point, and a later one parked per display, but
+that shift moves the origin off the one spot the "hidden regardless of size"
+guarantee depends on, exposing a real on-screen strip as wide as the shift.
+Nothing actually needs parked windows to be spatially distinct (they're all
+invisible at the same point regardless of how many share it), so the
+offsetting was simply removed. This also keeps
 `park`'s own `set_position` write properly idempotent for
 `reconcile_existing_placement`'s re-assertion: that write fires a real
 `AXWindowMoved` notification (self-triggered writes aren't suppressed
@@ -470,9 +538,11 @@ process exits, with no later tick left to actually finish an animated
 write — routing it through `frame_setter` would leave windows stuck
 off-screen instead of restored.
 
-Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
-parsed since M5) is intentionally still unwired — M9's bar is
-hot-plug/unplug safety, not that finer-grained UX.
+Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`) is
+resolved as `"main"` or a numeric display id and applied by
+`ensure_monitor_workspaces`/`on_displays_changed`; it reserves the
+workspace even while the target display is disconnected. Invalid pin
+strings are reported in `config_warnings`.
 
 ## Session state and restore
 
@@ -495,7 +565,7 @@ tested without macOS.
   hint.
 - Per monitor: frame and `is_main` (plus the display id as a hint only, since
   `CGDirectDisplayID` can change across sleep/hot-plug), the focused monitor,
-  active workspace per monitor, and previous workspace.
+  active workspace per monitor, and per-monitor previous workspace.
 - `Popup` windows are recorded for diagnostics but never geometry-restored:
   tili does not own their position by design.
 
@@ -558,6 +628,33 @@ trip from shredding the rest of the saved layout.
 - `tili uninstall` removes the primary and backup session files.
   `tili doctor` reports the file's version/window count and the last
   restore's matched/missing/deferred counts.
+
+## Native tab guard (v0.13)
+
+macOS app-owned tab groups (Finder, Terminal, Ghostty, ...) expose only the
+active tab as a normal `AXWindow`; background tabs may be absent from
+`AXWindows`, and `AXTabGroup` children are tab buttons rather than window
+ids. To tili that looks like a brand-new window every time the user opens or
+switches a tab, which used to re-run floating rules, cascade centered
+windows, and relayout the tree.
+
+`apply_windows_changed` now folds such a window into the existing placement
+before any new-window logic runs. Detection is deliberately conservative:
+
+- same pid as a managed `Tiled`/`Floating` window,
+- same frame (within `FLOAT_DRIFT_EPSILON`),
+- the old window is no longer in the current `AXWindows` scan, or the new
+  window exposes an `AXTabGroup` child,
+- exactly one candidate (ambiguous matches are skipped).
+
+`replace_window_id` then swaps the tree leaf's `WindowId` and every
+per-window map (placements, anchors, manual geometry, floating bookkeeping)
+in place. No placement, rule match, relayout, or frame write happens, so a
+tab open/switch/close cannot move or resize the window. Background tabs are
+intentionally not tracked: the app owns them, and session persistence keeps
+only the currently visible tab. `settings { native-tabs #false }` restores
+the old behavior if an app is detected incorrectly. This is a compatibility
+guard, not full tab-group membership/restore (which remains future work).
 
 ## Mouse-follows-focus / focus-follows-monitor (M10)
 
@@ -965,17 +1062,16 @@ showing the desktop has nothing AX-focused), system-UI chrome, or a window
 the initial scan hasn't placed yet. Deliberately doesn't reuse
 `reveal_frontmost`/`reveal_current_frontmost` outright: those carry
 runtime-only semantics (`wake_lock_active`, `last_frontmost_pid`/
-`pid_unchanged`, mouse-follows-focus raising, monitor-swap-to-reveal) that
+`pid_unchanged`, mouse-follows-focus raising, monitor-focus-to-reveal) that
 don't apply to a cold boot and would make the one-shot correction harder to
 reason about and to unit-test; the pure decision (given an already-resolved
 `WindowId`, override or leave alone) is split into
 `reveal_startup_frontmost_window`, mirroring `place_new_window`'s
 `AxWindow`-free seam, so it's covered by ordinary unit tests despite the
 outer function depending on live AX. This only ever targets
-`focused_monitor` — the one monitor `apply_config`'s seed (and this
-correction) ever touches; a secondary monitor gets no `active_workspace`
-entry at all until a later `on_displays_changed` fires, a separate,
-pre-existing gap this doesn't address.
+`focused_monitor`; `ensure_monitor_workspaces`, called separately after
+config/session load, gives every other connected display its own active
+workspace.
 
 ## Layout commands, config, and dispatch
 
@@ -1070,6 +1166,15 @@ accessors instead of reading one: `SnapshotInfo` bundles
 read-only, no focus sync at all). It's excluded from `mutates` for the same
 reason those four commands are — see [tili-menubar.md](tili-menubar.md).
 
+`Command::QueryState` composes `list_monitors`/`list_workspaces`/
+`list_windows`/`focused_window` into the versioned external snapshot used by
+`tili query state --json`; `ListWindows` and `QueryState` are read-only for
+change-detection but do pay one focus sync because their payloads include a
+`focused` flag. `Command::Subscribe` never reaches `dispatch()`: the accept
+loop builds the initial `SubscribeEvent` from `subscribe_state()` and
+spawns `handle_subscribe`, then broadcasts a fresh compact state after each
+coalesced change — only while at least one subscriber is connected.
+
 `src/dispatch.rs` has the single `dispatch(&mut WmState, Command) ->
 Response` function — both the Unix-socket handler and the global-hotkey
 handler must call this same function, never a separate code path, or
@@ -1122,7 +1227,8 @@ worker threads (`Builder::new_multi_thread().worker_threads(2)`) and
 `block_on`s `async_daemon_main` — the whole daemon body that used to be
 `main()` itself, essentially unchanged otherwise. Two workers rather than the
 one-per-core default: the select loop is driven by the `block_on` thread, so
-the pool only serves spawned tasks (`WaitForChange` long-polls and the
+the pool only serves spawned tasks (`WaitForChange` long-polls,
+`Subscribe` streams, and the
 per-app AX notification streams, both awaiting rather than computing), and a
 second worker keeps those moving while the first is inside a short
 synchronous AX call. `spawn_blocking` wake probes use the blocking pool,
@@ -1180,6 +1286,14 @@ each `readable()` wakeup does a non-blocking `try_read` to confirm genuine
 EOF (`Ok(0)`) before returning — a `WouldBlock` means it was spurious, so
 the loop goes back to waiting on the same timeout instead of restarting it
 or giving up.
+
+`handle_subscribe` follows the same shape for `Command::Subscribe`, but
+loops over a bounded broadcast receiver: the main loop builds a compact
+`SubscribeState` once per coalesced change and sends it to every
+subscriber, so the task never touches `WmState`. A lagging client gets a
+`Lagged` and resumes at the next full-state event. The `stream.readable()`
++ `try_read` EOF check also stops an idle subscriber task when its client
+disconnects.
 
 `tili_ax::spawn_hotkey_tap`/`spawn_display_watcher`/`spawn_mouse_watcher`
 each build and send on a `tokio::sync::mpsc` channel directly from their own
@@ -1453,14 +1567,16 @@ pid. `WmEvent::SystemDidWake` gets both of the same two layers
   `restart_pending_removal_clocks` helper `note_screen_unlocked` uses —
   identical reasoning, just for a real sleep instead of a lock.
 
-## `switch_workspace`'s concurrent AX writes
+## Workspace-switch concurrent AX writes
 
-`switch_workspace` parks/relays-out/repositions potentially many windows on
-every call — one AX round-trip per window if done one at a time, which is
-real, user-visible deadtime between the hotkey firing and the screen
-actually finishing its update, especially on a workspace with several
-windows. Its own `park`/`relayout_monitor`/`reposition_floating_for_monitor`
-calls are replaced with `switch_workspace`-only concurrent variants
+`switch_on_monitor` (the local-switch core shared by `workspace`,
+`workspace-here`, and `workspace-back`) parks/relays-out/repositions
+potentially many windows on every call — one AX round-trip per window if
+done one at a time, which is real, user-visible deadtime between the hotkey
+firing and the screen actually finishing its update, especially on a
+workspace with several windows. Its own
+`park`/`relayout_monitor`/`reposition_floating_for_monitor` calls are
+replaced with switch-only concurrent variants
 (`park_concurrently`/`relayout_monitor_concurrently`/
 `reposition_floating_for_monitor_concurrently`), which share one helper,
 `write_windows_concurrently`: any bookkeeping that touches shared `WmState`
@@ -1481,7 +1597,7 @@ there's no async boundary already in place to join a spawned task through.
 Nothing outlives `write_windows_concurrently`'s own return — every thread is
 joined before the function hands back its windows — so there's no
 fire-and-forget job lifecycle to manage, unlike a decoupled-return design
-would need. The relative *ordering* `switch_workspace` already had (bring
+would need. The relative *ordering* the original switch already had (bring
 the incoming workspace's windows on screen before parking the outgoing
 ones, so there's never a moment with nothing shown but the desktop) is
 unchanged — only the AX writes *within* each of those steps became

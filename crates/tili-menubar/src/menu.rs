@@ -23,6 +23,9 @@ pub struct Snapshot {
     /// workspace" for a single badge, unlike `WorkspaceInfo::active`,
     /// which can be true on more than one entry across monitors.
     pub current: Option<String>,
+    /// Pretty label for `current` when the daemon provides one (synthetic
+    /// display workspaces use the monitor's `NSScreen.localizedName`).
+    pub current_display: Option<String>,
     pub workspaces: Vec<tili_ipc::WorkspaceInfo>,
     /// The daemon's active keybindings mode (`"main"`/`"resize"`/
     /// `"manage"`/a custom name) — drives which glyph `badge::image_for`
@@ -69,11 +72,18 @@ pub fn poll_daemon() -> Option<Snapshot> {
     let info: tili_ipc::SnapshotInfo = send_and_decode(tili_ipc::Command::Snapshot)?;
     let current = info
         .monitors
-        .into_iter()
+        .iter()
         .find(|m| m.focused)
-        .and_then(|m| m.active_workspace);
+        .and_then(|m| m.active_workspace.clone());
+    let current_display = current.as_ref().and_then(|name| {
+        info.workspaces
+            .iter()
+            .find(|ws| ws.name == *name)
+            .and_then(|ws| ws.display_name.clone())
+    });
     Some(Snapshot {
         current,
+        current_display,
         workspaces: info.workspaces,
         mode: info.mode,
         style: info.style,
@@ -100,12 +110,22 @@ fn send_and_decode<T: serde::de::DeserializeOwned>(command: tili_ipc::Command) -
 /// clicks with zero user interaction). `window_count` instead updates via
 /// `MenuItem::set_text` on the existing item, independent of this key.
 /// `monitor` isn't shown in the menu at all, so it's excluded too.
-pub type MenuKey = (Option<String>, Vec<String>, String);
+pub type MenuKey = (
+    Option<String>,
+    Option<String>,
+    Vec<(String, Option<String>)>,
+    String,
+);
 
 pub fn menu_key(snapshot: &Snapshot) -> MenuKey {
     (
         snapshot.current.clone(),
-        snapshot.workspaces.iter().map(|w| w.name.clone()).collect(),
+        snapshot.current_display.clone(),
+        snapshot
+            .workspaces
+            .iter()
+            .map(|w| (w.name.clone(), w.display_name.clone()))
+            .collect(),
         snapshot.mode.clone(),
     )
 }
@@ -177,7 +197,11 @@ pub fn apply_snapshot(
         state.style = style;
     }
 
-    let title = snapshot.current.as_deref().unwrap_or("tili");
+    let title = snapshot
+        .current_display
+        .as_deref()
+        .or(snapshot.current.as_deref())
+        .unwrap_or("tili");
     set_badge(tray, mtm, title, &snapshot.mode, &state.style);
 
     // Window counts churn every tick independent of `menu_key`, so update
@@ -229,7 +253,12 @@ fn workspace_label(ws: &tili_ipc::WorkspaceInfo, checked: bool) -> String {
         String::new()
     };
     let check_suffix = if checked { " \u{2713}" } else { "" };
-    format!("{}{}{}", ws.name, count_suffix, check_suffix)
+    format!(
+        "{}{}{}",
+        ws.display_name.as_deref().unwrap_or(&ws.name),
+        count_suffix,
+        check_suffix
+    )
 }
 
 fn build_menu(
@@ -274,6 +303,12 @@ fn build_menu_connecting() -> Menu {
 }
 
 fn append_static_items(menu: &Menu) {
+    let _ = menu.append(&MenuItem::with_id(
+        MenuId::new("copy-rule"),
+        "Copy rule for focused window",
+        true,
+        None,
+    ));
     let _ = menu.append(&MenuItem::with_id(
         MenuId::new("open-settings"),
         "Open Settings",
