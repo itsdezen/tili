@@ -186,6 +186,15 @@ but requires flipping between `NSScreen`'s bottom-left-origin coordinate
 space and AX/`CGDisplay`'s top-left-origin one — judged not worth the risk
 for what M9 needs).
 
+Each `Monitor` also carries `pretty_name` and `ordinal`: the name comes from
+`NSScreen.localizedName` (AirPlay suffix stripped, empty names falling back
+to `Main Display`/`Display N`, duplicate model names suffixed `(2)`), and
+the ordinal is one-based in a deterministic order — main first, then
+remaining displays left-to-right/top-to-bottom. This is display metadata,
+not identity: `id` remains the stable per-session key, and `ordinal` may
+change when the layout changes. Synthetic fallback workspaces use the
+ordinal for `display-<n>` and the pretty name for their label.
+
 Each `Monitor` also carries `notch: f64` — how much *additional* top inset
 (beyond whatever `frame` already excludes) is needed to also clear that
 display's notch, `0.0` if it has none. `list_monitors()` computes this as

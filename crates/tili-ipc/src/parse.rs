@@ -102,6 +102,9 @@ fn parse_tokens(tokens: &[&str]) -> Command {
         ["list-workspaces"] => Command::ListWorkspaces,
         ["query-state"] => Command::QueryState,
         ["focus-monitor"] => Command::FocusMonitor,
+        ["focus-monitor", target] => {
+            monitor_target(target).map_or_else(|| raw(tokens), Command::FocusMonitorTarget)
+        }
         ["list-monitors"] => Command::ListMonitors,
         ["reload-config"] => Command::ReloadConfig,
         ["shutdown"] => Command::Shutdown,
@@ -351,6 +354,20 @@ mod tests {
             parse("set-floating toggle"),
             Command::ToggleFloating
         ));
+    }
+
+    #[test]
+    fn parses_focus_monitor_targets() {
+        assert!(matches!(parse("focus-monitor"), Command::FocusMonitor));
+        assert!(matches!(
+            parse("focus-monitor main"),
+            Command::FocusMonitorTarget(MonitorTarget::Main)
+        ));
+        assert!(matches!(
+            parse("focus-monitor 12"),
+            Command::FocusMonitorTarget(MonitorTarget::Id(12))
+        ));
+        assert!(matches!(parse("focus-monitor bogus"), Command::Raw { .. }));
     }
 
     #[test]

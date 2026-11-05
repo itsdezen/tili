@@ -13,8 +13,8 @@ use tili_tree::{
 
 use crate::session::{
     CurrentWindowIdentity, RestoreMatcher, SavedActiveWorkspace, SavedFloatGeometry, SavedMonitor,
-    SavedMonitorRef, SavedPlacement, SavedRestore, SavedSession, SavedWindow, SavedWindowKind,
-    SavedWorkspace,
+    SavedMonitorRef, SavedPlacement, SavedPreviousWorkspace, SavedRestore, SavedSession,
+    SavedWindow, SavedWindowKind, SavedWorkspace,
 };
 use crate::trace;
 
@@ -1033,9 +1033,25 @@ pub struct WmState {
     monitors: Vec<Monitor>,
     active_workspace: HashMap<u32, String>,
     /// Last monitor a workspace was shown on, including while parked — used
-    /// by session restore so an inactive workspace returns to the display
-    /// it came from rather than the currently focused one.
+    /// by session restore and parking so an inactive workspace returns to
+    /// the display it came from rather than the currently focused one.
     workspace_monitor: HashMap<String, u32>,
+    /// Workspace names auto-created for a connected display rather than
+    /// declared in config. These are cleaned up (after migrating any
+    /// remaining windows) when their display disconnects, and are never
+    /// persisted as empty workspaces.
+    synthetic_workspaces: HashSet<String>,
+    /// Declared workspace names in config order, used to assign the first
+    /// free workspace deterministically instead of relying on HashMap order.
+    declared_workspaces: Vec<String>,
+    /// `workspace "name" monitor="main|12"` pins, kept as raw config strings
+    /// and resolved against the current monitor list on assignment.
+    workspace_pins: HashMap<String, String>,
+    /// Per-monitor back-and-forth history for `workspace-back`.
+    previous_workspaces: HashMap<u32, String>,
+    /// Last workspace that was active on each monitor, used to restore it
+    /// after the same display reconnects.
+    last_active_workspace: HashMap<u32, String>,
     focused_monitor: u32,
     frame_setter: Box<dyn WindowFrameSetter>,
     gaps: Gaps,
@@ -1124,11 +1140,6 @@ pub struct WmState {
     /// structurally intact underneath so toggling back restores the normal
     /// layout. A workspace absent from this map has no fullscreened window.
     fullscreen_focus: HashMap<String, NodeId>,
-    /// Whichever workspace was active on `focused_monitor` immediately
-    /// before its last `switch_workspace` call — `Command::WorkspaceBack`'s
-    /// target. `switch_workspace` updates this on every switch (including a
-    /// `WorkspaceBack`-triggered one), so back-and-forth toggles correctly.
-    previous_workspace: Option<String>,
     /// The pid last passed to `reveal_frontmost`, so the next call can tell
     /// a genuine user-driven app switch (Cmd-Tab, Mission Control) apart
     /// from macOS reactivating the previous app because the current
@@ -1286,6 +1297,11 @@ impl Default for WmState {
             monitors,
             active_workspace,
             workspace_monitor,
+            synthetic_workspaces: HashSet::new(),
+            declared_workspaces: Vec::new(),
+            workspace_pins: HashMap::new(),
+            previous_workspaces: HashMap::new(),
+            last_active_workspace: HashMap::new(),
             focused_monitor,
             frame_setter: Box::new(InstantFrameSetter),
             gaps: Gaps::default(),
@@ -1309,7 +1325,6 @@ impl Default for WmState {
             resize_drag: None,
             default_root_orientation: None,
             fullscreen_focus: HashMap::new(),
-            previous_workspace: None,
             last_frontmost_pid: None,
             pending_launch_pids: HashMap::new(),
             launch_active_workspace: HashMap::new(),
@@ -2115,6 +2130,14 @@ impl WmState {
             _ => {}
         }
 
+        if inactive && let Some(monitor) = self.monitor_showing_workspace(target_workspace) {
+            // The destination is already visible on another display; the
+            // new window must be laid out there even though focus is about
+            // to follow it via switch_workspace.
+            self.relayout_monitor(monitor);
+            self.reposition_floating_for_monitor(monitor, true);
+        }
+
         if inactive {
             eprintln!(
                 "tili-daemon: {} workspace '{target_workspace}' for new window {id} (wake_lock_active={})",
@@ -2275,7 +2298,7 @@ impl WmState {
                 if is_active {
                     let area = self.focused_monitor_area();
                     if manual.is_some() {
-                        self.reposition_floating_for_monitor(self.focused_monitor);
+                        self.reposition_floating_for_monitor(self.focused_monitor, false);
                     } else {
                         self.place_floating_window(id, area);
                     }
@@ -2833,6 +2856,15 @@ impl WmState {
             }
 
             self.workspaces.insert(saved_workspace.name.clone(), tree);
+            if saved_workspace.synthetic
+                || (saved_workspace.name.starts_with("monitor-")
+                    && !self.declared_workspaces.contains(&saved_workspace.name))
+            {
+                // `monitor-<id>` was the pre-0.13 fallback name; migrate it
+                // into the synthetic lifecycle on upgrade.
+                self.synthetic_workspaces
+                    .insert(saved_workspace.name.clone());
+            }
             if let Some(monitor) = saved_workspace
                 .monitor
                 .as_ref()
@@ -2847,23 +2879,24 @@ impl WmState {
         // that still exist in config. Missing monitors fall back to main.
         if !restore.saved.active_workspaces.is_empty() {
             self.active_workspace.clear();
+            let mut used = HashSet::new();
             for active in &restore.saved.active_workspaces {
                 let Some(monitor) = self.find_monitor(&active.monitor) else {
                     continue;
                 };
-                let workspace = if self.workspaces.contains_key(&active.workspace) {
-                    active.workspace.clone()
-                } else {
-                    self.default_workspace_name()
-                };
-                self.active_workspace.insert(monitor, workspace);
-            }
-            let default_workspace = self.default_workspace_name();
-            for monitor in &self.monitors {
+                if !self.workspaces.contains_key(&active.workspace)
+                    || !used.insert(active.workspace.clone())
+                {
+                    continue;
+                }
+                self.last_active_workspace
+                    .insert(monitor, active.workspace.clone());
                 self.active_workspace
-                    .entry(monitor.id)
-                    .or_insert_with(|| default_workspace.clone());
+                    .insert(monitor, active.workspace.clone());
             }
+            // Fill any monitor missing from the saved set without ever
+            // assigning the same workspace to two displays.
+            self.ensure_monitor_workspaces();
         }
 
         if let Some(saved) = restore.saved.focused_monitor.as_ref()
@@ -2878,10 +2911,23 @@ impl WmState {
             self.focused_monitor = self.monitors.first().map_or(self.focused_monitor, |m| m.id);
         }
 
-        if let Some(previous) = restore.saved.previous_workspace
-            && self.workspaces.contains_key(&previous)
+        self.previous_workspaces.clear();
+        for previous in &restore.saved.previous_workspaces {
+            if let Some(monitor) = self.find_monitor(&previous.monitor)
+                && self.workspaces.contains_key(&previous.workspace)
+            {
+                self.previous_workspaces
+                    .insert(monitor, previous.workspace.clone());
+            }
+        }
+        // Old state files only had one global value; attribute it to the
+        // restored focused monitor.
+        if self.previous_workspaces.is_empty()
+            && let Some(previous) = &restore.saved.previous_workspace
+            && self.workspaces.contains_key(previous)
         {
-            self.previous_workspace = Some(previous);
+            self.previous_workspaces
+                .insert(self.focused_monitor, previous.clone());
         }
 
         // Special saved windows that were never seen stay available for a
@@ -2917,7 +2963,7 @@ impl WmState {
         self.frame_setter.set_suppressed(true);
         for id in self.active_workspace.keys().copied().collect::<Vec<_>>() {
             self.relayout_monitor(id);
-            self.reposition_floating_for_monitor(id);
+            self.reposition_floating_for_monitor(id, false);
         }
         self.frame_setter.set_suppressed(false);
 
@@ -3124,6 +3170,7 @@ impl WmState {
                     .get(name)
                     .and_then(|id| self.monitor_ref(*id))
                     .or_else(|| self.monitor_ref_for_workspace(name)),
+                synthetic: self.synthetic_workspaces.contains(name),
             })
             .collect();
         let mut windows: Vec<SavedWindow> = self
@@ -3163,11 +3210,22 @@ impl WmState {
             }
         }
 
+        let previous_workspaces = self
+            .previous_workspaces
+            .iter()
+            .filter_map(|(&monitor, workspace)| {
+                self.monitor_ref(monitor)
+                    .map(|monitor| SavedPreviousWorkspace {
+                        monitor,
+                        workspace: workspace.clone(),
+                    })
+            })
+            .collect();
         SavedSession::new(
             monitors,
             focused_monitor,
             active_workspaces,
-            self.previous_workspace.clone(),
+            previous_workspaces,
             workspaces,
             windows,
         )
@@ -3240,6 +3298,34 @@ impl WmState {
         // comment for why it's the *last* load's warnings, not a lifetime
         // accumulation.
         self.config_warnings.clear();
+        self.declared_workspaces = config
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.name.clone())
+            .collect();
+        self.workspace_pins.clear();
+        for workspace in &config.workspaces {
+            let Some(spec) = &workspace.monitor else {
+                continue;
+            };
+            if spec != "main" && spec.parse::<u32>().is_err() {
+                let warning = format!(
+                    "ignoring workspace '{}' monitor pin '{spec}' — expected \"main\" or a \
+                     numeric display id",
+                    workspace.name
+                );
+                eprintln!("tili-daemon: {warning}");
+                self.config_warnings.push(warning);
+                continue;
+            }
+            self.workspace_pins
+                .insert(workspace.name.clone(), spec.clone());
+        }
+        // A config-declared workspace always wins over a stale synthetic
+        // marker from a previous monitor name.
+        for workspace in &config.workspaces {
+            self.synthetic_workspaces.remove(&workspace.name);
+        }
         self.menubar_style = tili_ipc::MenubarStyle {
             fill: match config.menubar.fill {
                 tili_config::MenubarFill::Filled => tili_ipc::MenubarFill::Filled,
@@ -3290,8 +3376,20 @@ impl WmState {
         // never do this — that would yank focus off whatever's on screen.
         if !self.config_loaded_once {
             self.config_loaded_once = true;
-            if let Some(default_name) = resolve_default_workspace(config) {
+            let pinned_default = self
+                .workspace_pins
+                .iter()
+                .filter(|(workspace, spec)| {
+                    self.resolve_workspace_pin(spec) == Some(self.focused_monitor)
+                        && self.workspaces.contains_key(*workspace)
+                })
+                .map(|(workspace, _)| workspace.clone())
+                .min();
+            if let Some(default_name) = pinned_default.or_else(|| resolve_default_workspace(config))
+            {
                 self.active_workspace
+                    .insert(self.focused_monitor, default_name.clone());
+                self.last_active_workspace
                     .insert(self.focused_monitor, default_name);
             }
             // The bootstrap seed is only a placeholder until real
@@ -3475,15 +3573,30 @@ impl WmState {
         let mut workspaces: Vec<WorkspaceInfo> = self
             .workspaces
             .iter()
-            .map(|(name, tree)| WorkspaceInfo {
-                name: name.clone(),
-                active: self.active_workspace.values().any(|n| n == name),
-                window_count: tree.window_ids().len(),
-                monitor: self
+            .map(|(name, tree)| {
+                let monitor = self
                     .active_workspace
                     .iter()
                     .find(|(_, n)| *n == name)
-                    .map(|(&id, _)| id),
+                    .map(|(&id, _)| id);
+                let last_monitor = self.workspace_monitor.get(name).copied();
+                let synthetic = self.synthetic_workspaces.contains(name);
+                let display_name = synthetic
+                    .then(|| {
+                        last_monitor
+                            .and_then(|id| self.monitors.iter().find(|m| m.id == id))
+                            .map(|m| m.pretty_name.clone())
+                    })
+                    .flatten();
+                WorkspaceInfo {
+                    name: name.clone(),
+                    display_name,
+                    synthetic,
+                    active: self.active_workspace.values().any(|n| n == name),
+                    window_count: tree.window_ids().len(),
+                    monitor,
+                    last_monitor,
+                }
             })
             .collect();
         workspaces.sort_by(|a, b| a.name.cmp(&b.name));
@@ -3496,6 +3609,8 @@ impl WmState {
             .iter()
             .map(|m| MonitorInfo {
                 id: m.id,
+                ordinal: m.ordinal,
+                pretty_name: m.pretty_name.clone(),
                 is_main: m.is_main,
                 focused: m.id == self.focused_monitor,
                 active_workspace: self.active_workspace.get(&m.id).cloned(),
@@ -3529,6 +3644,27 @@ impl WmState {
         }
     }
 
+    /// Focuses a specific monitor (`main`, `next`, or an id). Unlike
+    /// `focus_monitor_next`, an invalid target is an error rather than a
+    /// silent no-op.
+    pub fn focus_monitor_target(&mut self, target: tili_ipc::MonitorTarget) -> Result<(), String> {
+        let id = self.resolve_monitor_target(target)?;
+        self.focused_monitor = id;
+        if let Some(workspace) = self.active_workspace.get(&id).cloned() {
+            self.last_active_workspace.insert(id, workspace.clone());
+            let restore = self.workspace_focus.get(&workspace).copied().or_else(|| {
+                self.workspaces
+                    .get(&workspace)
+                    .and_then(Tree::default_focus)
+            });
+            if let Some(node) = restore {
+                self.workspace_focus.insert(workspace, node);
+                self.raise_focused();
+            }
+        }
+        Ok(())
+    }
+
     /// The connected monitor id after `focused_monitor` in wraparound
     /// order, or `None` with fewer than two monitors connected — shared by
     /// `focus_monitor_next` and `resolve_monitor_target`'s
@@ -3544,6 +3680,399 @@ impl WmState {
             .position(|&id| id == self.focused_monitor)
             .unwrap_or(0);
         Some(ids[(current_idx + 1) % ids.len()])
+    }
+
+    /// Resolves a config `workspace "x" monitor="..."` value against the
+    /// current monitor list. Accepts `"main"` and a numeric display id.
+    fn resolve_workspace_pin(&self, spec: &str) -> Option<u32> {
+        match spec {
+            "main" => self
+                .monitors
+                .iter()
+                .find(|monitor| monitor.is_main)
+                .map(|monitor| monitor.id),
+            _ => spec
+                .parse::<u32>()
+                .ok()
+                .filter(|id| self.monitors.iter().any(|monitor| monitor.id == *id)),
+        }
+    }
+
+    fn workspace_pinned_elsewhere(&self, workspace: &str, monitor_id: u32) -> bool {
+        // An unconnected numeric pin still reserves the workspace: returning
+        // `true` on `None` keeps it from being stolen while its display is
+        // temporarily absent.
+        self.workspace_pins
+            .get(workspace)
+            .is_some_and(|spec| self.resolve_workspace_pin(spec) != Some(monitor_id))
+    }
+
+    fn monitor_showing_workspace(&self, workspace: &str) -> Option<u32> {
+        self.active_workspace
+            .iter()
+            .find(|(_, name)| name.as_str() == workspace)
+            .map(|(&id, _)| id)
+    }
+
+    fn active_workspace_on_another_monitor(&self, workspace: &str, monitor_id: u32) -> bool {
+        self.active_workspace
+            .iter()
+            .any(|(id, name)| *id != monitor_id && name == workspace)
+    }
+
+    /// Gives `monitor_id` an active workspace if it doesn't have one.
+    /// Preference: pinned -> last active on this display -> first free
+    /// declared workspace -> synthetic fallback. Never assigns the same
+    /// workspace to two monitors.
+    fn assign_workspace_for_monitor(&mut self, monitor_id: u32) {
+        if self.active_workspace.contains_key(&monitor_id) {
+            return;
+        }
+
+        let pinned = self
+            .workspace_pins
+            .iter()
+            .filter(|(workspace, spec)| {
+                self.resolve_workspace_pin(spec) == Some(monitor_id)
+                    && self.workspaces.contains_key(*workspace)
+                    && !self.active_workspace_on_another_monitor(workspace, monitor_id)
+            })
+            .map(|(workspace, _)| workspace.clone())
+            .min();
+        if let Some(workspace) = pinned {
+            self.set_active_workspace(monitor_id, workspace);
+            return;
+        }
+
+        if let Some(workspace) = self.last_active_workspace.get(&monitor_id).cloned()
+            && self.workspaces.contains_key(&workspace)
+            && !self.active_workspace_on_another_monitor(&workspace, monitor_id)
+            && !self.workspace_pinned_elsewhere(&workspace, monitor_id)
+        {
+            self.set_active_workspace(monitor_id, workspace);
+            return;
+        }
+
+        let declared = self
+            .declared_workspaces
+            .iter()
+            .find(|workspace| {
+                self.workspaces.contains_key(*workspace)
+                    && !self.synthetic_workspaces.contains(*workspace)
+                    && !self.active_workspace_on_another_monitor(workspace, monitor_id)
+                    && !self.workspace_pinned_elsewhere(workspace, monitor_id)
+            })
+            .cloned()
+            .or_else(|| {
+                self.workspaces
+                    .keys()
+                    .filter(|workspace| {
+                        !self.synthetic_workspaces.contains(*workspace)
+                            && !self.active_workspace_on_another_monitor(workspace, monitor_id)
+                            && !self.workspace_pinned_elsewhere(workspace, monitor_id)
+                    })
+                    .min()
+                    .cloned()
+            });
+        if let Some(workspace) = declared {
+            self.set_active_workspace(monitor_id, workspace);
+            return;
+        }
+
+        let ordinal = self
+            .monitors
+            .iter()
+            .find(|monitor| monitor.id == monitor_id)
+            .map_or(monitor_id, |monitor| monitor.ordinal);
+        let base = format!("display-{ordinal}");
+        let mut name = base.clone();
+        let mut suffix = 2_u32;
+        while self.workspaces.contains_key(&name)
+            || self.active_workspace_on_another_monitor(&name, monitor_id)
+        {
+            name = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        self.workspaces.entry(name.clone()).or_default();
+        self.synthetic_workspaces.insert(name.clone());
+        self.set_active_workspace(monitor_id, name);
+    }
+
+    fn set_active_workspace(&mut self, monitor_id: u32, workspace: String) {
+        self.workspaces.entry(workspace.clone()).or_default();
+        self.active_workspace.insert(monitor_id, workspace.clone());
+        self.workspace_monitor.insert(workspace.clone(), monitor_id);
+        self.last_active_workspace.insert(monitor_id, workspace);
+    }
+
+    /// Ensures every connected monitor has an active workspace. Called after
+    /// config/session load and after display changes; on a fresh two-display
+    /// startup this is what prevents the secondary display from being left
+    /// without any workspace.
+    pub fn ensure_monitor_workspaces(&mut self) {
+        let existing: HashSet<String> = self.workspaces.keys().cloned().collect();
+        self.active_workspace
+            .retain(|_, workspace| existing.contains(workspace));
+        let current: Vec<(u32, String)> = self
+            .active_workspace
+            .iter()
+            .map(|(&monitor, workspace)| (monitor, workspace.clone()))
+            .collect();
+        for (monitor, workspace) in current {
+            self.last_active_workspace
+                .entry(monitor)
+                .or_insert_with(|| workspace.clone());
+            self.workspace_monitor.insert(workspace, monitor);
+        }
+        let ids: Vec<u32> = self.monitors.iter().map(|monitor| monitor.id).collect();
+        for id in ids {
+            self.assign_workspace_for_monitor(id);
+        }
+        self.cleanup_synthetic_workspaces();
+        self.renumber_synthetic_workspaces();
+    }
+
+    /// Startup/reconnect cleanup for synthetic display workspaces restored
+    /// from a previous session: drop empty fallbacks, and migrate a
+    /// non-empty fallback whose display is gone instead of leaving it
+    /// parked under a stale name.
+    fn cleanup_synthetic_workspaces(&mut self) {
+        let names: Vec<String> = self.synthetic_workspaces.iter().cloned().collect();
+        for name in names {
+            if !self.workspaces.contains_key(&name) {
+                continue;
+            }
+            let monitor = self.workspace_monitor.get(&name).copied();
+            let connected =
+                monitor.is_some_and(|id| self.monitors.iter().any(|monitor| monitor.id == id));
+            let active = self
+                .active_workspace
+                .values()
+                .any(|workspace| workspace == &name);
+            if !connected {
+                if self.workspace_has_windows(&name) {
+                    let fallback = self.fallback_workspace_for(monitor.unwrap_or(0));
+                    self.migrate_workspace_windows(&name, &fallback);
+                } else {
+                    self.remove_synthetic_workspace(&name);
+                }
+            } else if !active && !self.workspace_has_windows(&name) {
+                self.remove_synthetic_workspace(&name);
+            }
+        }
+    }
+
+    /// Synthetic workspace ids carry the monitor's current ordinal
+    /// (`display-2`). When the display layout changes, rename them so the id
+    /// keeps matching the visible "Display N" label. Declared workspaces
+    /// never change.
+    fn renumber_synthetic_workspaces(&mut self) {
+        let mut renames: Vec<(String, String)> = self
+            .synthetic_workspaces
+            .iter()
+            .filter_map(|workspace| {
+                let monitor = self.workspace_monitor.get(workspace)?;
+                let monitor = self.monitors.iter().find(|m| m.id == *monitor)?;
+                let base = format!("display-{}", monitor.ordinal);
+                let mut desired = base.clone();
+                let mut suffix = 2_u32;
+                while desired != *workspace
+                    && self.workspaces.contains_key(&desired)
+                    && !self.synthetic_workspaces.contains(&desired)
+                {
+                    desired = format!("{base}-{suffix}");
+                    suffix += 1;
+                }
+                (desired != *workspace).then(|| (workspace.clone(), desired))
+            })
+            .collect();
+        if renames.is_empty() {
+            return;
+        }
+        renames.sort();
+        // Two-phase rename avoids transient collisions when two synthetic
+        // workspaces swap ordinals.
+        let mut temporaries = Vec::with_capacity(renames.len());
+        for (index, (old, _)) in renames.iter().enumerate() {
+            let temp = format!("__tili-display-tmp-{index}");
+            self.rename_workspace(old, &temp);
+            temporaries.push(temp);
+        }
+        for (temp, (_, new)) in temporaries.into_iter().zip(renames) {
+            self.rename_workspace(&temp, &new);
+        }
+    }
+
+    fn rename_workspace(&mut self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        let Some(tree) = self.workspaces.remove(old) else {
+            return;
+        };
+        self.workspaces.insert(new.to_string(), tree);
+        if let Some(node) = self.workspace_focus.remove(old) {
+            self.workspace_focus.insert(new.to_string(), node);
+        }
+        if let Some(node) = self.fullscreen_focus.remove(old) {
+            self.fullscreen_focus.insert(new.to_string(), node);
+        }
+        if let Some(monitor) = self.workspace_monitor.remove(old) {
+            self.workspace_monitor.insert(new.to_string(), monitor);
+        }
+        for workspace in self.active_workspace.values_mut() {
+            if workspace == old {
+                *workspace = new.to_string();
+            }
+        }
+        for workspace in self.last_active_workspace.values_mut() {
+            if workspace == old {
+                *workspace = new.to_string();
+            }
+        }
+        for workspace in self.previous_workspaces.values_mut() {
+            if workspace == old {
+                *workspace = new.to_string();
+            }
+        }
+        for placement in self.placements.values_mut() {
+            if placement.workspace == old {
+                placement.workspace = new.to_string();
+            }
+        }
+        for saved in &mut self.deferred_windows {
+            if saved.workspace == old {
+                saved.workspace = new.to_string();
+            }
+        }
+        if self.synthetic_workspaces.remove(old) {
+            self.synthetic_workspaces.insert(new.to_string());
+        }
+    }
+
+    /// Fallback workspace that receives windows from a disconnected
+    /// display's synthetic workspace: the main display's active workspace,
+    /// then the focused monitor's, then a declared/default workspace.
+    fn fallback_workspace_for(&self, disconnected: u32) -> String {
+        if let Some(main) = self.monitors.iter().find(|monitor| monitor.is_main)
+            && main.id != disconnected
+            && let Some(name) = self.active_workspace.get(&main.id)
+            && !self.synthetic_workspaces.contains(name)
+        {
+            return name.clone();
+        }
+        if self.focused_monitor != disconnected
+            && let Some(name) = self.active_workspace.get(&self.focused_monitor)
+            && !self.synthetic_workspaces.contains(name)
+        {
+            return name.clone();
+        }
+        self.workspaces
+            .keys()
+            .find(|name| !self.synthetic_workspaces.contains(*name))
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_WORKSPACE.to_string())
+    }
+
+    /// Moves every placement in `from` into `to`, preserving tiled/floating
+    /// character and anchors, then drops the now-empty source workspace.
+    /// Used when a synthetic display workspace is cleaned up on disconnect;
+    /// never silently closes a window.
+    fn migrate_workspace_windows(&mut self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        self.workspaces.entry(to.to_string()).or_default();
+        let ids: Vec<WindowId> = self
+            .placements
+            .iter()
+            .filter(|(_, placement)| placement.workspace == from)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in ids {
+            let Some(kind) = self.placements.get(&id).map(|p| p.kind.clone()) else {
+                continue;
+            };
+            let anchor = self
+                .workspaces
+                .get(from)
+                .and_then(|tree| tree.anchor_for(id))
+                .unwrap_or_default();
+            match kind {
+                PlacementKind::Tiled => {
+                    self.remove_from_tree(id, from);
+                    self.insert_into_workspace_tree_at_anchor(id, to, false, &anchor);
+                }
+                PlacementKind::Floating { .. } => {
+                    self.remove_from_tree(id, from);
+                    self.insert_into_workspace_tree_at_anchor(id, to, true, &anchor);
+                }
+                PlacementKind::NativeFullscreen(_)
+                | PlacementKind::Minimized(_)
+                | PlacementKind::HiddenApplication(_)
+                | PlacementKind::Popup => {}
+            }
+            if let Some(placement) = self.placements.get_mut(&id) {
+                placement.workspace = to.to_string();
+            }
+        }
+        for saved in &mut self.deferred_windows {
+            if saved.workspace == from {
+                saved.workspace = to.to_string();
+            }
+        }
+        self.workspaces.remove(from);
+        self.workspace_focus.remove(from);
+        self.fullscreen_focus.remove(from);
+        self.workspace_monitor.remove(from);
+        self.synthetic_workspaces.remove(from);
+        for workspace in self.active_workspace.values_mut() {
+            if workspace == from {
+                *workspace = to.to_string();
+            }
+        }
+        for workspace in self.last_active_workspace.values_mut() {
+            if workspace == from {
+                *workspace = to.to_string();
+            }
+        }
+        for workspace in self.previous_workspaces.values_mut() {
+            if workspace == from {
+                *workspace = to.to_string();
+            }
+        }
+    }
+
+    /// Removes an empty synthetic workspace and its bookkeeping.
+    fn workspace_has_windows(&self, name: &str) -> bool {
+        self.placements
+            .values()
+            .any(|placement| placement.workspace == name)
+    }
+
+    fn remove_synthetic_workspace(&mut self, name: &str) {
+        if !self.synthetic_workspaces.contains(name) {
+            return;
+        }
+        if self.workspace_has_windows(name) {
+            return;
+        }
+        self.workspaces.remove(name);
+        self.workspace_focus.remove(name);
+        self.fullscreen_focus.remove(name);
+        self.workspace_monitor.remove(name);
+        self.synthetic_workspaces.remove(name);
+        let fallback = self.default_workspace_name();
+        for workspace in self.last_active_workspace.values_mut() {
+            if workspace == name {
+                *workspace = fallback.clone();
+            }
+        }
+        for workspace in self.previous_workspaces.values_mut() {
+            if workspace == name {
+                *workspace = fallback.clone();
+            }
+        }
     }
 
     /// Re-enumerates connected monitors in response to a hot-plug/unplug
@@ -3594,9 +4123,22 @@ impl WmState {
             if let Some(name) = self.active_workspace.remove(&old_id) {
                 self.active_workspace.insert(new_id, name);
             }
+            if let Some(name) = self.last_active_workspace.remove(&old_id) {
+                self.last_active_workspace.insert(new_id, name);
+            }
+            if let Some(name) = self.previous_workspaces.remove(&old_id) {
+                self.previous_workspaces.insert(new_id, name);
+            }
             for monitor in self.workspace_monitor.values_mut() {
                 if *monitor == old_id {
                     *monitor = new_id;
+                }
+            }
+            let old_spec = old_id.to_string();
+            let new_spec = new_id.to_string();
+            for spec in self.workspace_pins.values_mut() {
+                if *spec == old_spec {
+                    *spec = new_spec.clone();
                 }
             }
             if self.focused_monitor == old_id {
@@ -3606,7 +4148,31 @@ impl WmState {
 
         for id in diff.disconnected {
             if let Some(name) = self.active_workspace.remove(&id) {
-                self.park_workspace(&name);
+                self.last_active_workspace.insert(id, name.clone());
+                if self.synthetic_workspaces.contains(&name) {
+                    let fallback = self.fallback_workspace_for(id);
+                    self.migrate_workspace_windows(&name, &fallback);
+                } else {
+                    self.park_workspace(&name);
+                }
+            }
+            // A synthetic workspace associated with this display may be
+            // parked rather than active; clean it too.
+            let associated: Vec<String> = self
+                .synthetic_workspaces
+                .iter()
+                .filter(|name| self.workspace_monitor.get(*name) == Some(&id))
+                .cloned()
+                .collect();
+            for name in associated {
+                if !self.active_workspace.values().any(|active| active == &name)
+                    && self.workspace_has_windows(&name)
+                {
+                    let fallback = self.fallback_workspace_for(id);
+                    self.migrate_workspace_windows(&name, &fallback);
+                } else {
+                    self.remove_synthetic_workspace(&name);
+                }
             }
         }
 
@@ -3615,15 +4181,17 @@ impl WmState {
         }
 
         for id in diff.connected {
-            let name = format!("monitor-{id}");
-            self.workspaces.entry(name.clone()).or_default();
-            self.active_workspace.insert(id, name.clone());
-            self.workspace_monitor.insert(name, id);
+            self.assign_workspace_for_monitor(id);
         }
 
-        for id in self.active_workspace.keys().copied().collect::<Vec<_>>() {
+        // Remaining monitors may still have no workspace after a rename or
+        // first startup-shaped event.
+        self.ensure_monitor_workspaces();
+
+        let active_ids: Vec<u32> = self.active_workspace.keys().copied().collect();
+        for id in active_ids {
             self.relayout_monitor(id);
-            self.reposition_floating_for_monitor(id);
+            self.reposition_floating_for_monitor(id, true);
         }
     }
 
@@ -4445,35 +5013,30 @@ impl WmState {
         }
 
         let displaced = self.active_workspace.get(&target_monitor).cloned();
-        match current_monitor {
-            Some(old_monitor) => match &displaced {
+        if let Some(old_monitor) = current_monitor {
+            if let Some(previous) = self.active_workspace.get(&old_monitor).cloned() {
+                self.previous_workspaces.insert(old_monitor, previous);
+            }
+            match &displaced {
                 Some(displaced_name) => {
-                    self.active_workspace
-                        .insert(old_monitor, displaced_name.clone());
-                    self.workspace_monitor
-                        .insert(displaced_name.clone(), old_monitor);
+                    self.set_active_workspace(old_monitor, displaced_name.clone());
                 }
                 None => {
                     self.active_workspace.remove(&old_monitor);
                 }
-            },
-            None => {
-                if let Some(displaced_name) = &displaced {
-                    self.park_workspace(displaced_name);
-                }
             }
+        } else if let Some(displaced_name) = &displaced {
+            self.park_workspace(displaced_name);
         }
 
-        self.active_workspace
-            .insert(target_monitor, workspace.to_string());
-        self.workspace_monitor
-            .insert(workspace.to_string(), target_monitor);
+        self.set_active_workspace(target_monitor, workspace.to_string());
         self.relayout_monitor(target_monitor);
-        self.reposition_floating_for_monitor(target_monitor);
+        self.reposition_floating_for_monitor(target_monitor, true);
         if let Some(old_monitor) = current_monitor {
             self.relayout_monitor(old_monitor);
-            self.reposition_floating_for_monitor(old_monitor);
+            self.reposition_floating_for_monitor(old_monitor, true);
         }
+        self.renumber_synthetic_workspaces();
         Ok(())
     }
 
@@ -4587,10 +5150,11 @@ impl WmState {
     /// Creates the target workspace (empty) if it doesn't exist yet. A
     /// no-op if `name` is already active on `focused_monitor`.
     ///
-    /// If `name` is currently shown on a *different* monitor, that monitor
-    /// swaps to whatever was on `focused_monitor` — two monitors never show
-    /// the same workspace at once, since each has its own `Tree` layout
-    /// computed against its own frame.
+    /// If `name` is currently shown on a *different* monitor, this focuses
+    /// that monitor instead of swapping the two workspaces. "Switch to
+    /// workspace X" means go where X already is; `move-workspace-to-monitor`
+    /// is the explicit way to relocate it. Two monitors still never show the
+    /// same workspace at once.
     ///
     /// Errors if `name` isn't a workspace declared in config — workspaces
     /// are only ever created by `apply_config`'s declare-loop, never
@@ -4615,7 +5179,29 @@ impl WmState {
             .find(|(id, n)| **id != monitor_id && n.as_str() == name)
             .map(|(&id, _)| id);
 
-        self.previous_workspace = current.clone();
+        // The target workspace already lives on another display. Focus that
+        // display instead of swapping both layouts: "workspace X" from a
+        // hotkey/menu should take you to X where it already is, while
+        // `move-workspace-to-monitor` remains the explicit way to move it.
+        if let Some(target_monitor) = swap_monitor {
+            self.focused_monitor = target_monitor;
+            self.last_active_workspace
+                .insert(target_monitor, name.to_string());
+            let restore = self
+                .workspace_focus
+                .get(name)
+                .copied()
+                .or_else(|| self.active_tree().default_focus());
+            if let Some(node) = restore {
+                self.set_focused_node(node);
+                self.raise_focused();
+            }
+            return Ok(());
+        }
+
+        if let Some(outgoing) = current.clone() {
+            self.previous_workspaces.insert(monitor_id, outgoing);
+        }
 
         // Captured before any parking/relayout so the incoming workspace's
         // windows can be brought on screen *first* (see below). Every
@@ -4638,21 +5224,7 @@ impl WmState {
                 self.floating_windows_in(outgoing_name)
             });
 
-        if let Some(swap_id) = swap_monitor {
-            match &current {
-                Some(outgoing_name) => {
-                    self.active_workspace.insert(swap_id, outgoing_name.clone());
-                    self.workspace_monitor
-                        .insert(outgoing_name.clone(), swap_id);
-                }
-                None => {
-                    self.active_workspace.remove(&swap_id);
-                }
-            }
-        }
-
-        self.active_workspace.insert(monitor_id, name.to_string());
-        self.workspace_monitor.insert(name.to_string(), monitor_id);
+        self.set_active_workspace(monitor_id, name.to_string());
 
         // Suppressed even under `Settings::animate`: these calls reveal
         // whatever this workspace's windows were left at — for most of
@@ -4700,40 +5272,19 @@ impl WmState {
             ));
         }
 
-        if swap_monitor.is_none() {
-            let phase_start = Instant::now();
-            self.park_concurrently(&outgoing_floating);
-            trace::log(format_args!(
-                "tili-daemon: switch_workspace {name} phase=outgoing_floating_park took {:?}",
-                phase_start.elapsed()
-            ));
-        }
+        let phase_start = Instant::now();
+        self.park_concurrently(&outgoing_floating);
+        trace::log(format_args!(
+            "tili-daemon: switch_workspace {name} phase=outgoing_floating_park took {:?}",
+            phase_start.elapsed()
+        ));
 
-        if let Some(swap_id) = swap_monitor {
-            // The outgoing workspace is now `swap_id`'s active one — laid
-            // out directly onto that monitor's own frame below, never
-            // parked at all (parking then immediately relaying out
-            // elsewhere would just be a second, needless flash).
-            let phase_start = Instant::now();
-            self.relayout_monitor_concurrently(swap_id);
-            trace::log(format_args!(
-                "tili-daemon: switch_workspace {name} phase=swap_relayout took {:?}",
-                phase_start.elapsed()
-            ));
-            let phase_start = Instant::now();
-            self.reposition_floating_for_monitor_concurrently(swap_id);
-            trace::log(format_args!(
-                "tili-daemon: switch_workspace {name} phase=swap_floating_reposition took {:?}",
-                phase_start.elapsed()
-            ));
-        } else {
-            let phase_start = Instant::now();
-            self.park_concurrently(&outgoing_tiled);
-            trace::log(format_args!(
-                "tili-daemon: switch_workspace {name} phase=outgoing_tiled_park took {:?}",
-                phase_start.elapsed()
-            ));
-        }
+        let phase_start = Instant::now();
+        self.park_concurrently(&outgoing_tiled);
+        trace::log(format_args!(
+            "tili-daemon: switch_workspace {name} phase=outgoing_tiled_park took {:?}",
+            phase_start.elapsed()
+        ));
 
         // Kept suppressed through the `swap_monitor` branch above too, not
         // just the primary incoming relayout: `relayout_monitor_concurrently`/
@@ -4744,6 +5295,13 @@ impl WmState {
         // earlier operation resume on the next `animation_tick` and visibly
         // drag it away from the frame just written here.
         self.frame_setter.set_suppressed(false);
+
+        // An empty synthetic fallback workspace should not linger once the
+        // user has switched away from it; a non-empty one is kept until its
+        // display disconnects (windows still need a home).
+        if let Some(outgoing) = current {
+            self.remove_synthetic_workspace(&outgoing);
+        }
 
         trace::log(format_args!(
             "tili-daemon: switch_workspace {name} total took {:?}",
@@ -4760,8 +5318,9 @@ impl WmState {
     /// working once.
     pub fn switch_to_previous_workspace(&mut self) -> Result<(), String> {
         let target = self
-            .previous_workspace
-            .clone()
+            .previous_workspaces
+            .get(&self.focused_monitor)
+            .cloned()
             .ok_or("no previous workspace to switch back to")?;
         self.switch_workspace(&target)
     }
@@ -4839,21 +5398,32 @@ impl WmState {
             },
         );
 
+        if let Some(monitor) = self.monitor_showing_workspace(target_name) {
+            self.relayout_monitor(monitor);
+            self.reposition_floating_for_monitor(monitor, true);
+        }
         self.switch_workspace(target_name)?;
         Ok(())
     }
 
     fn active_workspace_name(&self) -> String {
-        self.active_workspace
-            .get(&self.focused_monitor)
+        if let Some(name) = self.active_workspace.get(&self.focused_monitor)
+            && self.workspaces.contains_key(name)
+        {
+            return name.clone();
+        }
+        // Never fall back to a workspace name config may have removed
+        // (`"main"`): prefer any real tree before the internal default.
+        self.workspaces
+            .keys()
+            .next()
             .cloned()
             .unwrap_or_else(|| DEFAULT_WORKSPACE.to_string())
     }
 
     fn active_tree(&self) -> &Tree {
-        // Always present: every place that changes `active_workspace` also
-        // ensures the corresponding `workspaces` entry exists first, and the
-        // `DEFAULT_WORKSPACE` fallback is inserted in `Default::default()`.
+        // `active_workspace_name` always returns an existing tree when one
+        // exists, and `Default`/`apply_config` keep at least one workspace.
         self.workspaces
             .get(&self.active_workspace_name())
             .expect("active workspace always has a tree entry")
@@ -5401,11 +5971,14 @@ impl WmState {
     /// recomputed fresh from its floating rule, so a reactivated workspace
     /// or a monitor swap doesn't silently discard the user's own placement.
     /// A window with no manual geometry but already in `floating_placed` is
-    /// left exactly as-is: it already got its one rule-based placement when
-    /// it first floated, and re-deriving that same frame on every later
-    /// switch would undo a resize the user made that hasn't been
-    /// AX-observed as "manual" yet (e.g. right before parking).
-    fn reposition_floating_for_monitor(&mut self, monitor_id: u32) {
+    /// left exactly as-is on an ordinary same-monitor switch: it already got
+    /// its one rule-based placement when it first floated, and re-deriving
+    /// that same frame would undo a resize the user made that hasn't been
+    /// AX-observed as "manual" yet (e.g. right before parking). `force`
+    /// exists for the one case that genuinely needs a new frame — the
+    /// workspace moved to another display, where the old rule-derived
+    /// coordinates are now wrong/off-screen.
+    fn reposition_floating_for_monitor(&mut self, monitor_id: u32, force: bool) {
         let Some(name) = self.active_workspace.get(&monitor_id).cloned() else {
             return;
         };
@@ -5428,7 +6001,7 @@ impl WmState {
                         self.frame_setter.set_frame(window, frame);
                     }
                 }
-                None if !self.floating_placed.contains(&id) => {
+                None if force || !self.floating_placed.contains(&id) => {
                     self.place_floating_window(id, area);
                 }
                 None => {}
@@ -6564,6 +7137,8 @@ mod tests {
                 },
                 is_main: true,
                 notch: 0.0,
+                pretty_name: "Main Display".to_string(),
+                ordinal: 1,
             },
             Monitor {
                 id: 2,
@@ -6575,6 +7150,8 @@ mod tests {
                 },
                 is_main: false,
                 notch: 0.0,
+                pretty_name: "Display 2".to_string(),
+                ordinal: 2,
             },
         ]
     }
@@ -6592,6 +7169,8 @@ mod tests {
             },
             is_main: true,
             notch: 0.0,
+            pretty_name: "Main Display".to_string(),
+            ordinal: 1,
         }];
         state.active_workspace.clear();
         state
@@ -7295,9 +7874,162 @@ mod tests {
     }
 
     #[test]
+    fn active_workspace_fallback_never_points_at_a_removed_main_workspace() {
+        let mut state = floating_test_state();
+        state.workspaces.clear();
+        state.workspaces.insert("work".to_string(), Tree::new());
+        state.active_workspace.clear();
+
+        assert_eq!(state.active_workspace_name(), "work");
+        assert!(state.active_tree().is_empty());
+    }
+
+    #[test]
+    fn ensure_monitor_workspaces_fills_a_fresh_secondary_with_a_declared_workspace() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        state.workspaces.clear();
+        state.workspaces.insert("work".to_string(), Tree::new());
+        state.workspaces.insert("side".to_string(), Tree::new());
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "work".to_string());
+        state.focused_monitor = 1;
+
+        state.ensure_monitor_workspaces();
+
+        assert_eq!(
+            state.active_workspace.get(&1).map(String::as_str),
+            Some("work")
+        );
+        assert_eq!(
+            state.active_workspace.get(&2).map(String::as_str),
+            Some("side")
+        );
+        assert!(!state.synthetic_workspaces.contains("side"));
+    }
+
+    #[test]
+    fn ensure_monitor_workspaces_prefers_a_pinned_workspace() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        state.workspaces.clear();
+        for name in ["work", "pinned", "free"] {
+            state.workspaces.insert(name.to_string(), Tree::new());
+        }
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "work".to_string());
+        state.focused_monitor = 1;
+        state
+            .workspace_pins
+            .insert("pinned".to_string(), "2".to_string());
+
+        state.ensure_monitor_workspaces();
+
+        assert_eq!(
+            state.active_workspace.get(&2).map(String::as_str),
+            Some("pinned")
+        );
+    }
+
+    #[test]
+    fn a_workspace_pinned_to_a_disconnected_display_is_not_stolen() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        state.workspaces.clear();
+        state.workspaces.insert("work".to_string(), Tree::new());
+        state.workspaces.insert("reserved".to_string(), Tree::new());
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "work".to_string());
+        state.focused_monitor = 1;
+        state
+            .workspace_pins
+            .insert("reserved".to_string(), "99".to_string());
+
+        state.ensure_monitor_workspaces();
+
+        assert_eq!(
+            state.active_workspace.get(&2).map(String::as_str),
+            Some("display-2")
+        );
+        assert!(
+            !state
+                .active_workspace
+                .values()
+                .any(|name| name == "reserved")
+        );
+    }
+
+    #[test]
+    fn ensure_monitor_workspaces_creates_a_synthetic_only_when_no_declared_is_free() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        state.workspaces.clear();
+        state.workspaces.insert("only".to_string(), Tree::new());
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "only".to_string());
+        state.focused_monitor = 1;
+
+        state.ensure_monitor_workspaces();
+
+        assert_eq!(
+            state.active_workspace.get(&2).map(String::as_str),
+            Some("display-2")
+        );
+        assert!(state.synthetic_workspaces.contains("display-2"));
+        let info = state
+            .list_workspaces()
+            .into_iter()
+            .find(|workspace| workspace.name == "display-2")
+            .expect("synthetic workspace should be listed");
+        assert!(info.synthetic);
+        assert_eq!(info.display_name.as_deref(), Some("Display 2"));
+    }
+
+    #[test]
+    fn an_empty_synthetic_workspace_is_removed_when_its_display_disconnects() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        state
+            .workspaces
+            .insert("display-2".to_string(), Tree::new());
+        state.synthetic_workspaces.insert("display-2".to_string());
+        state.active_workspace.insert(2, "display-2".to_string());
+
+        state.on_displays_changed_with(vec![two_monitor_fixture()[0].clone()]);
+
+        assert!(!state.workspaces.contains_key("display-2"));
+        assert!(!state.synthetic_workspaces.contains("display-2"));
+        assert!(!state.active_workspace.contains_key(&2));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn focus_monitor_target_focuses_a_specific_display() {
+        let mut state = WmState::default();
+        state.monitors = two_monitor_fixture();
+        state.focused_monitor = 1;
+
+        state
+            .focus_monitor_target(tili_ipc::MonitorTarget::Id(2))
+            .unwrap();
+        assert_eq!(state.focused_monitor, 2);
+
+        state
+            .focus_monitor_target(tili_ipc::MonitorTarget::Main)
+            .unwrap();
+        assert_eq!(state.focused_monitor, 1);
+        assert!(
+            state
+                .focus_monitor_target(tili_ipc::MonitorTarget::Id(99))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn display_rename_remaps_workspace_monitor_without_a_park_round_trip() {
         let mut state = floating_test_state();
         state.monitors = two_monitor_fixture();
+        state.workspaces.insert("side".to_string(), Tree::new());
         state.workspace_monitor.insert("side".to_string(), 2);
         state.active_workspace.insert(2, "side".to_string());
 
@@ -7314,13 +8046,37 @@ mod tests {
     }
 
     #[test]
+    fn reconnecting_the_same_display_restores_its_last_declared_workspace() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        state.workspaces.insert("side".to_string(), Tree::new());
+        state.active_workspace.insert(2, "side".to_string());
+        state.workspace_monitor.insert("side".to_string(), 2);
+        state.last_active_workspace.insert(2, "side".to_string());
+
+        state.on_displays_changed_with(vec![two_monitor_fixture()[0].clone()]);
+        assert!(!state.active_workspace.contains_key(&2));
+        assert_eq!(
+            state.last_active_workspace.get(&2).map(String::as_str),
+            Some("side")
+        );
+
+        state.on_displays_changed_with(two_monitor_fixture());
+        assert_eq!(
+            state.active_workspace.get(&2).map(String::as_str),
+            Some("side")
+        );
+    }
+
+    #[test]
     fn disconnecting_a_display_keeps_its_workspace_parked_and_ready_to_fall_back() {
         let mut state = floating_test_state();
         state.monitors = two_monitor_fixture();
+        state.workspaces.insert("side".to_string(), Tree::new());
         state.workspace_monitor.insert("side".to_string(), 2);
         state.active_workspace.insert(2, "side".to_string());
 
-        state.on_displays_changed_with(vec![two_monitor_fixture()[0]]);
+        state.on_displays_changed_with(vec![two_monitor_fixture()[0].clone()]);
 
         // The workspace still remembers display 2; `parking_position` sees
         // that id is no longer connected and falls back to main until the
@@ -8549,8 +9305,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
-    fn place_new_window_tiled_into_a_workspace_active_on_another_monitor_swaps_monitors_to_show_it()
-    {
+    fn place_new_window_tiled_into_a_workspace_active_on_another_monitor_focuses_that_monitor() {
         let mut state = WmState::default();
         state.monitors = two_monitor_fixture();
         state.workspaces.insert("a".to_string(), Tree::new());
@@ -8570,13 +9325,17 @@ mod tests {
         );
         assert_eq!(
             state.active_workspace.get(&1),
-            Some(&"b".to_string()),
-            "the focused monitor should now show 'b', the workspace the new window landed on"
+            Some(&"a".to_string()),
+            "monitor 1 keeps its own workspace; switching to 'b' must not swap layouts"
         );
         assert_eq!(
             state.active_workspace.get(&2),
-            Some(&"a".to_string()),
-            "monitor 2 should pick up whatever monitor 1 was showing before, swap-style"
+            Some(&"b".to_string()),
+            "monitor 2 keeps showing the workspace the new window landed on"
+        );
+        assert_eq!(
+            state.focused_monitor, 2,
+            "focus should move to the display already showing 'b'"
         );
     }
 
@@ -8678,7 +9437,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
-    fn move_focused_to_workspace_swaps_monitors_when_target_visible_on_another_monitor() {
+    fn move_focused_to_workspace_focuses_the_monitor_already_showing_it() {
         let mut state = WmState::default();
         state.monitors = two_monitor_fixture();
         state.workspaces.insert("a".to_string(), Tree::new());
@@ -8707,13 +9466,17 @@ mod tests {
         assert!(state.relayout_calls.get() > 0);
         assert_eq!(
             state.active_workspace.get(&1),
-            Some(&"b".to_string()),
-            "the focused monitor should now show 'b', the workspace the window was moved to"
+            Some(&"a".to_string()),
+            "monitor 1 keeps its own workspace; moving a window must not swap layouts"
         );
         assert_eq!(
             state.active_workspace.get(&2),
-            Some(&"a".to_string()),
-            "monitor 2 should pick up whatever monitor 1 was showing before, swap-style"
+            Some(&"b".to_string()),
+            "monitor 2 continues showing the destination workspace"
+        );
+        assert_eq!(
+            state.focused_monitor, 2,
+            "focus should follow the window to the display already showing 'b'"
         );
     }
 
@@ -9051,6 +9814,7 @@ mod tests {
             focused_monitor: None,
             active_workspaces: Vec::new(),
             previous_workspace: None,
+            previous_workspaces: Vec::new(),
             workspaces: vec![SavedWorkspace {
                 name: DEFAULT_WORKSPACE.to_string(),
                 tree: TreeSnapshot {
@@ -9070,6 +9834,7 @@ mod tests {
                 focus: Some(2),
                 fullscreen: None,
                 monitor: None,
+                synthetic: false,
             }],
             windows: Vec::new(),
         };

@@ -32,6 +32,15 @@ full below, earlier ones collapsed further down.
   Disable with `settings { native-tabs #false }`.
 - **`toggle-floating`** plus a default `alt-shift-f` binding.
 - **Configurable AX timeout** (`settings { ax-timeout-ms 500 }`).
+- **Multi-monitor workspace routing.** Every display gets an active
+  workspace at startup; `monitor="main|12"` pins are honored; fallback
+  workspaces use the monitor's pretty name or `Display N` and are cleaned
+  up on disconnect (windows migrate to the main/focused workspace).
+  `tili workspace <name>` focuses the display already showing it instead
+  of swapping layouts; `tili focus-monitor [main|next|id]` targets a
+  specific display.
+- **Floating windows re-anchor** after workspace/display moves instead of
+  keeping the old monitor's coordinates.
 
 ## [0.12.0] - 2026-11-05
 

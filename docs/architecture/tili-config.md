@@ -27,7 +27,10 @@ window" behavior. Neither section validates `workspace` names here (this
 crate has no cross-section validation anywhere, and no error-reporting
 path for semantic issues, only KDL-syntax ones) — `tili-daemon` checks it
 names a declared workspace, the same way it already resolves
-`settings.default-workspace`.
+`settings.default-workspace`. A workspace's `monitor="..."` attribute is
+also only carried as a raw string; `tili-daemon` resolves it as `"main"`
+or a numeric display id, warns on anything else, and reserves the
+workspace for that display (including while the display is absent).
 
 The top-level `default-layout "..."` and a workspace's own
 `layout="..."` attribute (`workspace "name" layout="accordion"`) are both

@@ -132,6 +132,10 @@ pub enum Command {
     /// Cycles which connected monitor `Focus`/`Move`/`WorkspaceSwitch`/etc.
     /// operate on. A no-op with fewer than two monitors connected.
     FocusMonitor,
+    /// Focuses a specific connected monitor (`main`, `next`, or a display id)
+    /// instead of cycling. Used by `tili focus-monitor <target>`; the
+    /// cycle-only `FocusMonitor` remains the hotkey-friendly default.
+    FocusMonitorTarget(MonitorTarget),
     ListMonitors,
     /// Deliberately a no-op placeholder, same reasoning as `Flatten`: config
     /// already reloads automatically via file-watching
@@ -261,12 +265,24 @@ pub struct WindowInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     pub name: String,
+    /// User-facing label: a monitor's pretty name for synthetic workspaces,
+    /// `None` for config-declared workspaces (clients fall back to `name`).
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Whether this workspace was auto-created for a connected display
+    /// rather than declared in config.
+    #[serde(default)]
+    pub synthetic: bool,
     pub active: bool,
     pub window_count: usize,
     /// Which monitor this workspace is currently shown on, if any (M9).
     /// `None` for a workspace that exists but is parked (not visible on
     /// any connected monitor right now).
     pub monitor: Option<u32>,
+    /// Last monitor this workspace was shown on, including while parked.
+    /// `None` only if it has never been shown since startup.
+    #[serde(default)]
+    pub last_monitor: Option<u32>,
 }
 
 /// `Command::Doctor`'s payload. `tili-cli` combines this (when the daemon
@@ -390,6 +406,12 @@ pub struct MonitorInfo {
     /// `CGDirectDisplayID` — not guaranteed stable across sleep/wake or
     /// hot unplug+replug, see `tili_ax::Monitor`'s docs.
     pub id: u32,
+    /// One-based display position (main is always 1).
+    #[serde(default)]
+    pub ordinal: u32,
+    /// Human-readable display name (`Sidecar Display`, `DELL U2720Q`, ...).
+    #[serde(default)]
+    pub pretty_name: String,
     pub is_main: bool,
     /// Whether `Focus`/`Move`/`WorkspaceSwitch`/etc. currently target this
     /// monitor.
@@ -493,6 +515,8 @@ mod tests {
         let info = SnapshotInfo {
             monitors: vec![MonitorInfo {
                 id: 7,
+                ordinal: 1,
+                pretty_name: "Main Display".to_string(),
                 is_main: true,
                 focused: true,
                 active_workspace: Some("work".to_string()),
@@ -505,9 +529,12 @@ mod tests {
             }],
             workspaces: vec![WorkspaceInfo {
                 name: "work".to_string(),
+                display_name: None,
+                synthetic: false,
                 active: true,
                 window_count: 3,
                 monitor: Some(7),
+                last_monitor: Some(7),
             }],
             mode: "resize".to_string(),
             style: Some(MenubarStyle {

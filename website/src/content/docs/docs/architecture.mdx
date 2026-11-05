@@ -47,6 +47,14 @@ technique other public-API-only tools in this space use. A workspace parks
 on the display that last showed it, falling back to the main display only
 when that display is disconnected.
 
+Every connected display gets an active workspace at startup. A workspace
+can be pinned to a display (`monitor="main"` or a numeric id); otherwise
+tili reuses the display's last workspace, then the first free declared
+workspace, and only then creates a temporary `display-N` fallback labeled
+with the monitor's pretty name. Fallbacks with no windows disappear on
+disconnect; non-empty ones migrate their windows to the main/focused
+workspace first.
+
 ## Design invariants
 
 These are non-negotiable, enforced by the architecture rather than style
@@ -65,6 +73,10 @@ preference:
   itself if not granted.
 - **All real window-frame mutations go through `WindowFrameSetter`** — the
   one seam that knows how a window's frame actually gets set.
+- **One active workspace per display, never duplicated.** `workspace X`
+  focuses the display already showing X; moving layouts is explicit via
+  `move-workspace-to-monitor`. Display fallbacks are synthetic, named from
+  the monitor, and cleaned up on disconnect after migrating their windows.
 - **Native app tabs are opaque.** A new window that is really the active
   member of an app-owned tab group replaces the managed window id in place;
   it never creates a placement or triggers a relayout. Full tab-group

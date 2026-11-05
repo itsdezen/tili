@@ -211,9 +211,10 @@ disconnect lagging clients.
    AX rescans per PID.
 5. Add config v2: strict diagnostics and migration, ordered callback/rule
    AST, target-context propagation, and safe environment expansion.
-6. Improve multi-monitor correctness: pinned workspace policy, swap
-   semantics, hot-plug race tests, and a real usable display rectangle
-   once coordinate conversion is thoroughly tested.
+6. Improve multi-monitor correctness further: hot-plug race tests and a
+   real usable display rectangle once coordinate conversion is thoroughly
+   tested. Pinned workspace policy, focus-display targets, per-display
+   fallback cleanup, and the switch-vs-move semantics shipped in 0.13.
 7. Add advanced features after the core: tabbed/stacked variants, sticky
    windows, per-app default workspace, and full native-tab support only
    when its semantics are reliable. The v0.13 native-tab guard already

@@ -333,28 +333,44 @@ workspace absent from this map is parked, wherever it last was.
 `Focus`/`Move`/`WorkspaceSwitch`/layout commands actually target;
 `relayout_active`/`active_tree`/`active_tree_mut` all resolve through it
 (via `active_workspace_name()`), so most of the pre-M9 code didn't need to
-change — only `switch_workspace`, `apply_windows_changed`, and
-`move_focused_to_workspace` needed to become monitor-name-aware.
+change.
 
-`Command::FocusMonitor` (`focus_monitor_next`) is the *only* thing that
-changes `focused_monitor` (besides M10's focus-follows-monitor); it cycles
-through `self.monitors`, no-op under two. `switch_workspace` swaps with
-whatever monitor is already showing the target workspace, if any — two
-monitors can never display the same workspace at once, since each has its
-own `Tree` layout computed against its own frame.
+`ensure_monitor_workspaces` runs after config/session load and after every
+display change. It gives every connected display one active workspace, in
+this order: a `workspace "x" monitor="..."` pin, the workspace last active
+on that display, the first free config-declared workspace (config order),
+and only then an auto-created fallback named `display-<ordinal>`. Pinned
+workspaces are reserved even while their target display is disconnected.
+Fallback workspaces are tracked in `synthetic_workspaces`: empty ones are
+not persisted, are removed when switched away from or when their display
+disconnects, and a non-empty one is migrated to the main/focused active
+workspace before removal (never closing windows). Display names come from
+`NSScreen.localizedName`, stripped of `(AirPlay)`, fall back to
+`Main Display`/`Display N`, and get a `(2)` suffix when two panels share a
+model; synthetic ids are renumbered `display-<ordinal>` when the layout
+changes.
+
+`Command::FocusMonitor` (`focus_monitor_next`) cycles monitors;
+`Command::FocusMonitorTarget` focuses `main`/`next`/a specific id. M10's
+focus-follows-monitor also changes `focused_monitor`. `switch_workspace`
+focuses the display already showing the target workspace — it no longer
+swaps both displays' layouts. `move-workspace-to-monitor` is the explicit
+relocation command and still swaps with whatever occupies the target.
+Back-and-forth history (`previous_workspaces`) is per monitor.
 
 `on_displays_changed` (called from `main.rs` on every
 `spawn_display_watcher` signal) is the hot-plug/unplug handler: a
-disconnected monitor's workspace gets parked and its slot dropped (same
-mechanics as switching away from it — nothing is lost, just no longer shown
-anywhere); a newly connected monitor gets a fresh empty `"monitor-<id>"`
-workspace; every still-visible workspace gets re-laid-out afterward since
-frames may have changed even for monitors that stayed connected. It returns
-immediately on a fully empty enumeration without touching `self.monitors`
-(0.1.6) — the display callback fires a momentary zero-display enumeration
-as the system sleeps, and committing it wiped the snapshot
-`match_monitors`'s origin-distance rename-pairing needs to recognize "same
-physical display, new `CGDirectDisplayID`" across sleep/wake.
+disconnected monitor's active workspace is parked, its synthetic
+workspaces are migrated/cleaned, and `last_active_workspace` keeps the
+declared workspace ready for a same-display reconnect; a newly connected
+monitor gets its pinned/last/free workspace (synthetic only as a last
+resort); every still-visible workspace is re-laid-out afterward since
+frames may have changed. It returns immediately on a fully empty
+enumeration without touching `self.monitors` (0.1.6) — the display callback
+fires a momentary zero-display enumeration as the system sleeps, and
+committing it wiped the snapshot `match_monitors`'s origin-distance
+rename-pairing needs to recognize "same physical display, new
+`CGDirectDisplayID`" across sleep/wake.
 
 `relayout_active`/`relayout_monitor`/`relayout_all_visible` are three
 thicknesses of "recompute and apply frames" — most callers only need the
@@ -474,9 +490,11 @@ process exits, with no later tick left to actually finish an animated
 write — routing it through `frame_setter` would leave windows stuck
 off-screen instead of restored.
 
-Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`,
-parsed since M5) is intentionally still unwired — M9's bar is
-hot-plug/unplug safety, not that finer-grained UX.
+Config-driven workspace-to-monitor pinning (`WorkspaceConfig.monitor`) is
+resolved as `"main"` or a numeric display id and applied by
+`ensure_monitor_workspaces`/`on_displays_changed`; it reserves the
+workspace even while the target display is disconnected. Invalid pin
+strings are reported in `config_warnings`.
 
 ## Session state and restore
 
@@ -499,7 +517,7 @@ tested without macOS.
   hint.
 - Per monitor: frame and `is_main` (plus the display id as a hint only, since
   `CGDirectDisplayID` can change across sleep/hot-plug), the focused monitor,
-  active workspace per monitor, and previous workspace.
+  active workspace per monitor, and per-monitor previous workspace.
 - `Popup` windows are recorded for diagnostics but never geometry-restored:
   tili does not own their position by design.
 
@@ -996,17 +1014,16 @@ showing the desktop has nothing AX-focused), system-UI chrome, or a window
 the initial scan hasn't placed yet. Deliberately doesn't reuse
 `reveal_frontmost`/`reveal_current_frontmost` outright: those carry
 runtime-only semantics (`wake_lock_active`, `last_frontmost_pid`/
-`pid_unchanged`, mouse-follows-focus raising, monitor-swap-to-reveal) that
+`pid_unchanged`, mouse-follows-focus raising, monitor-focus-to-reveal) that
 don't apply to a cold boot and would make the one-shot correction harder to
 reason about and to unit-test; the pure decision (given an already-resolved
 `WindowId`, override or leave alone) is split into
 `reveal_startup_frontmost_window`, mirroring `place_new_window`'s
 `AxWindow`-free seam, so it's covered by ordinary unit tests despite the
 outer function depending on live AX. This only ever targets
-`focused_monitor` — the one monitor `apply_config`'s seed (and this
-correction) ever touches; a secondary monitor gets no `active_workspace`
-entry at all until a later `on_displays_changed` fires, a separate,
-pre-existing gap this doesn't address.
+`focused_monitor`; `ensure_monitor_workspaces`, called separately after
+config/session load, gives every other connected display its own active
+workspace.
 
 ## Layout commands, config, and dispatch
 

@@ -327,6 +327,9 @@ async fn async_daemon_main(
             config_path.display()
         ),
     }
+    // Covers both the no-session and missing-monitor cases: every connected
+    // display gets an active workspace before any real window is scanned.
+    state.ensure_monitor_workspaces();
     sync_active_combos(&active_combos, &state);
     sync_animation_tick(&mut animation_tick, &mut animation_tick_period, &state);
 

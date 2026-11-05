@@ -31,6 +31,18 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 - **`tili toggle-floating`** and a default `alt-shift-f` binding.
 - **Configurable AX timeout.** `settings { ax-timeout-ms 500 }` controls
   the per-app Accessibility messaging timeout (clamped to 50–5000ms).
+- **Multi-monitor workspace routing.** Every connected display gets an
+  active workspace at startup; `workspace "x" monitor="main|12"` pins are
+  honored; fallback workspaces use the monitor's pretty name
+  (`Sidecar Display`, `DELL U2720Q`) or `Display N`, and are renumbered
+  on layout changes. Empty fallbacks are removed on disconnect; non-empty
+  ones migrate their windows to the main/focused workspace before removal.
+  `tili workspace <name>` now focuses the display already showing that
+  workspace instead of swapping layouts, and
+  `tili focus-monitor [main|next|id]` focuses a specific display.
+- **Floating windows re-anchor on display changes.** Rule-placed floating
+  windows no longer keep coordinates from the previous monitor after a
+  workspace moves or a display reconnects.
 
 ## [0.12.0] - 2026-11-05
 

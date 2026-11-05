@@ -62,6 +62,12 @@ of falling through to `send()`/`print_response`):
   `confirm_default_start`'s Enter-to-continue pattern), skippable with
   `tili doctor --fix` for scripting.
 
+`tili focus-monitor [target]` is an optional-target extension of the
+cycle-only hotkey command: `main`, `next`, or a numeric display id maps to
+`Command::FocusMonitorTarget`. `tili workspace <name>` now focuses the
+display already showing that workspace instead of swapping layouts;
+`move-workspace-to-monitor` remains the relocation command.
+
 `tili query`/`tili subscribe`/`tili rule` are handled before the generic
 single-response path too. `query` sends `QueryState` (or one of the
 `List*` commands) and prints compact JSON; `subscribe` writes

@@ -34,7 +34,7 @@ workspaces {
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `workspace`'s name (1st positional arg) | string | yes | — | The workspace's name. A `workspace` line with no name is skipped. |
-| `monitor` | string attribute | no | none | Pins the workspace to a specific monitor. Not validated against connected monitors by this crate. |
+| `monitor` | string attribute | no | none | Pins the workspace to `"main"` or a numeric display id. The workspace is never auto-assigned to another display, including while its target display is disconnected. |
 
 Switching only ever works for a workspace declared here — workspaces are
 never created on the fly by a `workspace <name>` command or keybinding.

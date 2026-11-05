@@ -2,7 +2,10 @@
 
 ## In progress — v0.13.0
 
-- **Per-display parking.** Inactive workspaces park on their own display.
+- **Per-display parking and workspace routing.** Every display gets an
+  active workspace; `monitor="..."` pins are honored; fallback workspaces
+  use display names; switching to a workspace already on another display
+  focuses that display instead of swapping layouts.
 - **`tili query` + `tili subscribe --json`.** JSON snapshots and
   line-delimited events for status bars and scripts.
 - **Window metadata and rule ergonomics.** `bundle_id`, `workspace`,

@@ -144,8 +144,12 @@ enum Commands {
         #[arg(long)]
         root: bool,
     },
-    /// Cycle which connected monitor commands act on.
-    FocusMonitor,
+    /// Cycle which connected monitor commands act on, or focus a specific
+    /// monitor (`main`, `next`, or a display id).
+    FocusMonitor {
+        /// Optional monitor id, `main`, or `next`; omit to cycle.
+        target: Option<String>,
+    },
     /// List connected monitors, marking which one is focused.
     ListMonitors,
     /// Reset every child weight of the focused window's parent container
@@ -310,7 +314,18 @@ fn main() {
             };
             (command, ExpectedPayload::None)
         }
-        Commands::FocusMonitor => (Command::FocusMonitor, ExpectedPayload::None),
+        Commands::FocusMonitor { target } => match target {
+            Some(target) => {
+                let target = parse_monitor_target(&target).unwrap_or_else(|| {
+                    eprintln!(
+                        "tili: invalid monitor target '{target}' (expected a monitor id, 'next', or 'main')"
+                    );
+                    std::process::exit(1);
+                });
+                (Command::FocusMonitorTarget(target), ExpectedPayload::None)
+            }
+            None => (Command::FocusMonitor, ExpectedPayload::None),
+        },
         Commands::ListMonitors => (Command::ListMonitors, ExpectedPayload::Monitors),
         Commands::Balance { root } => (Command::BalanceSizes { root }, ExpectedPayload::None),
         Commands::Flatten => (Command::Flatten, ExpectedPayload::None),
@@ -463,10 +478,20 @@ fn print_workspaces(payload: serde_json::Value) {
                 let monitor = w
                     .monitor
                     .map(|id| format!("monitor={id}"))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        w.last_monitor
+                            .map(|id| format!("last={id}"))
+                            .unwrap_or_default()
+                    });
+                let label = match w.display_name.as_deref() {
+                    Some(display) if display != w.name => {
+                        format!("{display} ({})", w.name)
+                    }
+                    _ => w.name.clone(),
+                };
                 println!(
-                    "{marker} {:<20} {} window(s)  {monitor}",
-                    w.name, w.window_count
+                    "{marker} {:<24} {} window(s)  {monitor}",
+                    label, w.window_count
                 );
             }
         }
@@ -1001,9 +1026,14 @@ fn print_monitors(payload: serde_json::Value) {
                 let marker = if m.focused { "*" } else { " " };
                 let main = if m.is_main { "main" } else { "    " };
                 let workspace = m.active_workspace.unwrap_or_else(|| "-".to_string());
+                let label = if m.pretty_name.is_empty() {
+                    format!("#{}", m.ordinal)
+                } else {
+                    m.pretty_name.clone()
+                };
                 println!(
-                    "{marker} {:<10} {main}  {:.0}x{:.0}+{:.0}+{:.0}  {workspace}",
-                    m.id, m.frame.width, m.frame.height, m.frame.x, m.frame.y
+                    "{marker} {:<10} {main}  {:<24} {:.0}x{:.0}+{:.0}+{:.0}  {workspace}",
+                    m.id, label, m.frame.width, m.frame.height, m.frame.x, m.frame.y
                 );
             }
         }

@@ -22,6 +22,12 @@ combines it with checks it can run without a daemon at all (LaunchAgent
 files, the socket, config syntax, the state file). See
 [tili-cli.md](tili-cli.md) and [tili-daemon.md](tili-daemon.md).
 
+`WorkspaceInfo` now carries `display_name`/`synthetic` (auto-created
+display fallbacks expose the monitor's pretty name) and `last_monitor`
+(the display a parked workspace will return to). `MonitorInfo` carries
+`ordinal` and `pretty_name` so clients can render `Display 2`/`Sidecar
+Display` without a second query.
+
 `Command::QueryState`'s payload, `QueryState`, is the external-integration
 snapshot: versioned, and unlike `SnapshotInfo` it includes every tracked
 window with `bundle_id`, `workspace`, `focused`, accessibility

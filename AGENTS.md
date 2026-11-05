@@ -199,11 +199,11 @@ signing.**
 tili has shipped (v0.13.x) with a complete, daily-drivable feature set —
 see [ROADMAP.md](ROADMAP.md) for what's shipped and what's planned, and
 check that file before assuming a feature exists or doesn't. v0.12 added
-full session state/restore. v0.13 adds per-display parking, JSON
-query/subscribe, role/subrole rules, copy-rule, AX timeout configuration,
-`toggle-floating`, and the native-tab guard (one managed window follows
-the active app-owned tab; opening/closing/switching tabs never places or
-relayouts).
+full session state/restore. v0.13 adds per-display parking, display-aware
+workspace assignment/pins, JSON query/subscribe, role/subrole rules,
+copy-rule, AX timeout configuration, `toggle-floating`, and the native-tab
+guard (one managed window follows the active app-owned tab; opening/
+closing/switching tabs never places or relayouts).
 [docs/BLUEPRINT.md](docs/BLUEPRINT.md) holds the design reference for
 planned-but-unshipped features.
 
@@ -259,6 +259,17 @@ rationale (and real-hardware evidence) behind each is in
   through the ordinary `WindowsChanged` path — never reclassified as new
   windows. Do not save during restore or after a panic, and do not
   geometry-restore `Popup`/ignored windows.
+- **Every connected display has one active workspace, and never a
+  duplicate.** Startup/`on_displays_changed` assign a pinned workspace,
+  then the last workspace on that display, then the first free declared
+  workspace (config order), and only then an auto-created fallback
+  (`display-<ordinal>`). Fallback workspaces are marked synthetic, use the
+  monitor's `NSScreen.localizedName` for display, are renumbered when the
+  layout changes, and are removed after their windows are migrated when
+  the display disconnects. Empty synthetic workspaces are never persisted.
+- **`workspace <name>` focuses the display already showing it; it never
+  swaps layouts.** `move-workspace-to-monitor` is the explicit relocation
+  command. Back-and-forth history is per monitor.
 - **Native tabs are app-owned and opaque to tili.** A brand-new window
   matching a managed same-app/same-frame sibling (with the old window no
   longer enumerable, or an explicit `AXTabGroup`) is folded into that

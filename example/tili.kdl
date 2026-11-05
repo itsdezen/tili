@@ -17,7 +17,13 @@ workspaces {
     // Overrides `default-layout` for this workspace only — its first
     // container is created as Accordion instead of Tiles. Only affects
     // future windows; doesn't relayout ones already tiled.
+    //
+    // Optional `monitor="main"` (or a numeric display id) pins the
+    // workspace to that display. Pinned workspaces are never auto-assigned
+    // to another monitor; if the display is absent, the workspace stays
+    // parked until it returns.
     workspace "entertain" layout="accordion"
+    // workspace "pinned" monitor="main"
 
     workspace "random"
 
@@ -206,8 +212,8 @@ menubar {
 //   set-floating on|off             set the focused window's placement
 //   toggle-floating                 flip the focused window between tiled
 //                                   and floating (hotkey-friendly)
-//   focus-monitor                   cycle which connected monitor commands
-//                                   target (no-op with only one monitor)
+//   focus-monitor [target]           cycle monitors, or focus "main",
+//                                   "next", or a numeric display id
 //   mode <name>                     switch to a named keybindings mode
 //   mode exit                       return to the default ("main") mode
 //

@@ -199,6 +199,26 @@ low-fps on real hardware.
 - `Popup`/ignored windows may be recorded but are never geometry-restored;
   tili does not own their placement.
 
+## One active workspace per connected display
+
+- Every connected display gets exactly one active workspace at startup and
+  on `on_displays_changed`. Assignment order is pinned workspace, last
+  workspace on that display, first free declared workspace in config order,
+  then a synthetic `display-<ordinal>` fallback.
+- A workspace is never active on two displays at once. `switch_workspace`
+  focuses the display already showing the target; `move-workspace-to-monitor`
+  is the explicit relocation command.
+- Pins (`workspace "x" monitor="main|id"`) reserve the workspace even while
+  the target display is disconnected.
+- Synthetic fallbacks are marked, use the monitor's pretty name
+  (`NSScreen.localizedName` fallback `Display N`), are renumbered when the
+  layout changes, and are never persisted empty. On disconnect an empty
+  fallback is deleted; a non-empty one has its windows migrated to the
+  main/focused workspace first.
+- Floating windows are re-anchored whenever their workspace changes
+  display, including rule-placed floating windows that otherwise keep
+  their one derived frame.
+
 ## Native tabs are opaque to the daemon
 
 - A brand-new window that matches a managed same-app/same-frame sibling

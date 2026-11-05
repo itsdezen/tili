@@ -73,6 +73,7 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
             state.focus_monitor_next();
             Response::Ok
         }
+        Command::FocusMonitorTarget(target) => result_response(state.focus_monitor_target(target)),
         Command::ListMonitors => payload_response(state.list_monitors()),
         Command::BalanceSizes { root } => result_response(state.balance_sizes(root)),
         // A distinct `flatten` has no additional effect to implement:

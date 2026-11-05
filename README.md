@@ -63,10 +63,11 @@ shortcut.
 ## Status
 
 tili is at `v0.13.x` and already daily-drivable: tiling, workspaces,
-hot-reloaded config, built-in hotkeys, floating rules, multi-monitor,
-per-display parking, mouse/focus-follows-monitor, session restore,
-JSON query/subscribe, a native-tab guard, a menu bar workspace badge, and
-a real signed release pipeline. See [ROADMAP.md](ROADMAP.md) for what's
+hot-reloaded config, built-in hotkeys, floating rules, multi-monitor
+(per-display parking, monitor-pinned workspaces, display-aware fallback
+workspaces), mouse/focus-follows-monitor, session restore, JSON
+query/subscribe, a native-tab guard, a menu bar workspace badge, and a real
+signed release pipeline. See [ROADMAP.md](ROADMAP.md) for what's
 planned next.
 Pre-1.0 still means config schema and CLI surface can change between
 releases — check [CHANGELOG.md](CHANGELOG.md) when upgrading.
@@ -132,12 +133,33 @@ and `--copy` puts it on the clipboard.
 > Control** — this is a macOS Mission Control layout setting, not
 > something tili controls.
 
+### Multi-monitor
+
+Every connected display gets an active workspace at startup (not just the
+main one). A workspace can be pinned with
+`workspace "entertain" monitor="main"` or `monitor="12"`; pinned workspaces
+are never assigned to another display, including while that display is
+temporarily disconnected.
+
+If every declared workspace is already in use, tili creates a temporary
+fallback workspace for the display, displayed by its pretty name
+(`Sidecar Display`, `DELL U2720Q`) or `Display 2`/`Display 3` when the
+monitor reports no name. Empty fallbacks disappear when the display
+disconnects; a non-empty one has its windows moved to the main/focused
+workspace before cleanup, so no window is silently closed or orphaned.
+
+`tili workspace <name>` focuses the display already showing that workspace
+instead of swapping the two displays' layouts. Use
+`tili move-workspace-to-monitor` to explicitly relocate one.
+
 ## Menu bar badge
 
 `tili start` also installs and starts `tili-menubar` alongside the daemon —
 a small `NSStatusItem` badge showing the active workspace on your focused
-monitor. Click it to switch workspaces, copy a rule snippet for the focused
-window, open your config file, or quit (which stops the daemon too). It starts/stops/uninstalls automatically with
+monitor. An auto-created display fallback is shown by the monitor's pretty
+name (`Sidecar Display`, `DELL U2720Q`, or `Display 2`). Click the badge to
+switch workspaces, copy a rule snippet for the focused window, open your
+config file, or quit (which stops the daemon too). It starts/stops/uninstalls automatically with
 `tili start`/`stop`/`uninstall`, so there's nothing extra to run, and it
 hides itself entirely whenever the daemon isn't reachable rather than
 showing stale state.
@@ -173,7 +195,7 @@ copy-pasteable version:
 ```kdl
 workspaces {
     workspace "work"
-    workspace "entertain" layout="accordion"
+    workspace "entertain" layout="accordion" monitor="main"
     workspace "random"
 }
 
@@ -239,12 +261,12 @@ keybindings in your config resolve to (e.g. `bind "alt-h" "focus left"`).
 | `tili query [state\|windows\|workspaces\|monitors] [--json]` | Print a machine-readable JSON snapshot |
 | `tili subscribe [--json]` | Stream JSON state events until interrupted |
 | `tili rule [--workspace <name>] [--copy]` | Print/copy a rule snippet for the focused window |
-| `tili workspace <name>` | Switch the active workspace (created if new) |
+| `tili workspace <name>` | Switch to a declared workspace; if it is already on another display, focus that display instead of swapping |
 | `tili workspace-back` | Switch back to whichever workspace was active before this one |
 | `tili move-to-workspace <name>` | Move the focused window to another workspace |
 | `tili move-workspace-to-monitor <target> [--workspace <name>]` | Move a workspace to a different monitor without switching focus; defaults to the workspace currently active on the focused monitor |
 | `tili list-workspaces` | List workspaces, with active/monitor markers |
-| `tili focus-monitor` | Cycle which connected monitor commands target |
+| `tili focus-monitor [target]` | Cycle monitors, or focus `main`, `next`, or a display id |
 | `tili list-monitors` | List connected monitors |
 | `tili list-windows` | List known windows (tiled/floating, frame, pid) |
 
