@@ -64,8 +64,8 @@ shortcut.
 
 tili is at `v0.13.x` and already daily-drivable: tiling, workspaces,
 hot-reloaded config, built-in hotkeys, floating rules, multi-monitor
-(per-display parking, monitor-pinned workspaces, display-aware fallback
-workspaces), mouse/focus-follows-monitor, session restore, JSON
+(global southeast parking, monitor-pinned workspaces, display-aware
+fallback workspaces), mouse/focus-follows-monitor, session restore, JSON
 query/subscribe, a native-tab guard, a menu bar workspace badge, and a real
 signed release pipeline. See [ROADMAP.md](ROADMAP.md) for what's
 planned next.
@@ -151,6 +151,12 @@ workspace before cleanup, so no window is silently closed or orphaned.
 `tili workspace <name>` focuses the display already showing that workspace
 instead of swapping the two displays' layouts. Use
 `tili move-workspace-to-monitor` to explicitly relocate one.
+
+Parking is global: every inactive workspace's windows sit at the bottom-right
+corner of the southeast-most display, and are re-parked whenever displays
+connect/disconnect or the arrangement changes. This keeps parked windows from
+ever appearing on another monitor, including in diagonal arrangements, at the
+cost of moving them between displays when you switch workspaces.
 
 ## Menu bar badge
 

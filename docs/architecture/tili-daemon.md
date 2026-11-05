@@ -437,22 +437,44 @@ unconditional `relayout_active()` call, so siblings only ever move once —
 straight to their final frames — on mouse-up, never live during the drag
 itself.
 
-`park()` targets `tili_ax::parking_position` — a window's origin lands just
-a point inside **its workspace's own display's** bottom-right corner
-(`workspace_monitor` remembers that display, including while parked; an
-unknown/disconnected id falls back to the main display). This keeps a
-workspace switch on a secondary monitor local instead of dragging every
-parked window across displays. It is not pushed *outside* every monitor's
-bounds (`combined_bounds`'s original purpose): confirmed on real hardware
+`park()` targets `tili_ax::southeast_parking_position` — a window's origin
+lands just a point inside the bottom-right corner of the **southeast-most
+connected display**, regardless of which workspace the window belongs to or
+which display that workspace last lived on. `southeast_monitor` picks the
+display with the greatest right edge (`x + width`), breaking ties by
+greatest bottom edge (`y + height`) and then id. A parked window's body
+extends in the +x/+y direction from that origin, so starting at the
+southeast-most display's corner pushes it past every other display's right
+and bottom edges too: no part of it can reappear on another monitor even
+when the arrangement is diagonal and a display sits down-and-right of the
+workspace's own display (the bug per-display parking had). The trade-off is
+intentional: switching a workspace on the main display moves its windows
+back from the southeast display rather than parking locally, in exchange
+for one consistent parking corner and a global "never visible elsewhere"
+guarantee.
+
+`on_displays_changed_with` calls `repark_parked_windows()` after updating
+monitors/workspaces and re-laying-out the active ones. Connect, disconnect,
+arrangement, resolution/scale, and id-rename events can all change which
+display is southeast-most; windows parked at the old corner would otherwise
+sit exactly where a newly-arranged monitor is. `finalize_restore` re-asserts
+the corner too, covering a display connected between restore start and
+finalization. Reparking is skipped while the user is mid-drag
+(`mouse_button_down`), and is a no-op write when the corner didn't move
+(`AxWindow::set_position` ignores an unchanged frame).
+
+Parking is not pushed *outside* every monitor's bounds (`combined_bounds`'s
+original purpose): confirmed on real hardware
 that AppKit clamps a `kAXPositionAttribute` write requesting somewhere
 totally unreachable back to near a real screen's edge regardless of how far
 outside it's requested (it only constrains the origin, not the window's full
 frame). Keeping the origin legitimately on-screen and letting the window's
 own size extend past the corner (a technique other AX-based tiling WMs use
 too) avoids that clamp entirely instead of fighting it. Every parked window
-on a given display — however many are parked at once — targets that
-display's exact same coordinate; an earlier version offset each additional
-one inward by a step so they wouldn't all land on the identical point, but
+in the daemon — however many workspaces have windows parked at once —
+targets that one global coordinate; an earlier version offset each
+additional one inward by a step so they wouldn't all land on the identical
+point, and a later one parked per display, but
 that shift moves the origin off the one spot the "hidden regardless of size"
 guarantee depends on, exposing a real on-screen strip as wide as the shift.
 Nothing actually needs parked windows to be spatially distinct (they're all

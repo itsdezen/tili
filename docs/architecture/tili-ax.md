@@ -227,14 +227,16 @@ height into the effective top gap (gated by the `gaps` config's
 `ignore-notch` flag) — `Monitor.notch` is already the correct amount to
 add there, with no further adjustment needed on the daemon side.
 
-`parking_position(monitors, target_monitor, size)` parks a window one point
-inside the target display's own bottom-right corner. `tili-daemon` passes
-whichever monitor `workspace_monitor` last recorded for that window's
-workspace (including while the workspace is parked), so an inactive
-workspace on a secondary display stays on that display instead of being
-dragged to the main one. An unknown or disconnected id falls back to the
-main display, then to the first connected display. The one-point inset is
-the same AppKit-clamp workaround described in
+`southeast_monitor(monitors)` returns the display with the greatest right
+edge (`x + width`), breaking ties by greatest bottom edge (`y + height`)
+and then id; `southeast_parking_position(monitors)` parks a window one point
+inside that display's bottom-right corner. Every parked window in
+`tili-daemon` uses this same global corner, whatever workspace or display it
+came from, so a window's body (which extends in +x/+y) can never reappear
+on another monitor even in a diagonal arrangement. The functions return
+`None`/`(0.0, 0.0)` for an empty monitor list; the daemon treats a
+zero-display enumeration as sleep and doesn't park then. The one-point inset
+is the same AppKit-clamp workaround described in
 [tili-daemon.md](tili-daemon.md)'s parking section.
 
 `spawn_display_watcher()` registers a

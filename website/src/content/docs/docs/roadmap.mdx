@@ -5,10 +5,12 @@ description: What tili has shipped and what's planned next.
 
 ## In progress — v0.13.0
 
-- **Per-display parking and workspace routing.** Every display gets an
-  active workspace, monitor pins are honored, fallback workspaces use
-  display names, and switching to a workspace already on another display
-  focuses that display instead of swapping layouts.
+- **Global southeast parking and workspace routing.** All parked windows
+  share the southeast-most display's corner and are re-parked after display
+  changes; every display gets an active workspace, monitor pins are honored,
+  fallback workspaces use display names, and switching to a workspace
+  already on another display focuses that display instead of swapping
+  layouts.
 - **`tili query` and `tili subscribe --json`.** JSON snapshots and
   line-delimited events for status bars and scripts.
 - **Window metadata and rules.** `bundle_id`, `workspace`, `focused`,

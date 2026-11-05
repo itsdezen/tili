@@ -219,6 +219,24 @@ low-fps on real hardware.
   display, including rule-placed floating windows that otherwise keep
   their one derived frame.
 
+## Parking is global and re-applied after display changes
+
+- Every parked `Tiled`/`Floating` window — from any workspace — targets the
+  one bottom-right corner of the southeast-most connected display
+  (`max x + width`, tie `max y + height`, tie id). No per-display or
+  per-workspace parking coordinate exists.
+- `park`/`park_concurrently` write that same coordinate, so parking and
+  re-parking are idempotent (`set_position` no-ops on an unchanged frame).
+- `on_displays_changed_with` calls `repark_parked_windows()` after updating
+  monitors, workspaces, and active layouts. Connect, disconnect,
+  arrangement, resolution/scale, display-id rename, and SE-display removal
+  therefore all move parked windows to the new corner before they can be
+  seen on another monitor.
+- `finalize_restore` re-asserts the corner after session restore; a
+  zero-monitor enumeration is sleep and skips parking.
+- `Minimized`/`NativeFullscreen`/`HiddenApplication`/`Popup` placements are
+  never parked or reparked (they were never moved off-screen by `park`).
+
 ## Native tabs are opaque to the daemon
 
 - A brand-new window that matches a managed same-app/same-frame sibling

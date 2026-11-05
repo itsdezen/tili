@@ -10,9 +10,12 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ### Added
 
-- **Per-display parking.** An inactive workspace's windows now park on the
-  display that last showed that workspace instead of always on the main
-  display. Unknown/disconnected displays fall back to main.
+- **Global southeast parking.** Every parked window — from any workspace —
+  now parks at the bottom-right corner of the southeast-most connected
+  display instead of on its own workspace's display. Parking is re-applied
+  after connect/disconnect, arrangement, resolution/scale, display-id
+  rename, and session restore, so a parked window can't reappear on another
+  monitor after the layout changes.
 - **JSON query and subscription.** `tili query state --json` (plus
   `windows`/`workspaces`/`monitors`) and `tili subscribe --json`, which
   streams a versioned `snapshot` event followed by coalesced

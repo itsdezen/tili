@@ -237,42 +237,47 @@ pub fn main_display_frame() -> Rect {
 /// regardless of how far outside it's requested — AppKit only constrains a
 /// window's *origin* to stay reachable on some real display, it doesn't
 /// care whether the window's full frame does. So instead of fighting that
-/// clamp, `parking_position` exploits it — a technique other AX-based
+/// clamp, `southeast_parking_position` exploits it — a technique other AX-based
 /// tiling WMs use too: keep the origin legitimately on-screen, just
 /// barely, and let the window's own size push everything past it off the
 /// edge. A larger value here doesn't hide more — it would just be a wider
 /// on-screen sliver, the opposite of what parking wants.
 const PARK_EPSILON: f64 = 1.0;
 
-/// Computes where to position a window so only a `PARK_EPSILON` sliver of
-/// it remains on-screen, hugging `target_monitor`'s bottom-right corner.
-/// Inactive workspaces belong to a specific display (`WmState` tracks that
-/// in `workspace_monitor`), so parking them on their own display keeps a
-/// workspace switch local instead of dragging every parked window across
-/// displays. Falls back to the main display (then the first available one)
-/// when `target_monitor` is `None` or no longer connected. `size` isn't
-/// actually needed for this corner specifically — the window's own top-left
-/// lands just inside the corner, and its body (extending in the +x/+y
-/// direction from there) does all the hiding regardless of how big it is —
-/// but is taken anyway so this signature doesn't need to change if a
-/// different corner (one that actually needs it, e.g. a bottom-left variant)
-/// is ever added.
+/// The connected display furthest down-and-to-the-right: highest
+/// `x + width` (right edge), then highest `y + height` (bottom edge), then
+/// highest id as a deterministic tie-break. This is the one display where
+/// *all* parked windows go.
 ///
-/// Doesn't need to check other connected monitors: `PARK_EPSILON` is tiny
-/// enough that this point is always deep inside the target monitor's own
-/// bounds, never anywhere close to a neighboring display's — unlike the
-/// previous far-outside-every-bound approach, which genuinely could land
-/// on a different physical monitor depending on arrangement.
-pub fn parking_position(
-    monitors: &[Monitor],
-    target_monitor: Option<u32>,
-    _size: (f64, f64),
-) -> (f64, f64) {
-    let Some(target) = target_monitor
-        .and_then(|id| monitors.iter().find(|m| m.id == id))
-        .or_else(|| monitors.iter().find(|m| m.is_main))
-        .or_else(|| monitors.first())
-    else {
+/// Picking the southeast-most display rather than a workspace's own
+/// display matters because a parked window's body extends in the +x/+y
+/// direction from its origin: starting at this display's bottom-right
+/// corner pushes the body past every other display's right and bottom
+/// edges too, so no part of it can reappear on a differently-arranged
+/// monitor. Parking on a workspace's own display could not guarantee that
+/// (a display down-and-right of it would sit exactly where the body goes).
+pub fn southeast_monitor(monitors: &[Monitor]) -> Option<&Monitor> {
+    monitors.iter().max_by(|a, b| {
+        (a.frame.x + a.frame.width)
+            .total_cmp(&(b.frame.x + b.frame.width))
+            .then_with(|| (a.frame.y + a.frame.height).total_cmp(&(b.frame.y + b.frame.height)))
+            .then_with(|| a.id.cmp(&b.id))
+    })
+}
+
+/// Computes where to position a window so only a `PARK_EPSILON` sliver of
+/// it remains on-screen, hugging the southeast-most monitor's bottom-right
+/// corner. Every parked window — from any workspace — targets this same
+/// coordinate, so parking stays consistent and idempotent: a re-park (after
+/// a display change) either writes the same point or the new southeast
+/// corner, never a per-workspace variant. The window's own size isn't
+/// needed: its top-left lands just inside the corner and its body
+/// (extending in +x/+y) does all the hiding regardless of how big it is.
+///
+/// Returns `(0.0, 0.0)` with no connected monitors (a momentary zero-display
+/// enumeration is treated as sleep by the daemon, which skips parking then).
+pub fn southeast_parking_position(monitors: &[Monitor]) -> (f64, f64) {
+    let Some(target) = southeast_monitor(monitors) else {
         return (0.0, 0.0);
     };
     (
@@ -470,53 +475,82 @@ mod tests {
     #[test]
     fn single_monitor_parks_one_epsilon_inside_its_bottom_right_corner() {
         let monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
-        let (x, y) = parking_position(&monitors, None, (400.0, 300.0));
-        assert_eq!(x, 1919.0);
-        assert_eq!(y, 1079.0);
+        assert_eq!(southeast_parking_position(&monitors), (1919.0, 1079.0));
     }
 
     #[test]
-    fn side_by_side_pair_parks_on_the_requested_monitor() {
+    fn side_by_side_pair_parks_on_the_rightmost_monitor() {
         let monitors = [
             monitor(1, 0.0, 0.0, 1920.0, 1080.0),
             monitor(2, 1920.0, 0.0, 2560.0, 1440.0),
         ];
         assert_eq!(
-            parking_position(&monitors, Some(1), (400.0, 300.0)),
-            (1919.0, 1079.0)
+            southeast_monitor(&monitors).map(|m| m.id),
+            Some(2),
+            "the rightmost display wins even though display 1 is main"
         );
-        assert_eq!(
-            parking_position(&monitors, Some(2), (400.0, 300.0)),
-            (4479.0, 1439.0)
-        );
+        assert_eq!(southeast_parking_position(&monitors), (4479.0, 1439.0));
     }
 
     #[test]
-    fn unknown_monitor_falls_back_to_the_main_display() {
+    fn equal_right_edges_break_the_tie_by_bottom_edge() {
+        // Stacked displays share a right edge; the lower one is southeast.
         let monitors = [
             monitor(1, 0.0, 0.0, 1920.0, 1080.0),
-            monitor(2, 1920.0, 0.0, 2560.0, 1440.0),
+            monitor(2, 0.0, 1080.0, 1920.0, 1080.0),
         ];
-        assert_eq!(
-            parking_position(&monitors, Some(999), (400.0, 300.0)),
-            (1919.0, 1079.0)
-        );
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(2));
+        assert_eq!(southeast_parking_position(&monitors), (1919.0, 2159.0));
     }
 
     #[test]
-    fn falls_back_to_the_first_monitor_when_none_is_main() {
-        let mut monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
+    fn equal_edges_break_the_tie_by_id() {
+        let monitors = [
+            monitor(4, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(7, 0.0, 0.0, 1920.0, 1080.0),
+        ];
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(7));
+    }
+
+    #[test]
+    fn diagonal_arrangement_parks_on_the_lower_right_display() {
+        // The case the old per-display parking exposed: a display
+        // down-and-right of the workspace's own display sat exactly where
+        // the parked window's body extends.
+        let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 1080.0, 1280.0, 800.0),
+        ];
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(2));
+        assert_eq!(southeast_parking_position(&monitors), (3199.0, 1879.0));
+    }
+
+    #[test]
+    fn a_display_above_and_right_is_only_chosen_when_it_reaches_further_right() {
+        // Right edge dominates: display 2 is higher up but further right.
+        let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, -800.0, 2560.0, 800.0),
+        ];
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(2));
+        assert_eq!(southeast_parking_position(&monitors), (4479.0, -1.0));
+    }
+
+    #[test]
+    fn main_flag_does_not_affect_southeast_selection() {
+        let mut monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
+        ];
         monitors[0].is_main = false;
-        let (x, y) = parking_position(&monitors, None, (400.0, 300.0));
-        assert_eq!(x, 1919.0);
-        assert_eq!(y, 1079.0);
+        monitors[1].is_main = true;
+        assert_eq!(southeast_monitor(&monitors).map(|m| m.id), Some(2));
     }
 
     #[test]
-    fn no_monitors_parks_at_the_origin() {
-        let (x, y) = parking_position(&[], None, (400.0, 300.0));
-        assert_eq!(x, 0.0);
-        assert_eq!(y, 0.0);
+    fn no_monitors_have_no_southeast_corner() {
+        assert!(southeast_monitor(&[]).is_none());
+        assert_eq!(southeast_parking_position(&[]), (0.0, 0.0));
     }
 
     #[test]

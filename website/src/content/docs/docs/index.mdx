@@ -27,10 +27,11 @@ shortcut.
   rules nest the way they actually relate to each other.
 - **Session restore.** Layout, focus, active workspace per monitor,
   floating geometry, and special states survive a restart or crash.
-- **Display-aware workspaces.** Inactive workspaces park on their own
-  display, workspaces can be pinned to a monitor, every display gets an
-  active workspace at startup, and switching to a workspace already on
-  another display focuses that display instead of swapping layouts.
+- **Display-aware workspaces.** Inactive workspaces park together at the
+  southeast-most display's corner and stay there across display changes,
+  workspaces can be pinned to a monitor, every display gets an active
+  workspace at startup, and switching to a workspace already on another
+  display focuses that display instead of swapping layouts.
 - **JSON query/subscribe.** `tili query state --json` and
   `tili subscribe --json` make status-bar and script integration a
   first-class path, not a long-poll workaround.

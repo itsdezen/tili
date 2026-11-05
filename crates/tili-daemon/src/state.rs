@@ -32,9 +32,10 @@ const DEFAULT_MODE: &str = "main";
 
 // macOS has no public API to enumerate/control Spaces, so workspaces are
 // virtual: only the active one's windows are actually laid out on screen.
-// Every other workspace's windows are "parked" via `tili_ax::parking_position`
-// — see `park`'s own doc comment for the technique and why every parked
-// window now shares the same coordinate.
+// Every other workspace's windows are "parked" via
+// `tili_ax::southeast_parking_position` — see `park`'s own doc comment for
+// the technique and why every parked window, from every workspace, shares
+// the same global coordinate at the southeast-most display's corner.
 
 /// How close two frames need to be to count as "the same" when deciding
 /// whether a `Floating` window's live frame has drifted from what tili
@@ -2996,6 +2997,12 @@ impl WmState {
         self.special_anchors
             .retain(|id, _| special_ids.contains(id));
 
+        // The restored monitor list/arrangement may differ from the one the
+        // saved session came from; the per-workspace loop above already
+        // parks at the current corner, but re-asserting it here also covers
+        // a monitor connected between restore start and finalization.
+        self.repark_parked_windows();
+
         self.mark_session_dirty();
         self.session_save_suppressed = zero_match;
     }
@@ -4193,6 +4200,13 @@ impl WmState {
             self.relayout_monitor(id);
             self.reposition_floating_for_monitor(id, true);
         }
+
+        // Do this last: the southeast-most display can have changed (the old
+        // one disconnected, a new one connected, or the arrangement moved),
+        // and windows parked at the old corner may now overlap another
+        // monitor. Workspaces migrated above are already active and thus
+        // excluded by `parked_positionable_ids`.
+        self.repark_parked_windows();
     }
 
     /// Moves the focus pointer to the window adjacent to the current focus
@@ -5790,23 +5804,17 @@ impl WmState {
         }
     }
 
-    /// Moves a window to hug a real monitor's own corner (see
-    /// `tili_ax::parking_position`) without resizing it. Every parked
-    /// window targets the exact same coordinate — `parking_position`'s
-    /// "hidden regardless of size" guarantee only holds with the origin
-    /// sitting exactly `PARK_EPSILON` inside the corner; an earlier version
-    /// of this function shifted each additional simultaneously-parked
-    /// window inward by a step so they wouldn't all land on the identical
-    /// point, but that shift itself moves the origin off the one spot the
-    /// hiding trick depends on, exposing a real on-screen strip as wide as
-    /// the shift — there's no way to "spread apart" and stay hidden at the
-    /// same time, and nothing actually needs them spread apart (they're all
-    /// invisible at the same point regardless of how many share it). This
-    /// also keeps re-parking idempotent for free: `reconcile_existing_placement`'s
-    /// re-assertion targets the same coordinate no matter which caller
-    /// parked the window first, so `AxWindow::set_position`'s
-    /// no-op-if-unchanged guard genuinely no-ops instead of needing to
-    /// remember which offset a specific call used.
+    /// Moves a window to hug the southeast-most display's bottom-right
+    /// corner (see `tili_ax::southeast_parking_position`) without resizing
+    /// it. Every parked window — whatever workspace it belongs to — targets
+    /// this exact global coordinate, so parking is consistent and
+    /// re-parking is idempotent: `reconcile_existing_placement` and
+    /// `repark_parked_windows` write the same point no matter which caller
+    /// parked the window first, and `AxWindow::set_position`'s
+    /// no-op-if-unchanged guard genuinely no-ops. Spreading parked windows
+    /// apart would move the origin off the one `PARK_EPSILON` spot the
+    /// hiding trick depends on, exposing a real on-screen strip, so they
+    /// all stay at the same point.
     fn park(&mut self, id: WindowId) {
         // Settles any in-flight animation to its true target first — both
         // so the manual-geometry capture below reads the window's real
@@ -5818,26 +5826,11 @@ impl WmState {
             self.frame_setter.finish(window);
         }
         self.capture_manual_geometry_before_park(id);
-        let parking_monitor = self.parking_monitor_for(id);
         let Some(window) = self.windows.get_mut(&id) else {
             return;
         };
-        let frame = window.frame();
-        let (origin_x, origin_y) =
-            tili_ax::parking_position(&self.monitors, parking_monitor, (frame.width, frame.height));
+        let (origin_x, origin_y) = tili_ax::southeast_parking_position(&self.monitors);
         window.set_position(origin_x, origin_y);
-    }
-
-    /// The display a window's workspace should park on: whichever monitor
-    /// last showed that workspace, including while parked (see
-    /// `workspace_monitor`). `None` when the workspace was never shown or
-    /// its monitor disconnected — `parking_position` then falls back to the
-    /// main display.
-    fn parking_monitor_for(&self, id: WindowId) -> Option<u32> {
-        self.placements
-            .get(&id)
-            .and_then(|placement| self.workspace_monitor.get(&placement.workspace))
-            .copied()
     }
 
     fn monitor_frame(&self, monitor_id: u32) -> Option<Rect> {
@@ -6067,26 +6060,43 @@ impl WmState {
     /// per window, fires concurrently via `write_windows_concurrently`.
     fn park_concurrently(&mut self, ids: &[WindowId]) {
         let mut targets = Vec::with_capacity(ids.len());
+        // The same global southeast corner for every window; only the
+        // per-window bookkeeping above is sequential.
+        let origin = tili_ax::southeast_parking_position(&self.monitors);
         for &id in ids {
             if let Some(window) = self.windows.get_mut(&id) {
                 self.frame_setter.finish(window);
             }
             self.capture_manual_geometry_before_park(id);
-            let parking_monitor = self.parking_monitor_for(id);
-            let Some(window) = self.windows.get(&id) else {
-                continue;
-            };
-            let frame = window.frame();
-            let origin = tili_ax::parking_position(
-                &self.monitors,
-                parking_monitor,
-                (frame.width, frame.height),
-            );
-            targets.push((id, origin));
+            if self.windows.contains_key(&id) {
+                targets.push((id, origin));
+            }
         }
         self.write_windows_concurrently(targets, |window: &mut AxWindow, (x, y): (f64, f64)| {
             window.set_position(x, y);
         });
+    }
+
+    /// Re-parks every currently parked tiled/floating window at the current
+    /// global southeast corner. Called after a display change (connect,
+    /// disconnect, arrangement/resolution/scale, id rename) and after
+    /// session restore: the southeast-most display may now be a different
+    /// one, and windows left at the old corner would otherwise sit exactly
+    /// where another monitor now is — the original per-display parking
+    /// bug, just one event later.
+    ///
+    /// Idempotent and safe when nothing changed (`set_position` no-ops on an
+    /// unchanged frame). Skipped while the user is mid-drag so a display
+    /// event can't fight a live resize; the next normal park re-establishes
+    /// the invariant.
+    fn repark_parked_windows(&mut self) {
+        if self.monitors.is_empty() || self.mouse_button_down {
+            return;
+        }
+        let ids = self.parked_positionable_ids();
+        if !ids.is_empty() {
+            self.park_concurrently(&ids);
+        }
     }
 
     /// `switch_workspace`-only variant of `relayout_monitor`: the same
@@ -7859,9 +7869,10 @@ mod tests {
     }
 
     #[test]
-    fn parking_monitor_for_uses_the_workspaces_last_display() {
+    fn parking_uses_the_global_southeast_corner_not_the_workspaces_display() {
         let mut state = floating_test_state();
-        state.workspace_monitor.insert("secondary".to_string(), 42);
+        state.monitors = two_monitor_fixture();
+        state.workspace_monitor.insert("secondary".to_string(), 1);
         state.placements.insert(
             1,
             Placement {
@@ -7869,8 +7880,13 @@ mod tests {
                 kind: PlacementKind::Tiled,
             },
         );
-        assert_eq!(state.parking_monitor_for(1), Some(42));
-        assert_eq!(state.parking_monitor_for(999), None);
+
+        // Even though the workspace last lived on display 1, every parked
+        // window targets the southeast-most display (2).
+        assert_eq!(
+            tili_ax::southeast_parking_position(&state.monitors),
+            (3839.0, 1079.0)
+        );
     }
 
     #[test]
@@ -8078,14 +8094,52 @@ mod tests {
 
         state.on_displays_changed_with(vec![two_monitor_fixture()[0].clone()]);
 
-        // The workspace still remembers display 2; `parking_position` sees
-        // that id is no longer connected and falls back to main until the
-        // display comes back or the workspace is shown elsewhere.
+        // The workspace still remembers display 2; parking is now global, so
+        // pulling the southeast display moves every parked window's corner
+        // back to the remaining (main) display.
         assert_eq!(state.workspace_monitor.get("side"), Some(&2));
         assert_eq!(
-            tili_ax::parking_position(&state.monitors, Some(2), (100.0, 100.0)),
+            tili_ax::southeast_parking_position(&state.monitors),
             (1919.0, 1079.0)
         );
+    }
+
+    #[test]
+    fn disconnecting_the_southeast_display_reparks_at_the_new_corner() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        // Two parked windows: repark must survive the southeast display
+        // disappearing. No live `AxWindow` here, so `repark_parked_windows`
+        // is a write-free no-op — this proves the path runs without
+        // panicking and still reports both as parked.
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: "parked".to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        state.placements.insert(
+            2,
+            Placement {
+                workspace: "parked".to_string(),
+                kind: PlacementKind::Floating { manual: None },
+            },
+        );
+        assert_eq!(
+            tili_ax::southeast_parking_position(&state.monitors),
+            (3839.0, 1079.0)
+        );
+
+        state.on_displays_changed_with(vec![two_monitor_fixture()[0].clone()]);
+
+        assert_eq!(
+            tili_ax::southeast_parking_position(&state.monitors),
+            (1919.0, 1079.0)
+        );
+        let mut ids = state.parked_positionable_ids();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
     }
 
     #[test]

@@ -43,9 +43,12 @@ crates/
 
 macOS exposes no public API to control Spaces, so inactive-workspace
 windows are parked off-screen rather than relying on real Spaces — the same
-technique other public-API-only tools in this space use. A workspace parks
-on the display that last showed it, falling back to the main display only
-when that display is disconnected.
+technique other public-API-only tools in this space use. Every parked
+window, whatever workspace it belongs to, sits at the bottom-right corner of
+the southeast-most connected display; tili re-parks them after displays
+connect, disconnect, or move. Picking the southeast-most display means the
+window body extends past every other display's edges, so a parked window
+can't reappear on a different monitor even with a diagonal arrangement.
 
 Every connected display gets an active workspace at startup. A workspace
 can be pinned to a display (`monitor="main"` or a numeric id); otherwise

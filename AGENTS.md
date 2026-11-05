@@ -199,7 +199,7 @@ signing.**
 tili has shipped (v0.13.x) with a complete, daily-drivable feature set —
 see [ROADMAP.md](ROADMAP.md) for what's shipped and what's planned, and
 check that file before assuming a feature exists or doesn't. v0.12 added
-full session state/restore. v0.13 adds per-display parking, display-aware
+full session state/restore. v0.13 adds global southeast parking, display-aware
 workspace assignment/pins, JSON query/subscribe, role/subrole rules,
 copy-rule, AX timeout configuration, `toggle-floating`, and the native-tab
 guard (one managed window follows the active app-owned tab; opening/
