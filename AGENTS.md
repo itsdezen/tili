@@ -196,7 +196,7 @@ signing.**
 
 ## Project status
 
-tili has shipped (v0.13.x) with a complete, daily-drivable feature set —
+tili has shipped (v0.13.0) with a complete, daily-drivable feature set —
 see [ROADMAP.md](ROADMAP.md) for what's shipped and what's planned, and
 check that file before assuming a feature exists or doesn't. v0.12 added
 full session state/restore. v0.13 adds global southeast parking, display-aware

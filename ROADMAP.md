@@ -1,28 +1,10 @@
 # Roadmap
 
-## In progress — v0.13.0
-
-- **Global southeast parking and workspace routing.** All parked windows
-  share the southeast-most display's bottom-right corner and are re-parked
-  after display changes. Every display gets an active workspace;
-  `monitor="..."` pins are honored; fallback workspaces use display names.
-  Workspaces have a home display: `workspace X` goes there,
-  `workspace-here X` pulls it to the focused display, and
-  `move-workspace-to-monitor next|prev|main` relocates it. `workspace-back`
-  restores the previous display+workspace pair.
-- **`tili query` + `tili subscribe --json`.** JSON snapshots and
-  line-delimited events for status bars and scripts.
-- **Window metadata and rule ergonomics.** `bundle_id`, `workspace`,
-  `focused`, `role`, `subrole`; copy-rule CLI/menu bar; `role`/`subrole`
-  matchers for floating and workspace rules.
-- **Native-tab guard.** Tab open/close/switch is opaque to tili: one
-  managed window, no placement or relayout churn. Full native-tab support
-  remains future work.
-- **Floating toggle.** `toggle-floating` command and default hotkey.
-- **Responsiveness.** Configurable AX timeout, 500ms default.
-
 ## Shipped
 
+- **v0.13.0** — home-display workspace routing, global southeast parking,
+  JSON query/subscribe, window metadata and rule ergonomics, native-tab
+  guard, `toggle-floating`, and configurable AX timeout.
 - **v0.12.0** — session state and recovery.
 - Earlier releases — see [CHANGELOG.md](CHANGELOG.md).
 

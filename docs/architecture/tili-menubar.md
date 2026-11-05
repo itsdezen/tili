@@ -128,9 +128,9 @@ name), falling back to the workspace id.
   the "everything's fine" indicator, which would defeat the point of it
   being visually distinct.
 - `src/actions.rs` handles menu clicks (`workspace:<name>` sends
-  `WorkspaceSwitch`; the daemon focuses the display already showing that
-  workspace rather than swapping layouts, `copy-rule` runs `tili rule
-  --copy`, `open-settings` opens the config via `$EDITOR`/`open`/`open -a
-  TextEdit` in that fallback order, `quit` runs `tili stop` before exiting
-  this process too) on its own background thread, since none of those
-  reactions need the main thread.
+  `WorkspaceSwitch`; the daemon goes to that workspace's home display (or
+  focuses the display already showing it) rather than swapping layouts,
+  `copy-rule` runs `tili rule --copy`, `open-settings` opens the config via
+  `$EDITOR`/`open`/`open -a TextEdit` in that fallback order, `quit` runs
+  `tili stop` before exiting this process too) on its own background
+  thread, since none of those reactions need the main thread.

@@ -148,9 +148,9 @@ so `InstantFrameSetter` needs no changes:
   from wherever one of these direct writes just put it.
 - `set_suppressed` — while true, `set_frame` writes instantly (same as
   `InstantFrameSetter`) and drops any tween already running for that
-  window, regardless of `Settings::animate`. `WmState::switch_workspace`
+  window, regardless of `Settings::animate`. `WmState::switch_on_monitor`
   wraps its reveal-the-incoming-workspace calls
-  (`relayout_active`/`reposition_floating_in_active_workspace`) in
+  (`relayout_monitor`/`reposition_floating_for_monitor` variants) in
   `set_suppressed(true)`/`set_suppressed(false)`: those calls are showing
   windows at wherever `park` last left them, and a parked position was
   never meant to be seen, so there's no meaningful start point to ease

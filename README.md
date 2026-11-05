@@ -62,7 +62,7 @@ shortcut.
 
 ## Status
 
-tili is at `v0.13.x` and already daily-drivable: tiling, workspaces,
+tili is at `v0.13.0` and already daily-drivable: tiling, workspaces,
 hot-reloaded config, built-in hotkeys, floating rules, multi-monitor
 (home-display workspace flow, global southeast parking, monitor-pinned
 workspaces, display-aware fallback workspaces), mouse/focus-follows-monitor,

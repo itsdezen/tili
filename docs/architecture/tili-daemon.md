@@ -1567,14 +1567,16 @@ pid. `WmEvent::SystemDidWake` gets both of the same two layers
   `restart_pending_removal_clocks` helper `note_screen_unlocked` uses —
   identical reasoning, just for a real sleep instead of a lock.
 
-## `switch_workspace`'s concurrent AX writes
+## Workspace-switch concurrent AX writes
 
-`switch_workspace` parks/relays-out/repositions potentially many windows on
-every call — one AX round-trip per window if done one at a time, which is
-real, user-visible deadtime between the hotkey firing and the screen
-actually finishing its update, especially on a workspace with several
-windows. Its own `park`/`relayout_monitor`/`reposition_floating_for_monitor`
-calls are replaced with `switch_workspace`-only concurrent variants
+`switch_on_monitor` (the local-switch core shared by `workspace`,
+`workspace-here`, and `workspace-back`) parks/relays-out/repositions
+potentially many windows on every call — one AX round-trip per window if
+done one at a time, which is real, user-visible deadtime between the hotkey
+firing and the screen actually finishing its update, especially on a
+workspace with several windows. Its own
+`park`/`relayout_monitor`/`reposition_floating_for_monitor` calls are
+replaced with switch-only concurrent variants
 (`park_concurrently`/`relayout_monitor_concurrently`/
 `reposition_floating_for_monitor_concurrently`), which share one helper,
 `write_windows_concurrently`: any bookkeeping that touches shared `WmState`
@@ -1595,7 +1597,7 @@ there's no async boundary already in place to join a spawned task through.
 Nothing outlives `write_windows_concurrently`'s own return — every thread is
 joined before the function hands back its windows — so there's no
 fire-and-forget job lifecycle to manage, unlike a decoupled-return design
-would need. The relative *ordering* `switch_workspace` already had (bring
+would need. The relative *ordering* the original switch already had (bring
 the incoming workspace's windows on screen before parking the outgoing
 ones, so there's never a moment with nothing shown but the desktop) is
 unchanged — only the AX writes *within* each of those steps became
