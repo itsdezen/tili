@@ -259,7 +259,7 @@ pub struct DoctorReport {
 pub struct SessionRestoreReport {
     pub matched: usize,
     pub missing_normal: usize,
-    pub deferred_special: usize,
+    pub deferred_windows: usize,
     pub zero_match: bool,
 }
 

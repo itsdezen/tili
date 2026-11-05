@@ -249,7 +249,10 @@ rationale (and real-hardware evidence) behind each is in
   event loop.** `TreeSnapshot` never stores `NodeId`; restore uses a
   conservative hard/fallback matcher and skips ambiguous matches; missing/
   corrupt/unsupported state is ignored; writes are atomic with a `.bak` and
-  run off-loop. Do not save during restore or after a panic, and do not
+  run off-loop. Saved windows that are alive but unenumerable during startup
+  stay in `deferred_windows` (and in the next snapshot) and are retried
+  through the ordinary `WindowsChanged` path — never reclassified as new
+  windows. Do not save during restore or after a panic, and do not
   geometry-restore `Popup`/ignored windows.
 - **Hotkey- and socket-triggered commands both go through `dispatch()`**
   — no parallel command path. The hotkey tap's `active_bindings:

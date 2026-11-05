@@ -104,7 +104,7 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
                     tili_ipc::SessionRestoreReport {
                         matched: summary.matched,
                         missing_normal: summary.missing_normal,
-                        deferred_special: summary.deferred_special,
+                        deferred_windows: summary.deferred_windows,
                         zero_match: summary.zero_match,
                     }
                 }),

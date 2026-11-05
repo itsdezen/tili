@@ -83,6 +83,16 @@ const REMOVAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 /// missed reveal-on-click, not a wrong one.
 const LAUNCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
+/// How often a non-empty deferred-session list is re-scanned. These windows
+/// are alive but unenumerable at startup (native fullscreen on another
+/// Space, minimized, ...); a slow bounded rescan catches them when their
+/// Space becomes current again without turning the whole daemon into a
+/// poller.
+const DEFERRED_RESCAN_INTERVAL: Duration = Duration::from_secs(5);
+/// Upper bound on that retry window; after this the saved records are
+/// treated as genuinely gone instead of being retried forever.
+const DEFERRED_RESCAN_WINDOW: Duration = Duration::from_secs(600);
+
 /// How many times `apply_windows_changed` will defer a brand-new window's
 /// disposition when its `bundle_id()` is still unresolved (racing
 /// `NSRunningApplication`'s own registration right after a process
@@ -854,7 +864,7 @@ struct CompiledFloatingRule {
 
 /// One startup restore episode. Lives only from `begin_restore` until the
 /// grace deadline (or early finalization), then is replaced by
-/// `deferred_special` for windows that could not be seen yet.
+/// `deferred_windows` for windows that could not be seen yet.
 struct RestoreSession {
     saved: SavedSession,
     matcher: RestoreMatcher,
@@ -871,7 +881,7 @@ struct RestoreSession {
 pub struct RestoreSummary {
     pub matched: usize,
     pub missing_normal: usize,
-    pub deferred_special: usize,
+    pub deferred_windows: usize,
     pub zero_match: bool,
 }
 
@@ -1153,7 +1163,9 @@ pub struct WmState {
     /// Special-state saved windows not seen during the startup grace —
     /// they may still appear later (native fullscreen on another Space,
     /// minimized app, ...). Matched lazily as windows show up.
-    deferred_special: Vec<SavedWindow>,
+    deferred_windows: Vec<SavedWindow>,
+    deferred_rescan_deadline: Option<Instant>,
+    deferred_rescan_last: Option<Instant>,
     last_restore_summary: Option<RestoreSummary>,
     /// Set when a restore matched zero windows: keep the previous on-disk
     /// state rather than replacing it with an empty/partial session. Any
@@ -1225,7 +1237,9 @@ impl Default for WmState {
             restore: None,
             special_anchors: HashMap::new(),
             special_float_manual: HashMap::new(),
-            deferred_special: Vec::new(),
+            deferred_windows: Vec::new(),
+            deferred_rescan_deadline: None,
+            deferred_rescan_last: None,
             last_restore_summary: None,
             session_save_suppressed: false,
         }
@@ -1693,7 +1707,7 @@ impl WmState {
                 let restored = if self.restore_active() {
                     self.try_restore_window(id, app_hidden, minimized, fullscreen)
                 } else {
-                    self.try_restore_deferred_special(id, app_hidden, minimized, fullscreen)
+                    self.try_restore_deferred_window(id, app_hidden, minimized, fullscreen)
                 };
                 if restored {
                     placed_new_window = true;
@@ -2157,7 +2171,11 @@ impl WmState {
         }
         self.pending_launch_pids.remove(&pid);
         self.launch_active_workspace.remove(&pid);
-        self.deferred_special.retain(|saved| saved.pid != pid);
+        self.deferred_windows.retain(|saved| saved.pid != pid);
+        if self.deferred_windows.is_empty() {
+            self.deferred_rescan_deadline = None;
+            self.deferred_rescan_last = None;
+        }
         self.relayout_all_visible();
         self.mark_session_dirty();
     }
@@ -2215,7 +2233,16 @@ impl WmState {
     /// Marks the session snapshot stale. Cheap and intentionally coarse.
     pub fn mark_session_dirty(&mut self) {
         self.session_revision = self.session_revision.wrapping_add(1);
+    }
+
+    /// A real user action (command, hotkey, mouse release, config reload)
+    /// also clears the zero-match save suppression. Automatic OS/window
+    /// events must call `mark_session_dirty` instead, or a zero-match
+    /// restore would overwrite the previous good state merely by placing
+    /// the windows it already found.
+    pub fn mark_user_session_dirty(&mut self) {
         self.session_save_suppressed = false;
+        self.mark_session_dirty();
     }
 
     pub fn session_revision(&self) -> u64 {
@@ -2243,10 +2270,49 @@ impl WmState {
             saw_window: false,
             matched: HashMap::new(),
         });
-        self.deferred_special.clear();
+        self.deferred_windows.clear();
+        self.deferred_rescan_deadline = None;
+        self.deferred_rescan_last = None;
         self.special_anchors.clear();
         self.special_float_manual.clear();
         self.session_save_suppressed = false;
+    }
+
+    /// Pids worth re-scanning while some saved windows are still deferred.
+    /// Returns an empty list outside the retry window or between attempts;
+    /// `main.rs` folds the result into its existing `pending_pids` set, so
+    /// this stays a bounded retry rather than a new polling loop.
+    pub fn deferred_rescan_pids(&mut self) -> Vec<i32> {
+        if self.deferred_windows.is_empty() {
+            self.deferred_rescan_deadline = None;
+            self.deferred_rescan_last = None;
+            return Vec::new();
+        }
+        let now = Instant::now();
+        let deadline = *self
+            .deferred_rescan_deadline
+            .get_or_insert(now + DEFERRED_RESCAN_WINDOW);
+        if now >= deadline {
+            self.deferred_windows.clear();
+            self.deferred_rescan_deadline = None;
+            self.deferred_rescan_last = None;
+            return Vec::new();
+        }
+        if self
+            .deferred_rescan_last
+            .is_some_and(|last| now.duration_since(last) < DEFERRED_RESCAN_INTERVAL)
+        {
+            return Vec::new();
+        }
+        self.deferred_rescan_last = Some(now);
+        let mut pids: Vec<i32> = self
+            .deferred_windows
+            .iter()
+            .map(|saved| saved.pid)
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        pids
     }
 
     /// Finalizes once the grace deadline expires, or once every normal
@@ -2257,7 +2323,7 @@ impl WmState {
             Instant::now() >= restore.deadline
                 || (restore.saw_window
                     && restore.matcher.remaining_normal() == 0
-                    && restore.matcher.unmatched_special().is_empty())
+                    && restore.matcher.unmatched().is_empty())
         });
         if ready {
             self.finalize_restore();
@@ -2591,21 +2657,27 @@ impl WmState {
         // Special saved windows that were never seen stay available for a
         // later appearance (native fullscreen on another Space, minimized
         // app, ...). Normal unmatched windows are simply missing.
-        self.deferred_special = restore
+        self.deferred_windows = restore
             .matcher
-            .unmatched_special()
+            .unmatched()
             .into_iter()
             .filter(|saved| !matched.values().any(|m| m.id == saved.id))
             .collect();
+        self.deferred_rescan_deadline = if self.deferred_windows.is_empty() {
+            None
+        } else {
+            Some(Instant::now() + DEFERRED_RESCAN_WINDOW)
+        };
+        self.deferred_rescan_last = None;
 
-        let deferred = self.deferred_special.len();
+        let deferred = self.deferred_windows.len();
         let matched_count = matched.len();
         let missing_normal = restore.matcher.remaining_normal();
         let zero_match = matched_count == 0;
         self.last_restore_summary = Some(RestoreSummary {
             matched: matched_count,
             missing_normal,
-            deferred_special: deferred,
+            deferred_windows: deferred,
             zero_match,
         });
 
@@ -2652,17 +2724,19 @@ impl WmState {
         self.session_save_suppressed = zero_match;
     }
 
-    /// Called for a brand-new window after restore has finalized. Saved
-    /// special windows (native fullscreen/minimized/hidden) may appear much
-    /// later; claim them and put them back into their saved workspace.
-    fn try_restore_deferred_special(
+    /// Called for a brand-new window after restore has finalized. A saved
+    /// window may be alive but temporarily unenumerable — native fullscreen
+    /// on another Space, a minimized app, or a window left on a different
+    /// macOS Space during startup. Claim it lazily and put it back into its
+    /// saved workspace instead of treating it as a new window.
+    fn try_restore_deferred_window(
         &mut self,
         id: WindowId,
         app_hidden: bool,
         minimized: bool,
         fullscreen: bool,
     ) -> bool {
-        if self.deferred_special.is_empty() {
+        if self.deferred_windows.is_empty() {
             return false;
         }
         let Some(window) = self.windows.get(&id) else {
@@ -2675,7 +2749,7 @@ impl WmState {
             window.title(),
             saved_window_kind(window.kind()),
         );
-        let mut matcher = RestoreMatcher::new(&self.deferred_special);
+        let mut matcher = RestoreMatcher::new(&self.deferred_windows);
         let Some((_, saved)) = matcher.try_match(&identity) else {
             return false;
         };
@@ -2687,11 +2761,15 @@ impl WmState {
         // Remove exactly the entry that matched; `try_match` returns a clone
         // without its original index, so match by saved id/identity.
         if let Some(pos) = self
-            .deferred_special
+            .deferred_windows
             .iter()
             .position(|entry| entry.id == saved.id)
         {
-            self.deferred_special.remove(pos);
+            self.deferred_windows.remove(pos);
+        }
+        if self.deferred_windows.is_empty() {
+            self.deferred_rescan_deadline = None;
+            self.deferred_rescan_last = None;
         }
         self.apply_restored_window(
             id,
@@ -2818,7 +2896,7 @@ impl WmState {
                     .or_else(|| self.monitor_ref_for_workspace(name)),
             })
             .collect();
-        let windows = self
+        let mut windows: Vec<SavedWindow> = self
             .placements
             .iter()
             .filter_map(|(&id, placement)| {
@@ -2845,6 +2923,15 @@ impl WmState {
                 })
             })
             .collect();
+        // A saved window may be alive but temporarily unenumerable during
+        // restore (native fullscreen on another Space, minimized, ...).
+        // Keep its saved record in the next snapshot too, otherwise a
+        // restart while it is deferred would permanently lose it.
+        for saved in &self.deferred_windows {
+            if !windows.iter().any(|window| window.id == saved.id) {
+                windows.push(saved.clone());
+            }
+        }
 
         SavedSession::new(
             monitors,
@@ -8541,6 +8628,18 @@ mod tests {
         assert!(tree.find_node(103).is_some(), "floating leaf restored");
         let focus = state.workspace_focus.get(DEFAULT_WORKSPACE).copied();
         assert_eq!(tree.window_at(focus.unwrap()), Some(102));
+    }
+
+    #[test]
+    fn automatic_session_marks_do_not_clear_zero_match_suppression() {
+        let mut state = WmState {
+            session_save_suppressed: true,
+            ..WmState::default()
+        };
+        state.mark_session_dirty();
+        assert!(state.session_save_suppressed());
+        state.mark_user_session_dirty();
+        assert!(!state.session_save_suppressed());
     }
 
     #[test]

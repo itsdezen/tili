@@ -193,7 +193,9 @@ low-fps on real hardware.
 - Writes are atomic (temp + fsync + rename) with a rotated `.bak`, and run
   off the event loop via `spawn_blocking`. No save while restore is active
   or after a panic. A zero-match restore preserves the previous file until a
-  real user mutation.
+  real user mutation. Saved windows that were alive but unenumerable are
+  kept as deferred records (and in the next snapshot) and retried through
+  the existing `WindowsChanged` path, not treated as brand-new windows.
 - `Popup`/ignored windows may be recorded but are never geometry-restored;
   tili does not own their placement.
 

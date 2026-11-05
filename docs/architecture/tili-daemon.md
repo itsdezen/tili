@@ -527,10 +527,15 @@ weights, and MRU before normalizing. Missing windows are filtered by
    workspaces. Windows opened after finalize use normal rules.
 
 If all saved normal windows match early, restore finalizes before the
-deadline. Saved special windows that were not seen remain in
-`deferred_special`; if they appear later (native fullscreen on another
-Space, a minimized app, ...) they are matched lazily and rejoin their saved
-workspace/anchor.
+deadline. Saved windows that were not seen remain in `deferred_windows` —
+including normal windows alive but unenumerable during startup (a native
+fullscreen window on another Space, a minimized app, or another macOS
+Space). They are kept in the next persisted snapshot too, and a bounded
+rescan (every 5s for up to 10 minutes) feeds their pids back through the
+normal `WindowsChanged` path. When a Space becomes enumerable again they
+are matched lazily and rejoin their saved workspace/anchor instead of being
+treated as new windows; this is what prevents a native-fullscreen round
+trip from shredding the rest of the saved layout.
 
 ### Save flow and crash behavior
 
@@ -541,7 +546,9 @@ workspace/anchor.
 - `SessionStore::save` writes a temp file, fsyncs it, rotates the previous
   primary to `session.json.bak`, then renames the temp file into place.
   Permissions are `0600`; the state contains titles/bundle ids but no window
-  content.
+  content. On load, a corrupt primary falls back to `.bak` and removes the
+  corrupt primary so the next save's rotation cannot overwrite the good
+  backup with garbage.
 - No save while restore is active or after a panic. A zero-match restore
   keeps the previous file on disk (`session_save_suppressed`) rather than
   overwriting it with an empty/partial session; any real user mutation

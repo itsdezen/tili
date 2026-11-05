@@ -251,7 +251,13 @@ impl SessionStore {
                 // Try the last good backup before declaring the file
                 // corrupt; the primary may have been torn by a crash.
                 return match read_session(&self.backup) {
-                    Ok(Some(session)) => LoadOutcome::Loaded(session),
+                    Ok(Some(session)) => {
+                        // Remove the corrupt primary so the next save's
+                        // backup rotation cannot overwrite the good `.bak`
+                        // with it. The new primary is written normally.
+                        let _ = fs::remove_file(&self.path);
+                        LoadOutcome::Loaded(session)
+                    }
                     _ => LoadOutcome::Corrupt(message),
                 };
             }
@@ -433,19 +439,16 @@ impl RestoreMatcher {
             .count()
     }
 
-    pub fn unmatched_special(&self) -> Vec<SavedWindow> {
+    /// Every saved window not claimed during the startup grace. These may
+    /// be alive but temporarily unenumerable (native fullscreen on another
+    /// Space, minimized app, ...) or genuinely gone; the daemon keeps them
+    /// for lazy matching instead of treating a later reappearance as a new
+    /// window and losing its layout.
+    pub fn unmatched(&self) -> Vec<SavedWindow> {
         self.saved
             .iter()
             .enumerate()
-            .filter(|(idx, saved)| {
-                !self.claimed_saved.contains(idx)
-                    && matches!(
-                        saved.placement,
-                        SavedPlacement::NativeFullscreen { .. }
-                            | SavedPlacement::Minimized { .. }
-                            | SavedPlacement::HiddenApplication { .. }
-                    )
-            })
+            .filter(|(idx, _)| !self.claimed_saved.contains(idx))
             .map(|(_, saved)| saved.clone())
             .collect()
     }
@@ -666,6 +669,10 @@ mod tests {
         store.save(&session).expect("create backup");
         std::fs::write(&path, b"{ not json").expect("corrupt primary");
         assert!(matches!(store.load(), LoadOutcome::Loaded(_)));
+        assert!(
+            !path.exists(),
+            "corrupt primary should be removed so the next save cannot rotate it over the good backup"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

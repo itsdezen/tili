@@ -429,7 +429,7 @@ async fn async_daemon_main(
                         // untouched, and `tili-menubar`'s refresh issues one
                         // of those (`Snapshot`) every time it wakes up.
                         if mutates {
-                            state.mark_session_dirty();
+                            state.mark_user_session_dirty();
                             sync_active_combos(&active_combos, &state);
                         }
                         changed = mutates || pids_changed;
@@ -483,6 +483,9 @@ async fn async_daemon_main(
                     last_save_at = Instant::now();
                 }
 
+                for pid in state.deferred_rescan_pids() {
+                    pending_pids.insert(pid);
+                }
                 let pids_changed = drain_pending_windows(&mut state, &mut pending_pids);
                 state.finalize_expired_removals();
                 state.finalize_expired_launches();
@@ -528,7 +531,7 @@ async fn async_daemon_main(
             Some(config) = config_updates.recv() => {
                 println!("tili-daemon: config reloaded from {}", config_path.display());
                 state.apply_config(&config);
-                state.mark_session_dirty();
+                state.mark_user_session_dirty();
                 sync_active_combos(&active_combos, &state);
                 sync_animation_tick(&mut animation_tick, &mut animation_tick_period, &state);
                 changed = true;
@@ -570,7 +573,7 @@ async fn async_daemon_main(
                     if auto_exits {
                         state.exit_mode();
                     }
-                    state.mark_session_dirty();
+                    state.mark_user_session_dirty();
                     changed = true;
                 }
                 sync_active_combos(&active_combos, &state);
@@ -579,7 +582,7 @@ async fn async_daemon_main(
                 // A monitor connected/disconnected/reconfigured (M9) — the
                 // callback doesn't say which, so just re-enumerate.
                 state.on_displays_changed();
-                state.mark_session_dirty();
+                state.mark_user_session_dirty();
                 changed = true;
             }
             Some(signal) = mouse_events.recv() => {
@@ -599,7 +602,7 @@ async fn async_daemon_main(
                     }
                     tili_ax::MouseSignal::ButtonUp => {
                         state.on_mouse_button_up();
-                        state.mark_session_dirty();
+                        state.mark_user_session_dirty();
                         // Catches a Dock icon click reactivating an app
                         // that was already the OS's nominal frontmost
                         // application (common when the current workspace

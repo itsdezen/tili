@@ -1209,10 +1209,10 @@ fn doctor(fix: bool) {
                                 "session restore",
                                 if restore.zero_match { ".." } else { "ok" },
                                 &format!(
-                                    "{} matched, {} missing, {} special deferred",
+                                    "{} matched, {} missing, {} deferred",
                                     restore.matched,
                                     restore.missing_normal,
-                                    restore.deferred_special
+                                    restore.deferred_windows
                                 ),
                             );
                         } else {
