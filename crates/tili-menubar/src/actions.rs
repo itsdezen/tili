@@ -70,6 +70,14 @@ pub fn handle(id: &MenuId) {
     let id: &str = id.as_ref();
     if let Some(name) = id.strip_prefix("workspace:") {
         let _ = crate::ipc::send(tili_ipc::Command::WorkspaceSwitch(name.to_string()));
+    } else if id == "copy-rule" {
+        // Kept out of this binary's own IPC/protocol code: `tili rule`
+        // already owns the snippet format, and `--copy` puts it on the
+        // pasteboard. A failed run (no focused window) simply leaves the
+        // clipboard untouched.
+        let _ = std::process::Command::new(tili_binary_path())
+            .args(["rule", "--copy"])
+            .status();
     } else if id == "open-settings" {
         open_settings();
     } else if id == "quit" {

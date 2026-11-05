@@ -139,6 +139,55 @@ fn frames_match(a: Rect, b: Rect) -> bool {
         && (a.height - b.height).abs() < FLOAT_DRIFT_EPSILON
 }
 
+/// One already-managed window considered as the "old" half of a native-tab
+/// replacement. Plain data so the decision is unit-testable without a live
+/// `AXUIElement`.
+#[derive(Clone, Copy)]
+struct NativeTabCandidate {
+    id: WindowId,
+    pid: i32,
+    frame: Rect,
+    positionable: bool,
+    pending_removal: bool,
+}
+
+/// Finds the unique managed window that a brand-new window is a native tab
+/// of. The signal is deliberately conservative: same process, same frame,
+/// and — unless the new window exposes a real `AXTabGroup` — the old window
+/// must have vanished from the current `AXWindows` scan (macOS only lists
+/// the active tab). Ambiguous matches are rejected rather than guessed.
+fn native_tab_target(
+    candidates: &[NativeTabCandidate],
+    fresh_ids: &HashSet<WindowId>,
+    new_id: WindowId,
+    new_pid: i32,
+    new_frame: Rect,
+    new_has_tab_group: bool,
+) -> Option<WindowId> {
+    let mut found = None;
+    for candidate in candidates {
+        if candidate.id == new_id
+            || candidate.pid != new_pid
+            || !candidate.positionable
+            || candidate.pending_removal
+            || !frames_match(candidate.frame, new_frame)
+        {
+            continue;
+        }
+        // A still-enumerable sibling is only trustworthy when the new
+        // window itself proves it lives in a tab group; otherwise it could
+        // be an ordinary second window that happens to share a frame.
+        if fresh_ids.contains(&candidate.id) && !new_has_tab_group {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(candidate.id);
+    }
+    found
+}
+
 /// One edge of a tiled window, for `magnet_resize_edge` to check independently — a corner drag
 /// moves two of these (one horizontal, one vertical) at once.
 #[derive(Debug, Clone, Copy)]
@@ -829,6 +878,35 @@ fn classify_new_window(
     }
 }
 
+/// Shared `WindowInfo` construction for `list_windows`/`focused_window`, so
+/// both report identical identity/metadata fields.
+fn window_info(
+    window: &AxWindow,
+    placement: Option<&Placement>,
+    focused_id: Option<WindowId>,
+) -> WindowInfo {
+    let frame = window.frame();
+    WindowInfo {
+        id: window.id(),
+        pid: window.pid(),
+        title: window.title().to_string(),
+        bundle_id: window.bundle_id().map(str::to_string),
+        workspace: placement.map(|p| p.workspace.clone()),
+        focused: focused_id == Some(window.id()),
+        role: window.role().to_string(),
+        subrole: window.subrole().map(str::to_string),
+        placement: placement
+            .map(|p| placement_info(&p.kind))
+            .unwrap_or(tili_ipc::PlacementInfo::Tiled),
+        frame: RectInfo {
+            x: frame.x,
+            y: frame.y,
+            width: frame.width,
+            height: frame.height,
+        },
+    }
+}
+
 fn placement_info(kind: &PlacementKind) -> tili_ipc::PlacementInfo {
     match kind {
         PlacementKind::Tiled => tili_ipc::PlacementInfo::Tiled,
@@ -847,6 +925,8 @@ fn placement_info(kind: &PlacementKind) -> tili_ipc::PlacementInfo {
 struct CompiledWorkspaceRule {
     app_id: String,
     workspace: String,
+    role: Option<String>,
+    subrole: Option<String>,
     /// See `tili_config::WorkspaceRule::always`'s doc comment.
     always: bool,
 }
@@ -856,6 +936,8 @@ struct CompiledWorkspaceRule {
 struct CompiledFloatingRule {
     app_id: String,
     title: Option<Regex>,
+    role: Option<String>,
+    subrole: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
     center: Option<bool>,
@@ -992,6 +1074,10 @@ pub struct WmState {
     /// resize to, so the released size always matches some whole number of
     /// `resize <mouse_resize_step>` keypresses — see `Settings::mouse_resize_step`.
     mouse_resize_step: f32,
+    /// Whether a brand-new window that looks like an app-owned native tab
+    /// is folded into the existing managed window instead of placed as a
+    /// separate tile/float. See `native_tab_target`.
+    native_tabs: bool,
     /// Mirrors `Settings::animate` — `apply_config` only swaps
     /// `frame_setter` between `InstantFrameSetter`/`TweenedFrameSetter`
     /// when this actually changes, so an unrelated config reload doesn't
@@ -1215,6 +1301,7 @@ impl Default for WmState {
             mouse_follows_focus: false,
             focus_follows_monitor: false,
             mouse_resize_step: 0.1,
+            native_tabs: true,
             animate: tili_config::AnimationSpeed::Off,
             config_loaded_once: false,
             startup_frontmost_revealed: false,
@@ -1538,6 +1625,125 @@ impl WmState {
             .retain(|_, &mut since| now.duration_since(since) < grace);
     }
 
+    /// Detects brand-new windows that are really the active member of an
+    /// app-owned native tab group, returning `new_id -> old_id` for each.
+    /// Only called for a fresh scan and only when `native_tabs` is enabled;
+    /// the returned map is empty in the common (non-tab) case.
+    fn native_tab_replacements(&self, pid: i32, fresh: &[AxWindow]) -> HashMap<WindowId, WindowId> {
+        if !self.native_tabs || self.restore_active() {
+            return HashMap::new();
+        }
+        // Ordinary reconciliation scans contain no new windows; skip the
+        // candidate pass entirely so this adds zero steady-state cost.
+        if !fresh.iter().any(|window| {
+            !self.placements.contains_key(&window.id())
+                && matches!(window.kind(), tili_ax::WindowKind::Standard)
+        }) {
+            return HashMap::new();
+        }
+        let candidates: Vec<NativeTabCandidate> = self
+            .windows
+            .iter()
+            .filter_map(|(&id, window)| {
+                let placement = self.placements.get(&id)?;
+                Some(NativeTabCandidate {
+                    id,
+                    pid: window.pid(),
+                    frame: window.frame(),
+                    positionable: matches!(
+                        placement.kind,
+                        PlacementKind::Tiled | PlacementKind::Floating { .. }
+                    ),
+                    pending_removal: self.pending_removal.contains_key(&id),
+                })
+            })
+            .collect();
+        if candidates.is_empty() {
+            return HashMap::new();
+        }
+        let fresh_ids: HashSet<WindowId> = fresh.iter().map(AxWindow::id).collect();
+        let mut replacements = HashMap::new();
+        for window in fresh {
+            let id = window.id();
+            if self.placements.contains_key(&id)
+                || !matches!(window.kind(), tili_ax::WindowKind::Standard)
+            {
+                continue;
+            }
+            if let Some(old_id) = native_tab_target(
+                &candidates,
+                &fresh_ids,
+                id,
+                pid,
+                window.frame(),
+                window.has_tab_group(),
+            ) {
+                replacements.insert(id, old_id);
+            }
+        }
+        replacements
+    }
+
+    /// Folds a native tab's newly-visible window into the existing managed
+    /// window: swaps the tree leaf and every per-window map from `old` to
+    /// `new` in place. No placement, rule matching, or relayout runs, so a
+    /// tab open/switch/close cannot move or resize the window. Returns the
+    /// new window back (`Some`) if `old` is no longer a positionable
+    /// managed window, so the caller can fall back to normal placement;
+    /// `None` means the replacement succeeded.
+    fn replace_window_id(&mut self, old: WindowId, new: AxWindow) -> Option<AxWindow> {
+        let new_id = new.id();
+        let Some(placement) = self.placements.remove(&old) else {
+            return Some(new);
+        };
+        if !matches!(
+            placement.kind,
+            PlacementKind::Tiled | PlacementKind::Floating { .. }
+        ) {
+            self.placements.insert(old, placement);
+            return Some(new);
+        }
+        let Some(old_window) = self.windows.remove(&old) else {
+            self.placements.insert(old, placement);
+            return Some(new);
+        };
+
+        let mut replaced_in_tree = false;
+        for tree in self.workspaces.values_mut() {
+            if tree.replace_window(old, new_id) {
+                replaced_in_tree = true;
+            }
+        }
+        if !replaced_in_tree {
+            // The placement said this was positionable, so a missing leaf
+            // is an inconsistent state — restore the old bookkeeping rather
+            // than silently creating a placement with no tree node.
+            self.windows.insert(old, old_window);
+            self.placements.insert(old, placement);
+            return Some(new);
+        }
+
+        self.windows.insert(new_id, new);
+        self.placements.insert(new_id, placement);
+        if let Some(anchor) = self.special_anchors.remove(&old) {
+            self.special_anchors.insert(new_id, anchor);
+        }
+        if let Some(manual) = self.special_float_manual.remove(&old) {
+            self.special_float_manual.insert(new_id, manual);
+        }
+        if self.floating_placed.remove(&old) {
+            self.floating_placed.insert(new_id);
+        }
+        if self.floating_centered.remove(&old) {
+            self.floating_centered.insert(new_id);
+        }
+        self.force_ignored_window_ids.remove(&old);
+        self.pending_removal.remove(&old);
+        self.pending_bundle_retries.remove(&old);
+        self.mark_session_dirty();
+        None
+    }
+
     /// Replaces one process's windows with a freshly-scanned set, in
     /// response to a `WmEvent::WindowsChanged { pid }`: whatever isn't in
     /// the fresh scan is gone (removed from whichever workspace/placement
@@ -1569,6 +1775,19 @@ impl WmState {
         if !fresh.is_empty() {
             self.pending_launch_pids.remove(&pid);
             self.unconfirmed_pids.remove(&pid);
+        }
+
+        // Native tab groups: the newly-visible tab is a fresh CGWindowID,
+        // but it is not a new managed window. Fold it into the existing
+        // placement before any of the new-window/rule/placement logic runs,
+        // and drop the old tab (still tracked, now hidden) out of this
+        // scan so it isn't mistaken for a normal close/repark.
+        let native_tab_replacements = self.native_tab_replacements(pid, &fresh);
+        let mut tab_replaced = false;
+        if !native_tab_replacements.is_empty() {
+            let replaced_old_ids: HashSet<WindowId> =
+                native_tab_replacements.values().copied().collect();
+            fresh.retain(|window| !replaced_old_ids.contains(&window.id()));
         }
 
         let fresh_ids: std::collections::HashSet<WindowId> =
@@ -1635,6 +1854,17 @@ impl WmState {
             // Present in this scan after all — un-pend it, whether or not
             // it was ever actually pending.
             self.pending_removal.remove(&id);
+            let window = if let Some(&old_id) = native_tab_replacements.get(&id) {
+                match self.replace_window_id(old_id, window) {
+                    None => {
+                        tab_replaced = true;
+                        continue;
+                    }
+                    Some(window) => window,
+                }
+            } else {
+                window
+            };
             let is_new = !self.placements.contains_key(&id);
             let kind = window.kind();
             let minimized = window.minimized();
@@ -1774,7 +2004,7 @@ impl WmState {
         // pass's placements are guaranteed to exist, closes that gap instead
         // of leaving the workspace's remembered focus on whatever was
         // focused before.
-        if placed_new_window {
+        if placed_new_window || tab_replaced {
             self.sync_focus_from_pid(pid);
             self.mark_session_dirty();
         }
@@ -2944,28 +3174,46 @@ impl WmState {
     }
 
     pub fn list_windows(&self) -> Vec<WindowInfo> {
+        let focused_id = self
+            .focused_node()
+            .and_then(|node| self.active_tree().window_at(node));
         self.windows
             .values()
-            .map(|w| {
-                let frame = w.frame();
-                WindowInfo {
-                    id: w.id(),
-                    pid: w.pid(),
-                    title: w.title().to_string(),
-                    placement: self
-                        .placements
-                        .get(&w.id())
-                        .map(|p| placement_info(&p.kind))
-                        .unwrap_or(tili_ipc::PlacementInfo::Tiled),
-                    frame: RectInfo {
-                        x: frame.x,
-                        y: frame.y,
-                        width: frame.width,
-                        height: frame.height,
-                    },
-                }
-            })
+            .map(|w| window_info(w, self.placements.get(&w.id()), focused_id))
             .collect()
+    }
+
+    /// The daemon's currently focused window, if any — shared by
+    /// `QueryState` and the copy-rule CLI.
+    pub fn focused_window(&self) -> Option<WindowInfo> {
+        let node = self.focused_node()?;
+        let id = self.active_tree().window_at(node)?;
+        let window = self.windows.get(&id)?;
+        Some(window_info(window, self.placements.get(&id), Some(id)))
+    }
+
+    /// One versioned full snapshot for `tili query state --json`.
+    pub fn query_state(&self) -> tili_ipc::QueryState {
+        tili_ipc::QueryState {
+            version: 1,
+            monitors: self.list_monitors(),
+            workspaces: self.list_workspaces(),
+            windows: self.list_windows(),
+            mode: self.current_mode().to_string(),
+            focused_window: self.focused_window(),
+        }
+    }
+
+    /// The compact subset streamed by `tili subscribe --json` — deliberately
+    /// excludes the full window list so a busy workspace doesn't reserialize
+    /// every window on every event.
+    pub fn subscribe_state(&self) -> tili_ipc::SubscribeState {
+        tili_ipc::SubscribeState {
+            monitors: self.list_monitors(),
+            workspaces: self.list_workspaces(),
+            mode: self.current_mode().to_string(),
+            focused_window: self.focused_window(),
+        }
     }
 
     /// Applies a freshly-loaded (or hot-reloaded) config: updates gaps
@@ -3102,6 +3350,8 @@ impl WmState {
                     Some(CompiledWorkspaceRule {
                         app_id: rule.app_id.clone(),
                         workspace: rule.workspace.clone(),
+                        role: rule.role.clone(),
+                        subrole: rule.subrole.clone(),
                         always: rule.always,
                     })
                 } else {
@@ -3140,6 +3390,8 @@ impl WmState {
                 Some(CompiledFloatingRule {
                     app_id: rule.app_id.clone(),
                     title,
+                    role: rule.role.clone(),
+                    subrole: rule.subrole.clone(),
                     width: rule.width,
                     height: rule.height,
                     center: rule.center,
@@ -3152,6 +3404,8 @@ impl WmState {
         self.mouse_follows_focus = config.settings.mouse_follows_focus;
         self.focus_follows_monitor = config.settings.focus_follows_monitor;
         self.mouse_resize_step = config.settings.mouse_resize_step;
+        self.native_tabs = config.settings.native_tabs;
+        tili_ax::set_call_timeout_ms(config.settings.ax_timeout_ms);
         if config.settings.animate != self.animate {
             self.animate = config.settings.animate;
             self.frame_setter = match self.animate {
@@ -3306,6 +3560,16 @@ impl WmState {
     /// stayed connected (resolution or arrangement change).
     pub fn on_displays_changed(&mut self) {
         let new_monitors = tili_ax::list_monitors();
+        self.on_displays_changed_with(new_monitors);
+    }
+
+    /// Testable half of `on_displays_changed`: the caller supplies the
+    /// freshly-enumerated monitor list, so synthetic multi-display
+    /// disconnect/rename/reconnect sequences can be exercised without real
+    /// hardware. The zero-monitor guard stays here (both the real caller and
+    /// tests need the same "treat it as sleep, keep the old snapshot"
+    /// behavior).
+    fn on_displays_changed_with(&mut self, new_monitors: Vec<Monitor>) {
         if new_monitors.is_empty() {
             // A momentary zero-display enumeration is, as far as observed,
             // always the whole system going to sleep (lid close with no
@@ -4300,6 +4564,22 @@ impl WmState {
         Ok(())
     }
 
+    /// Hotkey-friendly counterpart to `set_floating`: flips whichever
+    /// placement the focused window currently has. Returns an error only
+    /// when nothing is focused (or the window has no placement).
+    pub fn toggle_floating(&mut self) -> Result<(), String> {
+        let current = self.focused_node().ok_or("no window is focused")?;
+        let id = self
+            .active_tree()
+            .window_at(current)
+            .ok_or("focused window not found")?;
+        let floating = matches!(
+            self.placements.get(&id).map(|p| &p.kind),
+            Some(PlacementKind::Floating { .. })
+        );
+        self.set_floating(!floating)
+    }
+
     /// Switches which workspace is active on `focused_monitor`: parks every
     /// window in the outgoing workspace off-screen (tiled and floating
     /// alike), lays out the incoming one's tiled tree for real and
@@ -4968,13 +5248,26 @@ impl WmState {
             self.frame_setter.finish(window);
         }
         self.capture_manual_geometry_before_park(id);
+        let parking_monitor = self.parking_monitor_for(id);
         let Some(window) = self.windows.get_mut(&id) else {
             return;
         };
         let frame = window.frame();
         let (origin_x, origin_y) =
-            tili_ax::parking_position(&self.monitors, (frame.width, frame.height));
+            tili_ax::parking_position(&self.monitors, parking_monitor, (frame.width, frame.height));
         window.set_position(origin_x, origin_y);
+    }
+
+    /// The display a window's workspace should park on: whichever monitor
+    /// last showed that workspace, including while parked (see
+    /// `workspace_monitor`). `None` when the workspace was never shown or
+    /// its monitor disconnected — `parking_position` then falls back to the
+    /// main display.
+    fn parking_monitor_for(&self, id: WindowId) -> Option<u32> {
+        self.placements
+            .get(&id)
+            .and_then(|placement| self.workspace_monitor.get(&placement.workspace))
+            .copied()
     }
 
     fn monitor_frame(&self, monitor_id: u32) -> Option<Rect> {
@@ -5206,11 +5499,16 @@ impl WmState {
                 self.frame_setter.finish(window);
             }
             self.capture_manual_geometry_before_park(id);
+            let parking_monitor = self.parking_monitor_for(id);
             let Some(window) = self.windows.get(&id) else {
                 continue;
             };
             let frame = window.frame();
-            let origin = tili_ax::parking_position(&self.monitors, (frame.width, frame.height));
+            let origin = tili_ax::parking_position(
+                &self.monitors,
+                parking_monitor,
+                (frame.width, frame.height),
+            );
             targets.push((id, origin));
         }
         self.write_windows_concurrently(targets, |window: &mut AxWindow, (x, y): (f64, f64)| {
@@ -5304,6 +5602,11 @@ impl WmState {
         let bundle_id = window.bundle_id()?;
         self.floating_rules.iter().find(|rule| {
             rule.app_id == bundle_id
+                && rule.role.as_deref().is_none_or(|r| r == window.role())
+                && rule
+                    .subrole
+                    .as_deref()
+                    .is_none_or(|r| window.subrole() == Some(r))
                 && rule
                     .title
                     .as_ref()
@@ -5312,15 +5615,20 @@ impl WmState {
     }
 
     /// Finds the first configured `workspace-rules` entry matching
-    /// `window`'s bundle id — `None` if unresolvable or no rule matches.
-    /// Deliberately independent of `matching_floating_rule`: which
-    /// workspace a window is created on has nothing to do with whether it
-    /// ends up tiled or floating.
+    /// `window`'s bundle id (plus optional role/subrole) — `None` if
+    /// unresolvable or no rule matches. Deliberately independent of
+    /// `matching_floating_rule`: which workspace a window is created on has
+    /// nothing to do with whether it ends up tiled or floating.
     fn matching_workspace_rule(&self, window: &AxWindow) -> Option<&CompiledWorkspaceRule> {
         let bundle_id = window.bundle_id()?;
-        self.workspace_rules
-            .iter()
-            .find(|rule| rule.app_id == bundle_id)
+        self.workspace_rules.iter().find(|rule| {
+            rule.app_id == bundle_id
+                && rule.role.as_deref().is_none_or(|r| r == window.role())
+                && rule
+                    .subrole
+                    .as_deref()
+                    .is_none_or(|r| window.subrole() == Some(r))
+        })
     }
 
     /// `focused_monitor`'s frame, since new/reattached floating windows
@@ -6401,6 +6709,127 @@ mod tests {
     }
 
     #[test]
+    fn native_tab_target_requires_same_pid_frame_and_a_missing_old_window() {
+        let frame = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let candidates = [NativeTabCandidate {
+            id: 1,
+            pid: 42,
+            frame,
+            positionable: true,
+            pending_removal: false,
+        }];
+        let mut fresh = HashSet::new();
+        fresh.insert(2);
+        assert_eq!(
+            native_tab_target(&candidates, &fresh, 2, 42, frame, false),
+            Some(1)
+        );
+        // Wrong pid or frame never matches.
+        assert_eq!(
+            native_tab_target(&candidates, &fresh, 2, 7, frame, false),
+            None
+        );
+        assert_eq!(
+            native_tab_target(&candidates, &fresh, 2, 42, Rect { x: 10.0, ..frame }, false),
+            None
+        );
+    }
+
+    #[test]
+    fn native_tab_target_ignores_a_still_enumerable_sibling_without_tab_group() {
+        let frame = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let candidates = [NativeTabCandidate {
+            id: 1,
+            pid: 42,
+            frame,
+            positionable: true,
+            pending_removal: false,
+        }];
+        let fresh: HashSet<WindowId> = [1, 2].into_iter().collect();
+        assert_eq!(
+            native_tab_target(&candidates, &fresh, 2, 42, frame, false),
+            None
+        );
+        assert_eq!(
+            native_tab_target(&candidates, &fresh, 2, 42, frame, true),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn native_tab_target_rejects_ambiguous_matches() {
+        let frame = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let candidates = [
+            NativeTabCandidate {
+                id: 1,
+                pid: 42,
+                frame,
+                positionable: true,
+                pending_removal: false,
+            },
+            NativeTabCandidate {
+                id: 3,
+                pid: 42,
+                frame,
+                positionable: true,
+                pending_removal: false,
+            },
+        ];
+        let fresh: HashSet<WindowId> = [2].into_iter().collect();
+        assert_eq!(
+            native_tab_target(&candidates, &fresh, 2, 42, frame, false),
+            None
+        );
+    }
+
+    #[test]
+    fn native_tab_target_skips_special_and_pending_windows() {
+        let frame = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let fresh: HashSet<WindowId> = [2].into_iter().collect();
+        for candidate in [
+            NativeTabCandidate {
+                id: 1,
+                pid: 42,
+                frame,
+                positionable: false,
+                pending_removal: false,
+            },
+            NativeTabCandidate {
+                id: 1,
+                pid: 42,
+                frame,
+                positionable: true,
+                pending_removal: true,
+            },
+        ] {
+            assert_eq!(
+                native_tab_target(&[candidate], &fresh, 2, 42, frame, false),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn cascade_offset_is_symmetric_around_dead_center_and_wraps() {
         let step = FLOATING_CASCADE_STEP;
         assert_eq!(cascade_offset(0), (0.0, 0.0));
@@ -6848,6 +7277,71 @@ mod tests {
             state.placements.get(&id).map(|p| &p.kind),
             Some(PlacementKind::Floating { manual: Some(g) }) if *g == captured
         ));
+    }
+
+    #[test]
+    fn parking_monitor_for_uses_the_workspaces_last_display() {
+        let mut state = floating_test_state();
+        state.workspace_monitor.insert("secondary".to_string(), 42);
+        state.placements.insert(
+            1,
+            Placement {
+                workspace: "secondary".to_string(),
+                kind: PlacementKind::Tiled,
+            },
+        );
+        assert_eq!(state.parking_monitor_for(1), Some(42));
+        assert_eq!(state.parking_monitor_for(999), None);
+    }
+
+    #[test]
+    fn display_rename_remaps_workspace_monitor_without_a_park_round_trip() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        state.workspace_monitor.insert("side".to_string(), 2);
+        state.active_workspace.insert(2, "side".to_string());
+
+        let mut renamed = two_monitor_fixture();
+        renamed[1].id = 3;
+        state.on_displays_changed_with(renamed);
+
+        assert_eq!(state.workspace_monitor.get("side"), Some(&3));
+        assert_eq!(state.active_workspace.get(&2), None);
+        assert_eq!(
+            state.active_workspace.get(&3).map(String::as_str),
+            Some("side")
+        );
+    }
+
+    #[test]
+    fn disconnecting_a_display_keeps_its_workspace_parked_and_ready_to_fall_back() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        state.workspace_monitor.insert("side".to_string(), 2);
+        state.active_workspace.insert(2, "side".to_string());
+
+        state.on_displays_changed_with(vec![two_monitor_fixture()[0]]);
+
+        // The workspace still remembers display 2; `parking_position` sees
+        // that id is no longer connected and falls back to main until the
+        // display comes back or the workspace is shown elsewhere.
+        assert_eq!(state.workspace_monitor.get("side"), Some(&2));
+        assert_eq!(
+            tili_ax::parking_position(&state.monitors, Some(2), (100.0, 100.0)),
+            (1919.0, 1079.0)
+        );
+    }
+
+    #[test]
+    fn an_empty_display_scan_is_treated_as_sleep_and_keeps_the_old_snapshot() {
+        let mut state = floating_test_state();
+        state.monitors = two_monitor_fixture();
+        let before = state.monitors.clone();
+
+        state.on_displays_changed_with(Vec::new());
+
+        assert_eq!(state.monitors, before);
+        assert_eq!(state.focused_monitor, 1);
     }
 
     #[test]

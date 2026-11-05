@@ -43,7 +43,9 @@ crates/
 
 macOS exposes no public API to control Spaces, so inactive-workspace
 windows are parked off-screen rather than relying on real Spaces — the same
-technique other public-API-only tools in this space use.
+technique other public-API-only tools in this space use. A workspace parks
+on the display that last showed it, falling back to the main display only
+when that display is disconnected.
 
 ## Design invariants
 
@@ -63,6 +65,10 @@ preference:
   itself if not granted.
 - **All real window-frame mutations go through `WindowFrameSetter`** — the
   one seam that knows how a window's frame actually gets set.
+- **Native app tabs are opaque.** A new window that is really the active
+  member of an app-owned tab group replaces the managed window id in place;
+  it never creates a placement or triggers a relayout. Full tab-group
+  membership/restore is future work.
 - **Hotkey- and socket-triggered commands both go through `dispatch()`** —
   no parallel command path.
 

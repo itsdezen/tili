@@ -15,9 +15,9 @@ belongs in `tili-daemon` behind a `Command` instead.
 new variant there (not JSON-shape sniffing) when a command gets a new
 payload type.
 
-Three exceptions to "no business logic here," all intercepted in `main()`
-before the socket-connecting code path (each `return`s instead of falling
-through to the generic `send()`/`print_response` path):
+Several exceptions to "no business logic here," all intercepted in
+`main()` before the generic socket-connecting path (each `return`s instead
+of falling through to `send()`/`print_response`):
 
 - `tili start`/`stop` manage tili-daemon's LaunchAgent entirely on the
   local filesystem, never touching the daemon's socket. `start_daemon()`
@@ -61,6 +61,16 @@ through to the generic `send()`/`print_response` path):
   guessed at. One confirm gate for every fix at once (reusing
   `confirm_default_start`'s Enter-to-continue pattern), skippable with
   `tili doctor --fix` for scripting.
+
+`tili query`/`tili subscribe`/`tili rule` are handled before the generic
+single-response path too. `query` sends `QueryState` (or one of the
+`List*` commands) and prints compact JSON; `subscribe` writes
+`Command::Subscribe` and then loops over the daemon's length-prefixed
+frames, printing each `SubscribeEvent` as one JSON line until EOF/Ctrl-C;
+`rule` asks for `QueryState`, formats a copy-pasteable `floating-rules` or
+`workspace-rules` snippet from the focused window, and `--copy` pipes it to
+`pbcopy`. The menu bar's "Copy rule for focused window" item simply spawns
+`tili rule --copy`, keeping snippet formatting in one place.
 
 `tili start`/`stop`/`uninstall` manage `tili-menubar`'s LaunchAgent
 alongside the daemon's own (see [tili-menubar.md](tili-menubar.md)), so the

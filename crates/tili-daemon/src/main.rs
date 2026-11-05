@@ -192,6 +192,14 @@ async fn async_daemon_main(
     // connection's dedicated task (spawned in the accept arm, never
     // touching `WmState` itself) can wake up without polling.
     let change_notify = Arc::new(tokio::sync::Notify::new());
+    // `Command::Subscribe` fan-out: the main loop owns the only `WmState`,
+    // so it builds the compact event here and broadcasts it to every
+    // connected subscriber task. Capacity is intentionally small — a
+    // subscriber that can't keep up gets a `Lagged` and simply resumes at
+    // the next event (each event carries a full compact state, so nothing
+    // is permanently lost), rather than letting an unbounded queue grow.
+    let (subscribe_tx, _) = tokio::sync::broadcast::channel::<tili_ipc::SubscribeEvent>(8);
+    let mut subscribe_seq: u64 = 0;
 
     // Debounces `WmEvent::WindowsChanged`: a pid lands here instead of
     // being rescanned immediately, and every pid queued gets exactly one
@@ -411,6 +419,25 @@ async fn async_daemon_main(
                         let notified = change_notify.clone().notified_owned();
                         tokio::spawn(handle_wait_for_change(stream, notified));
                     }
+                    Ok(Command::Subscribe) => {
+                        // The initial event includes the focused window, so
+                        // resolve real focus once before snapshotting it.
+                        // Later events use whatever focus bookkeeping the
+                        // ordinary command/event paths have updated.
+                        state.sync_focus_from_frontmost();
+                        // Built once here, on the one task that owns
+                        // `WmState`; the subscriber task below only owns its
+                        // socket and the broadcast receiver, exactly like
+                        // `WaitForChange`.
+                        let initial = tili_ipc::SubscribeEvent {
+                            version: 1,
+                            seq: subscribe_seq,
+                            event: "snapshot".to_string(),
+                            state: state.subscribe_state(),
+                        };
+                        let receiver = subscribe_tx.subscribe();
+                        tokio::spawn(handle_subscribe(stream, initial, receiver));
+                    }
                     Ok(command) => {
                         // Read-only queries never mutate `WmState`, so they
                         // can never be a change a blocked `WaitForChange`
@@ -621,6 +648,18 @@ async fn async_daemon_main(
         }
         if changed {
             change_notify.notify_waiters();
+            // Only build/serialize an event when at least one subscriber is
+            // connected; an idle daemon with no subscribers pays nothing.
+            if subscribe_tx.receiver_count() > 0 {
+                subscribe_seq = subscribe_seq.wrapping_add(1);
+                let event = tili_ipc::SubscribeEvent {
+                    version: 1,
+                    seq: subscribe_seq,
+                    event: "state_changed".to_string(),
+                    state: state.subscribe_state(),
+                };
+                let _ = subscribe_tx.send(event);
+            }
         }
     }
 
@@ -783,6 +822,62 @@ async fn handle_wait_for_change(
     let _ = socket::write_response(&mut stream, &Response::Ok).await;
 }
 
+/// Streams `SubscribeEvent`s to one `tili subscribe --json` client. Runs
+/// entirely off the main loop, like `handle_wait_for_change`: it never
+/// touches `WmState`, only awaits the broadcast channel and writes to its
+/// own socket. A client that disconnects is noticed via EOF on the read
+/// side, so an idle subscriber task doesn't outlive its connection.
+async fn handle_subscribe(
+    mut stream: tokio::net::UnixStream,
+    initial: tili_ipc::SubscribeEvent,
+    mut receiver: tokio::sync::broadcast::Receiver<tili_ipc::SubscribeEvent>,
+) {
+    if !write_subscribe_event(&mut stream, &initial).await {
+        return;
+    }
+    loop {
+        tokio::select! {
+            event = receiver.recv() => match event {
+                Ok(event) => {
+                    if !write_subscribe_event(&mut stream, &event).await {
+                        return;
+                    }
+                }
+                // A slow client missed events; the next full-state event
+                // is enough to resynchronize, so keep going.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            },
+            ready = stream.readable() => {
+                if ready.is_err() {
+                    return;
+                }
+                // `readable()` can wake spuriously; confirm genuine EOF
+                // before ending the subscription (same pattern as
+                // `handle_wait_for_change`).
+                let mut probe = [0_u8; 1];
+                match stream.try_read(&mut probe) {
+                    Ok(_) => return,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+}
+
+async fn write_subscribe_event(
+    stream: &mut tokio::net::UnixStream,
+    event: &tili_ipc::SubscribeEvent,
+) -> bool {
+    let Ok(value) = serde_json::to_value(event) else {
+        return false;
+    };
+    socket::write_response(stream, &Response::OkWithPayload(value))
+        .await
+        .is_ok()
+}
+
 /// Applies every pid queued by a prior `WmEvent::WindowsChanged`, registering
 /// any new windows into `WmState` before whatever's about to run next reads
 /// it. Shared by `maintenance_tick` (its original, 30ms-debounced caller) and
@@ -812,6 +907,8 @@ pub(crate) fn command_is_read_only(command: &Command) -> bool {
             | Command::CurrentMode
             | Command::MenubarStyle
             | Command::Snapshot
+            | Command::QueryState
+            | Command::Subscribe
     )
 }
 
@@ -1001,6 +1098,8 @@ mod tests {
         assert!(command_is_read_only(&Command::CurrentMode));
         assert!(command_is_read_only(&Command::MenubarStyle));
         assert!(command_is_read_only(&Command::Snapshot));
+        assert!(command_is_read_only(&Command::QueryState));
+        assert!(command_is_read_only(&Command::Subscribe));
     }
 
     #[test]
@@ -1061,6 +1160,8 @@ mod tests {
             Command::CurrentMode,
             Command::MenubarStyle,
             Command::Snapshot,
+            Command::QueryState,
+            Command::Subscribe,
         ] {
             dispatch(&mut state, command);
             assert_eq!(

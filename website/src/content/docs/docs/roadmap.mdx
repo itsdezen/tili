@@ -3,63 +3,35 @@ title: Roadmap
 description: What tili has shipped and what's planned next.
 ---
 
+## In progress — v0.13.0
+
+- **Per-display parking.** Inactive workspaces park on their own display.
+- **`tili query` and `tili subscribe --json`.** JSON snapshots and
+  line-delimited events for status bars and scripts.
+- **Window metadata and rules.** `bundle_id`, `workspace`, `focused`,
+  `role`, `subrole`; copy-rule CLI/menu bar; `role`/`subrole` matchers.
+- **Native-tab guard.** App-owned tabs stay inside the app: opening,
+  closing, or switching tabs must not create placements or relayout.
+- **Floating toggle.** `toggle-floating` command and default hotkey.
+- **Responsiveness.** Configurable AX timeout, 500ms default.
+
 ## Shipped
 
-tili's first public release already carries a complete, daily-drivable
-feature set:
-
-- BSP tiling (`Tiles`) and Accordion layouts, with i3-style directional
-  focus/move, join, resize, and balance.
-- Named workspaces, off-screen virtualization, and full multi-monitor
-  support (hot-plug/unplug safe).
-- KDL config with file-watch hot-reload — no daemon restart needed.
-- Built-in global hotkeys, with switchable keybinding modes.
-- Floating rules (auto-center/size on creation, runtime tile/float toggle,
-  per-rule mode override).
-- Workspace rules — auto-assign an app to a specific workspace on creation,
-  independent of whether it tiles or floats.
-- Mouse-follows-focus and focus-follows-monitor.
-- Native and tiled fullscreen, window close, and `summon` (find-and-raise
-  by title/bundle id).
-- Session state and recovery: Tiles/Accordion layout, focus, active
-  workspace per monitor, floating geometry, tiled fullscreen, and
-  native-fullscreen/minimized/hidden anchors across restart or crash;
-  versioned atomic state with startup matching and crash recovery.
-- A menu bar workspace badge (`tili-menubar`) that stays in sync with the
-  daemon over an event-driven long-poll, not polling.
-- LaunchAgent-managed `start`/`stop`/`uninstall`, the latter leaving
-  nothing behind — config, logs, socket, and the Accessibility grant are
-  all cleaned up automatically.
-- A real, signed release pipeline.
-
-See the
-[CHANGELOG](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md) on
-GitHub for the full itemized list.
+- **v0.12.0** — session state and recovery.
+- Earlier releases — see the [CHANGELOG](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md).
 
 ## Planned
 
-Nothing here is scheduled — it's the backlog of ideas judged worth doing
-eventually, roughly in the order they'd likely land:
-
-- **Third-party status bar integration** (e.g. SketchyBar) — either a
-  `tili subscribe` push protocol, or a simpler exec-hook
-  (`on-workspace-change`) for tools that don't want to speak tili's
-  protocol directly.
-- **Tabbed/stacked containers** — a third container kind between `Tiles`
-  and `Accordion`.
-- **Sticky windows** — windows that stay visible across workspace switches
-  instead of parking.
-- **Native-tab support** — deferred until macOS's native-tab semantics can
-  be relied on consistently across apps.
+- **Tabbed/stacked containers.** A third container kind; design spike first.
+- **Full native-tab support.** Only if the guard proves insufficient;
+  depends on reliable AX tab semantics.
+- **Sticky windows.** Stay visible across workspace switches.
 
 ## Design principles
 
-- **Public API only.** One documented private call — everything else is
-  public Accessibility API. No SIP disable, ever.
-- **Event-driven, not polling.** Every change to the daemon's event loop is
-  checked against idle CPU usage, not just correctness.
-- **The animation seam stays a seam.** `WindowFrameSetter` is the only
-  thing allowed to know how a window's frame actually gets set.
+- **Public API only.** One documented private call; no SIP disable, ever.
+- **Event-driven, not polling.**
+- **The animation seam stays a seam.**
 
 Full detail lives in
 [ROADMAP.md](https://github.com/itsdezen/tili/blob/main/ROADMAP.md) and

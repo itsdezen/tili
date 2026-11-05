@@ -89,6 +89,11 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
         }
         Command::WorkspaceBack => result_response(state.switch_to_previous_workspace()),
         Command::SetFloating(floating) => result_response(state.set_floating(floating)),
+        Command::ToggleFloating => result_response(state.toggle_floating()),
+        Command::QueryState => payload_response(state.query_state()),
+        Command::Subscribe => Response::Err {
+            message: "subscribe is handled by the daemon's event loop".to_string(),
+        },
         Command::Doctor => {
             // Both permission checks are plain, non-prompting reads at this
             // point: the daemon is only alive to answer this at all because
@@ -141,14 +146,19 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
 /// before running `command`.
 ///
 /// Every mutating command does: they act on "whatever's currently focused",
-/// and the bookkeeping is only correct as of the last sync. Read-only
+/// and the bookkeeping is only correct as of the last sync. Most read-only
 /// queries skip the system-wide AX query outright, because none of their
-/// payloads reads the focus bookkeeping (it's `workspace_focus` plus each
-/// tree's recorded focus, and no query reports either), so there's no
-/// exception list to maintain here — read-only and "doesn't read focus" are
-/// the same set.
+/// payloads reads the focus bookkeeping. `ListWindows` and `QueryState` are
+/// the exceptions: they are read-only for change-detection but report a
+/// `focused` flag per window, so they pay for one sync.
 fn needs_focus_sync(command: &Command) -> bool {
+    // `ListWindows`/`QueryState` are read-only in the `WaitForChange`
+    // sense, but their payloads now include each window's `focused` flag,
+    // so they do read the focus bookkeeping. Everything else read-only
+    // (`Snapshot`, `ListWorkspaces`, ...) still skips the system-wide AX
+    // query.
     !crate::command_is_read_only(command)
+        || matches!(command, Command::ListWindows | Command::QueryState)
 }
 
 fn to_tree_direction(dir: tili_ipc::Direction) -> tili_tree::Direction {
@@ -195,24 +205,42 @@ mod tests {
     fn read_only_commands() -> Vec<Command> {
         vec![
             Command::Ping,
-            Command::ListWindows,
             Command::ListWorkspaces,
             Command::ListMonitors,
             Command::Doctor,
             Command::CurrentMode,
             Command::MenubarStyle,
             Command::Snapshot,
+            Command::Subscribe,
         ]
     }
 
     #[test]
-    fn read_only_commands_skip_the_focus_sync() {
+    fn query_state_returns_a_versioned_empty_snapshot() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::QueryState);
+        let Response::OkWithPayload(payload) = response else {
+            panic!("expected OkWithPayload");
+        };
+        let query: tili_ipc::QueryState = serde_json::from_value(payload).unwrap();
+        assert_eq!(query.version, 1);
+        assert_eq!(query.workspaces.len(), 1);
+        assert!(query.windows.is_empty());
+        assert!(query.focused_window.is_none());
+    }
+
+    #[test]
+    fn read_only_commands_skip_the_focus_sync_unless_they_report_focused_windows() {
         for command in read_only_commands() {
             assert!(
                 !needs_focus_sync(&command),
                 "{command:?} doesn't read the focus bookkeeping, so it must not pay for the sync"
             );
         }
+        // Read-only for change-detection, but their payload includes a
+        // `focused` flag, so they must resolve real focus first.
+        assert!(needs_focus_sync(&Command::ListWindows));
+        assert!(needs_focus_sync(&Command::QueryState));
     }
 
     #[test]
@@ -508,6 +536,13 @@ mod tests {
     fn set_floating_with_no_windows_is_an_error() {
         let mut state = WmState::default();
         let response = dispatch(&mut state, Command::SetFloating(true));
+        assert!(matches!(response, Response::Err { .. }));
+    }
+
+    #[test]
+    fn toggle_floating_with_no_windows_is_an_error() {
+        let mut state = WmState::default();
+        let response = dispatch(&mut state, Command::ToggleFloating);
         assert!(matches!(response, Response::Err { .. }));
     }
 

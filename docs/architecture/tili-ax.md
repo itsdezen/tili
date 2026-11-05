@@ -72,6 +72,14 @@ occasionally missing a truly non-resizable one. `tili-daemon`'s
 regardless of `kind` or any matching floating rule — see
 `docs/architecture/tili-daemon.md`.
 
+Every per-app `AXUIElement` connection gets a messaging timeout via
+`AXUIElementSetMessagingTimeout` (`apply_call_timeout`), because a hung app
+would otherwise block `tili-daemon`'s single event loop indefinitely. The
+default is 500ms; `settings { ax-timeout-ms N }` overrides a process-wide
+atomic (clamped to 50–5000ms) and applies to connections opened after the
+next config load, not to already-open ones. `tili-ax` also exposes
+`call_timeout_ms()` for diagnostics.
+
 `AxWindow::set_frame`/`set_position`/`set_size`/`focus` are the only place
 real windows get moved/resized/raised — `set_frame` sets position before
 size (some apps clamp size based on current position), `set_position` only
@@ -209,6 +217,16 @@ it. `tili-daemon`'s `tiled_layout_inputs` is what actually folds this
 height into the effective top gap (gated by the `gaps` config's
 `ignore-notch` flag) — `Monitor.notch` is already the correct amount to
 add there, with no further adjustment needed on the daemon side.
+
+`parking_position(monitors, target_monitor, size)` parks a window one point
+inside the target display's own bottom-right corner. `tili-daemon` passes
+whichever monitor `workspace_monitor` last recorded for that window's
+workspace (including while the workspace is parked), so an inactive
+workspace on a secondary display stays on that display instead of being
+dragged to the main one. An unknown or disconnected id falls back to the
+main display, then to the first connected display. The one-point inset is
+the same AppKit-clamp workaround described in
+[tili-daemon.md](tili-daemon.md)'s parking section.
 
 `spawn_display_watcher()` registers a
 `CGDisplayRegisterReconfigurationCallback` on its own dedicated `CFRunLoop`

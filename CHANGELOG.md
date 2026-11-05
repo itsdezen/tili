@@ -8,6 +8,30 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-display parking.** An inactive workspace's windows now park on the
+  display that last showed that workspace instead of always on the main
+  display. Unknown/disconnected displays fall back to main.
+- **JSON query and subscription.** `tili query state --json` (plus
+  `windows`/`workspaces`/`monitors`) and `tili subscribe --json`, which
+  streams a versioned `snapshot` event followed by coalesced
+  `state_changed` events with a monotonic `seq`. Window payloads now
+  include `bundle_id`, `workspace`, `focused`, `role`, and `subrole`.
+- **Copy-rule ergonomics.** `tili rule [--workspace <name>] [--copy]`
+  prints/copies a ready-to-paste `floating-rules` or `workspace-rules`
+  snippet for the focused window; the menu bar exposes the same action.
+- **`role`/`subrole` rule matchers.** `floating-rules` and
+  `workspace-rules` accept optional exact-match AX role/subrole fields.
+- **Native-tab guard.** Opening, closing, or switching an app-owned native
+  tab no longer creates a placement, re-applies rules, cascades, or
+  relayouts. The active tab replaces the managed window id in place;
+  background tabs stay owned by the app. Disable with
+  `settings { native-tabs #false }`.
+- **`tili toggle-floating`** and a default `alt-shift-f` binding.
+- **Configurable AX timeout.** `settings { ax-timeout-ms 500 }` controls
+  the per-app Accessibility messaging timeout (clamped to 50–5000ms).
+
 ## [0.12.0] - 2026-11-05
 
 ### Added

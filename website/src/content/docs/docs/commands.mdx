@@ -46,7 +46,11 @@ resolve from keybindings too.
 | `tili fullscreen [--native]` | Toggle the focused window fullscreen (tiled, or `--native` for a real separate Space) |
 | `tili close` | Close the focused window (best-effort `AXCloseButton` press) |
 | `tili summon <query>` | Focus (and raise) the first known window whose title or bundle id contains `query` |
-| `tili set-floating <on\|off>` | Toggle the focused window between tiled and floating at runtime |
+| `tili set-floating <on\|off>` | Set the focused window's tiled/floating placement |
+| `tili toggle-floating` | Flip the focused window between tiled and floating |
+| `tili query [state\|windows\|workspaces\|monitors] [--json]` | Print a machine-readable JSON snapshot |
+| `tili subscribe [--json]` | Stream JSON state events until interrupted |
+| `tili rule [--workspace <name>] [--copy]` | Print/copy a rule snippet for the focused window |
 | `tili workspace <name>` | Switch the active workspace. Errors if `name` isn't declared in config — workspaces are never created on the fly. |
 | `tili workspace-back` | Switch back to whichever workspace was active before this one |
 | `tili move-to-workspace <name>` | Move the focused window to another workspace without switching focus to it. **Note:** the equivalent keybinding command string is spelled `move-node-to-workspace <name>`, not `move-to-workspace` — the CLI and the keybinding parser chose different verbs for the same underlying command. |
@@ -55,6 +59,28 @@ resolve from keybindings too.
 | `tili focus-monitor` | Cycle which connected monitor commands target (no-op with one monitor) |
 | `tili list-monitors` | List connected monitors, marking which one is focused |
 | `tili list-windows` | List known windows (tiled/floating, frame, pid) |
+
+## JSON query and subscription
+
+```sh
+tili query state --json
+tili query windows --json
+tili subscribe --json
+```
+
+`query` prints one JSON document and exits. `query state` is versioned and
+includes every window's `bundle_id`, `workspace`, `focused`, `role`,
+`subrole`, placement, and frame; the other `query` targets print just that
+array. `subscribe` keeps the connection open and prints one JSON event per
+line: an initial `"snapshot"`, then a coalesced `"state_changed"` event with
+a monotonic `seq` whenever state changes. Events carry monitors,
+workspaces, mode, and the focused window — use `query state` when you need
+the full window list.
+
+`tili rule` prints a ready-to-paste `floating-rules` snippet for the focused
+window; `--workspace <name>` emits a `workspace-rules` snippet, and
+`--copy` puts it on the clipboard. The menu bar's "Copy rule for focused
+window" item does the same.
 
 ## Keybinding-only command strings
 

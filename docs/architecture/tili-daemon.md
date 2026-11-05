@@ -422,22 +422,26 @@ straight to their final frames — on mouse-up, never live during the drag
 itself.
 
 `park()` targets `tili_ax::parking_position` — a window's origin lands just
-a point inside the main monitor's own bottom-right corner (not pushed
-*outside* every monitor's bounds, `combined_bounds`'s original purpose):
-confirmed on real hardware that AppKit clamps a `kAXPositionAttribute`
-write requesting somewhere totally unreachable back to near a real screen's
-edge regardless of how far outside it's requested (it only constrains the
-origin, not the window's full frame). Keeping the origin legitimately
-on-screen and letting the window's own size extend past the corner (a
-technique other AX-based tiling WMs use too) avoids that clamp entirely
-instead of fighting it. Every parked window — however many are parked at
-once — targets this exact same coordinate; an earlier version offset each
-additional one inward by a step so they wouldn't all land on the identical
-point, but that shift moves the origin off the one spot the "hidden
-regardless of size" guarantee depends on, exposing a real on-screen strip
-as wide as the shift. Nothing actually needs parked windows to be
-spatially distinct (they're all invisible at the same point regardless of
-how many share it), so the offsetting was simply removed. This also keeps
+a point inside **its workspace's own display's** bottom-right corner
+(`workspace_monitor` remembers that display, including while parked; an
+unknown/disconnected id falls back to the main display). This keeps a
+workspace switch on a secondary monitor local instead of dragging every
+parked window across displays. It is not pushed *outside* every monitor's
+bounds (`combined_bounds`'s original purpose): confirmed on real hardware
+that AppKit clamps a `kAXPositionAttribute` write requesting somewhere
+totally unreachable back to near a real screen's edge regardless of how far
+outside it's requested (it only constrains the origin, not the window's full
+frame). Keeping the origin legitimately on-screen and letting the window's
+own size extend past the corner (a technique other AX-based tiling WMs use
+too) avoids that clamp entirely instead of fighting it. Every parked window
+on a given display — however many are parked at once — targets that
+display's exact same coordinate; an earlier version offset each additional
+one inward by a step so they wouldn't all land on the identical point, but
+that shift moves the origin off the one spot the "hidden regardless of size"
+guarantee depends on, exposing a real on-screen strip as wide as the shift.
+Nothing actually needs parked windows to be spatially distinct (they're all
+invisible at the same point regardless of how many share it), so the
+offsetting was simply removed. This also keeps
 `park`'s own `set_position` write properly idempotent for
 `reconcile_existing_placement`'s re-assertion: that write fires a real
 `AXWindowMoved` notification (self-triggered writes aren't suppressed
@@ -558,6 +562,33 @@ trip from shredding the rest of the saved layout.
 - `tili uninstall` removes the primary and backup session files.
   `tili doctor` reports the file's version/window count and the last
   restore's matched/missing/deferred counts.
+
+## Native tab guard (v0.13)
+
+macOS app-owned tab groups (Finder, Terminal, Ghostty, ...) expose only the
+active tab as a normal `AXWindow`; background tabs may be absent from
+`AXWindows`, and `AXTabGroup` children are tab buttons rather than window
+ids. To tili that looks like a brand-new window every time the user opens or
+switches a tab, which used to re-run floating rules, cascade centered
+windows, and relayout the tree.
+
+`apply_windows_changed` now folds such a window into the existing placement
+before any new-window logic runs. Detection is deliberately conservative:
+
+- same pid as a managed `Tiled`/`Floating` window,
+- same frame (within `FLOAT_DRIFT_EPSILON`),
+- the old window is no longer in the current `AXWindows` scan, or the new
+  window exposes an `AXTabGroup` child,
+- exactly one candidate (ambiguous matches are skipped).
+
+`replace_window_id` then swaps the tree leaf's `WindowId` and every
+per-window map (placements, anchors, manual geometry, floating bookkeeping)
+in place. No placement, rule match, relayout, or frame write happens, so a
+tab open/switch/close cannot move or resize the window. Background tabs are
+intentionally not tracked: the app owns them, and session persistence keeps
+only the currently visible tab. `settings { native-tabs #false }` restores
+the old behavior if an app is detected incorrectly. This is a compatibility
+guard, not full tab-group membership/restore (which remains future work).
 
 ## Mouse-follows-focus / focus-follows-monitor (M10)
 
@@ -1070,6 +1101,15 @@ accessors instead of reading one: `SnapshotInfo` bundles
 read-only, no focus sync at all). It's excluded from `mutates` for the same
 reason those four commands are — see [tili-menubar.md](tili-menubar.md).
 
+`Command::QueryState` composes `list_monitors`/`list_workspaces`/
+`list_windows`/`focused_window` into the versioned external snapshot used by
+`tili query state --json`; `ListWindows` and `QueryState` are read-only for
+change-detection but do pay one focus sync because their payloads include a
+`focused` flag. `Command::Subscribe` never reaches `dispatch()`: the accept
+loop builds the initial `SubscribeEvent` from `subscribe_state()` and
+spawns `handle_subscribe`, then broadcasts a fresh compact state after each
+coalesced change — only while at least one subscriber is connected.
+
 `src/dispatch.rs` has the single `dispatch(&mut WmState, Command) ->
 Response` function — both the Unix-socket handler and the global-hotkey
 handler must call this same function, never a separate code path, or
@@ -1122,7 +1162,8 @@ worker threads (`Builder::new_multi_thread().worker_threads(2)`) and
 `block_on`s `async_daemon_main` — the whole daemon body that used to be
 `main()` itself, essentially unchanged otherwise. Two workers rather than the
 one-per-core default: the select loop is driven by the `block_on` thread, so
-the pool only serves spawned tasks (`WaitForChange` long-polls and the
+the pool only serves spawned tasks (`WaitForChange` long-polls,
+`Subscribe` streams, and the
 per-app AX notification streams, both awaiting rather than computing), and a
 second worker keeps those moving while the first is inside a short
 synchronous AX call. `spawn_blocking` wake probes use the blocking pool,
@@ -1180,6 +1221,14 @@ each `readable()` wakeup does a non-blocking `try_read` to confirm genuine
 EOF (`Ok(0)`) before returning — a `WouldBlock` means it was spurious, so
 the loop goes back to waiting on the same timeout instead of restarting it
 or giving up.
+
+`handle_subscribe` follows the same shape for `Command::Subscribe`, but
+loops over a bounded broadcast receiver: the main loop builds a compact
+`SubscribeState` once per coalesced change and sends it to every
+subscriber, so the task never touches `WmState`. A lagging client gets a
+`Lagged` and resumes at the next full-state event. The `stream.readable()`
++ `try_read` EOF check also stops an idle subscriber task when its client
+disconnects.
 
 `tili_ax::spawn_hotkey_tap`/`spawn_display_watcher`/`spawn_mouse_watcher`
 each build and send on a `tokio::sync::mpsc` channel directly from their own

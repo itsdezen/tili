@@ -201,13 +201,11 @@ disconnect lagging clients.
 
 1. Move `tree` to a persistent/single-linked representation or
    transaction-safe arena; audit every `await`.
-2. Complete command parity from the table above, JSON schemas/versioning,
-   and `subscribe` event streaming.
-3. Strengthen workspace virtualization: per-monitor parking-corner choice
-   and monitor-arrangement diagnostics. Session restore now covers
-   need-restore layout/focus, proportional floating restoration, and
-   startup recovery after an unclean exit; this item no longer includes
-   those.
+2. Complete remaining command parity from the table above and config-v2
+   diagnostics. JSON schemas/versioning and `subscribe` event streaming
+   shipped in 0.13; session state/restore shipped in 0.12.
+3. Strengthen workspace virtualization: monitor-arrangement diagnostics.
+   Per-display parking and session restore shipped in 0.13/0.12.
 4. Make reconciliation robust: special containers, window-level/dialog
    heuristics, closed-window cache, lock-screen protection, and idempotent
    AX rescans per PID.
@@ -217,8 +215,10 @@ disconnect lagging clients.
    semantics, hot-plug race tests, and a real usable display rectangle
    once coordinate conversion is thoroughly tested.
 7. Add advanced features after the core: tabbed/stacked variants, sticky
-   windows, per-app default workspace, and native-tab support only when
-   its semantics are reliable.
+   windows, per-app default workspace, and full native-tab support only
+   when its semantics are reliable. The v0.13 native-tab guard already
+   makes app-owned tabs opaque to tili; full tab membership/restore remains
+   future work.
 
 ## Test matrix and definition of done
 

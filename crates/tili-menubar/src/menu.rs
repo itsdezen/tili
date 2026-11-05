@@ -275,6 +275,12 @@ fn build_menu_connecting() -> Menu {
 
 fn append_static_items(menu: &Menu) {
     let _ = menu.append(&MenuItem::with_id(
+        MenuId::new("copy-rule"),
+        "Copy rule for focused window",
+        true,
+        None,
+    ));
+    let _ = menu.append(&MenuItem::with_id(
         MenuId::new("open-settings"),
         "Open Settings",
         true,

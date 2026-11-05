@@ -199,6 +199,20 @@ low-fps on real hardware.
 - `Popup`/ignored windows may be recorded but are never geometry-restored;
   tili does not own their placement.
 
+## Native tabs are opaque to the daemon
+
+- A brand-new window that matches a managed same-app/same-frame sibling
+  (old window no longer enumerable, or an explicit `AXTabGroup`) is the
+  active member of an app-owned tab group, not a new managed window.
+- The daemon swaps the existing tree leaf's `WindowId` and per-window maps
+  in place. It never inserts a tile/float, applies rules, cascades, or
+  relayouts, so opening/closing/switching a tab cannot move or resize the
+  app's window.
+- Ambiguous candidates are skipped; `settings { native-tabs #false }` is the
+  escape hatch. Background tabs are intentionally untracked (the app owns
+  them; session persistence keeps only the visible tab).
+- This is a compatibility guard, not full tab-group membership/restore.
+
 ## One dispatch path, one sanctioned Mutex
 
 Hotkey-triggered and socket-triggered commands both go through `dispatch()`

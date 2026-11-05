@@ -17,6 +17,22 @@ full below, earlier ones collapsed further down.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-display parking.** Inactive workspaces park on their own display,
+  falling back to main only when that display is gone.
+- **JSON query/subscribe.** `tili query state --json` plus
+  `tili subscribe --json` (versioned `snapshot` then coalesced
+  `state_changed` events). Window JSON now includes `bundle_id`,
+  `workspace`, `focused`, `role`, and `subrole`.
+- **Copy-rule and role/subrole rules.** `tili rule` (and the menu bar)
+  emits a ready-to-paste rule; both rule sections accept `role`/`subrole`.
+- **Native-tab guard.** Tab open/close/switch no longer creates placements
+  or relayouts; the active tab replaces the managed window id in place.
+  Disable with `settings { native-tabs #false }`.
+- **`toggle-floating`** plus a default `alt-shift-f` binding.
+- **Configurable AX timeout** (`settings { ax-timeout-ms 500 }`).
+
 ## [0.12.0] - 2026-11-05
 
 ### Added

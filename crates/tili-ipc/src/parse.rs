@@ -95,10 +95,12 @@ fn parse_tokens(tokens: &[&str]) -> Command {
         ["summon", name] => Command::Summon((*name).to_string()),
         ["set-floating", "on"] => Command::SetFloating(true),
         ["set-floating", "off"] => Command::SetFloating(false),
+        ["set-floating", "toggle"] | ["toggle-floating"] => Command::ToggleFloating,
         ["mode", "exit"] => Command::ModeExit,
         ["mode", name] => Command::ModeEnter((*name).to_string()),
         ["list-windows"] => Command::ListWindows,
         ["list-workspaces"] => Command::ListWorkspaces,
+        ["query-state"] => Command::QueryState,
         ["focus-monitor"] => Command::FocusMonitor,
         ["list-monitors"] => Command::ListMonitors,
         ["reload-config"] => Command::ReloadConfig,
@@ -340,6 +342,20 @@ mod tests {
             parse("set-floating off"),
             Command::SetFloating(false)
         ));
+    }
+
+    #[test]
+    fn parses_toggle_floating() {
+        assert!(matches!(parse("toggle-floating"), Command::ToggleFloating));
+        assert!(matches!(
+            parse("set-floating toggle"),
+            Command::ToggleFloating
+        ));
+    }
+
+    #[test]
+    fn parses_query_state() {
+        assert!(matches!(parse("query-state"), Command::QueryState));
     }
 
     #[test]

@@ -79,6 +79,11 @@ direction `navigate`, `move`'s window-identity `swap_windows`, proportional
   `mru` child, with the same peek-padding math `layout_node` uses) but
   never yield a handle themselves — no borders in/around them, same as
   `resize_weight` skipping `Accordion` ancestors.
+- `replace_window(old, new)` swaps a leaf's `WindowId` in place, preserving
+  its `NodeId`, parent, weights, and MRU. The daemon uses it for native
+  app-owned tabs, where macOS swaps which tab is the visible window: the
+  layout structure must not change, so there is no remove/insert/normalize
+  pass and no relayout.
 - `TreeSnapshot`/`NodeSnapshot` are the serializable, `NodeId`-free view of
   a tree used by session persistence. `Tree::snapshot()` captures layout,
   orientation, children order, weights, and MRU; `snapshot_filtered()` drops

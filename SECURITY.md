@@ -36,6 +36,10 @@ works on macOS:
   windows. It is written `0600` under
   `~/Library/Application Support/tili/`, contains no window content, and
   can be disabled/removed (`session { enabled #false }`, `tili uninstall`).
+- `tili query`/`tili subscribe` exposing the same window titles, bundle
+  ids, roles, and frames over the per-user Unix socket. That socket is
+  already the trusted boundary for every other command; no window content
+  is included.
 
 Things that **are** in scope and worth reporting:
 

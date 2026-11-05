@@ -19,7 +19,10 @@ pub use hotkey::{
 };
 pub use mouse::{MouseSignal, spawn_mouse_watcher, warp_cursor_to};
 pub use watch::{WmEvent, spawn_event_watcher};
-pub use window::{AxWindow, WindowKind, WindowProbeHandle};
+pub use window::{
+    AX_CALL_TIMEOUT_MS_DEFAULT, AxWindow, WindowKind, WindowProbeHandle, call_timeout_ms,
+    set_call_timeout_ms,
+};
 pub use workspace::{AppEvent, bundle_id_for_pid, is_app_hidden, register_on_main};
 
 /// Checks Accessibility permission, prompting the user via the system

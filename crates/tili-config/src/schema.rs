@@ -79,6 +79,10 @@ pub struct KeybindingMode {
 pub struct WorkspaceRule {
     pub app_id: String,
     pub workspace: String,
+    /// Optional exact-match AX role (normally `AXWindow`).
+    pub role: Option<String>,
+    /// Optional exact-match AX subrole (`AXStandardWindow`, `AXDialog`, ...).
+    pub subrole: Option<String>,
     /// Defaults to `#false` when omitted — see this struct's doc comment.
     pub always: bool,
 }
@@ -90,6 +94,10 @@ pub struct FloatingRule {
     /// compiled by whoever consumes this (`tili-daemon`), not here, so
     /// this crate doesn't need a regex dependency just to hold a string.
     pub title: Option<String>,
+    /// Optional exact-match AX role (normally `AXWindow`).
+    pub role: Option<String>,
+    /// Optional exact-match AX subrole (`AXStandardWindow`, `AXDialog`, ...).
+    pub subrole: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub center: Option<bool>,
@@ -167,6 +175,16 @@ pub struct Settings {
     /// feature whose smoothness depends on real-hardware AX write latency,
     /// not a default-on behavior change for every existing user.
     pub animate: AnimationSpeed,
+    /// Messaging timeout for each Accessibility app connection, in
+    /// milliseconds. Bounded to 50–5000 by `tili-ax`; 500 is the default
+    /// compromise between a hung app stalling the daemon and a legitimately
+    /// slow app being treated as unresponsive.
+    pub ax_timeout_ms: u64,
+    /// Whether native macOS tab groups are treated as one opaque window:
+    /// opening/closing/switching tabs must not create placements or trigger
+    /// relayouts. Defaults to `#true`; set `#false` to restore the old
+    /// "every tab is a new window" behavior.
+    pub native_tabs: bool,
 }
 
 impl Default for Settings {
@@ -179,6 +197,8 @@ impl Default for Settings {
             default_root_orientation: "auto".to_string(),
             mouse_resize_step: 0.1,
             animate: AnimationSpeed::Off,
+            ax_timeout_ms: 500,
+            native_tabs: true,
         }
     }
 }
@@ -468,6 +488,12 @@ fn parse_settings(doc: &KdlDocument) -> Settings {
             }
         };
     }
+    if let Some(v) = as_u64(children.get_arg("ax-timeout-ms")) {
+        settings.ax_timeout_ms = v;
+    }
+    if let Some(v) = children.get_arg("native-tabs").and_then(|v| v.as_bool()) {
+        settings.native_tabs = v;
+    }
     settings
 }
 
@@ -576,10 +602,20 @@ fn parse_workspace_rules(doc: &KdlDocument) -> Vec<WorkspaceRule> {
         .filter_map(|n| {
             let app_id = n.get("app-id")?.as_string()?.to_string();
             let workspace = n.get("workspace")?.as_string()?.to_string();
+            let role = n
+                .get("role")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
+            let subrole = n
+                .get("subrole")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
             let always = n.get("always").and_then(|v| v.as_bool()).unwrap_or(false);
             Some(WorkspaceRule {
                 app_id,
                 workspace,
+                role,
+                subrole,
                 always,
             })
         })
@@ -605,6 +641,14 @@ fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaul
                 .get("title")
                 .and_then(|v| v.as_string())
                 .map(str::to_string);
+            let role = n
+                .get("role")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
+            let subrole = n
+                .get("subrole")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
             let mode = match n.get("mode").and_then(|v| v.as_string()) {
                 Some("tile") => FloatingRuleMode::Tile,
                 Some("ignore") => FloatingRuleMode::Ignore,
@@ -621,6 +665,8 @@ fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaul
             Some(FloatingRule {
                 app_id,
                 title,
+                role,
+                subrole,
                 width,
                 height,
                 center,
@@ -1265,6 +1311,42 @@ mod tests {
         assert_eq!(config.session.restore_grace_ms, 750);
         assert_eq!(config.session.save_debounce_ms, 1200);
         assert_eq!(config.session.periodic_save_seconds, 30);
+    }
+
+    #[test]
+    fn ax_timeout_and_native_tabs_default_and_parse() {
+        let config = parse("").unwrap();
+        assert_eq!(config.settings.ax_timeout_ms, 500);
+        assert!(config.settings.native_tabs);
+
+        let source = r#"
+            settings {
+                ax-timeout-ms 250
+                native-tabs #false
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.settings.ax_timeout_ms, 250);
+        assert!(!config.settings.native_tabs);
+    }
+
+    #[test]
+    fn rules_parse_optional_role_and_subrole_matchers() {
+        let source = r#"
+            workspace-rules {
+                rule app-id="com.example.app" workspace="work" role="AXWindow" subrole="AXDialog"
+            }
+            floating-rules {
+                rule app-id="com.example.app" role="AXWindow" subrole="AXStandardWindow"
+            }
+        "#;
+        let config = parse(source).unwrap();
+        let workspace = &config.workspace_rules[0];
+        assert_eq!(workspace.role.as_deref(), Some("AXWindow"));
+        assert_eq!(workspace.subrole.as_deref(), Some("AXDialog"));
+        let floating = &config.floating_rules[0];
+        assert_eq!(floating.role.as_deref(), Some("AXWindow"));
+        assert_eq!(floating.subrole.as_deref(), Some("AXStandardWindow"));
     }
 
     #[test]

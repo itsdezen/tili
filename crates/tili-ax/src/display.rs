@@ -184,30 +184,39 @@ pub fn main_display_frame() -> Rect {
 const PARK_EPSILON: f64 = 1.0;
 
 /// Computes where to position a window so only a `PARK_EPSILON` sliver of
-/// it remains on-screen, hugging the main monitor's (or the first
-/// available one's) bottom-right corner. `size` isn't actually needed for
-/// this corner specifically — the window's own top-left lands just inside
-/// the corner, and its body (extending in the +x/+y direction from there)
-/// does all the hiding regardless of how big it is — but is taken anyway
-/// so this signature doesn't need to change if a different corner (one
-/// that actually needs it, e.g. a bottom-left variant) is ever added.
+/// it remains on-screen, hugging `target_monitor`'s bottom-right corner.
+/// Inactive workspaces belong to a specific display (`WmState` tracks that
+/// in `workspace_monitor`), so parking them on their own display keeps a
+/// workspace switch local instead of dragging every parked window across
+/// displays. Falls back to the main display (then the first available one)
+/// when `target_monitor` is `None` or no longer connected. `size` isn't
+/// actually needed for this corner specifically — the window's own top-left
+/// lands just inside the corner, and its body (extending in the +x/+y
+/// direction from there) does all the hiding regardless of how big it is —
+/// but is taken anyway so this signature doesn't need to change if a
+/// different corner (one that actually needs it, e.g. a bottom-left variant)
+/// is ever added.
 ///
 /// Doesn't need to check other connected monitors: `PARK_EPSILON` is tiny
-/// enough that this point is always deep inside the main monitor's own
+/// enough that this point is always deep inside the target monitor's own
 /// bounds, never anywhere close to a neighboring display's — unlike the
 /// previous far-outside-every-bound approach, which genuinely could land
 /// on a different physical monitor depending on arrangement.
-pub fn parking_position(monitors: &[Monitor], _size: (f64, f64)) -> (f64, f64) {
-    let Some(main) = monitors
-        .iter()
-        .find(|m| m.is_main)
+pub fn parking_position(
+    monitors: &[Monitor],
+    target_monitor: Option<u32>,
+    _size: (f64, f64),
+) -> (f64, f64) {
+    let Some(target) = target_monitor
+        .and_then(|id| monitors.iter().find(|m| m.id == id))
+        .or_else(|| monitors.iter().find(|m| m.is_main))
         .or_else(|| monitors.first())
     else {
         return (0.0, 0.0);
     };
     (
-        main.frame.x + main.frame.width - PARK_EPSILON,
-        main.frame.y + main.frame.height - PARK_EPSILON,
+        target.frame.x + target.frame.width - PARK_EPSILON,
+        target.frame.y + target.frame.height - PARK_EPSILON,
     )
 }
 
@@ -398,34 +407,51 @@ mod tests {
     #[test]
     fn single_monitor_parks_one_epsilon_inside_its_bottom_right_corner() {
         let monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
-        let (x, y) = parking_position(&monitors, (400.0, 300.0));
+        let (x, y) = parking_position(&monitors, None, (400.0, 300.0));
         assert_eq!(x, 1919.0);
         assert_eq!(y, 1079.0);
     }
 
     #[test]
-    fn side_by_side_pair_still_parks_at_the_main_monitors_own_corner() {
+    fn side_by_side_pair_parks_on_the_requested_monitor() {
         let monitors = [
             monitor(1, 0.0, 0.0, 1920.0, 1080.0),
-            monitor(2, 1920.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 0.0, 2560.0, 1440.0),
         ];
-        let (x, y) = parking_position(&monitors, (400.0, 300.0));
-        assert_eq!(x, 1919.0);
-        assert_eq!(y, 1079.0);
+        assert_eq!(
+            parking_position(&monitors, Some(1), (400.0, 300.0)),
+            (1919.0, 1079.0)
+        );
+        assert_eq!(
+            parking_position(&monitors, Some(2), (400.0, 300.0)),
+            (4479.0, 1439.0)
+        );
+    }
+
+    #[test]
+    fn unknown_monitor_falls_back_to_the_main_display() {
+        let monitors = [
+            monitor(1, 0.0, 0.0, 1920.0, 1080.0),
+            monitor(2, 1920.0, 0.0, 2560.0, 1440.0),
+        ];
+        assert_eq!(
+            parking_position(&monitors, Some(999), (400.0, 300.0)),
+            (1919.0, 1079.0)
+        );
     }
 
     #[test]
     fn falls_back_to_the_first_monitor_when_none_is_main() {
         let mut monitors = [monitor(1, 0.0, 0.0, 1920.0, 1080.0)];
         monitors[0].is_main = false;
-        let (x, y) = parking_position(&monitors, (400.0, 300.0));
+        let (x, y) = parking_position(&monitors, None, (400.0, 300.0));
         assert_eq!(x, 1919.0);
         assert_eq!(y, 1079.0);
     }
 
     #[test]
     fn no_monitors_parks_at_the_origin() {
-        let (x, y) = parking_position(&[], (400.0, 300.0));
+        let (x, y) = parking_position(&[], None, (400.0, 300.0));
         assert_eq!(x, 0.0);
         assert_eq!(y, 0.0);
     }

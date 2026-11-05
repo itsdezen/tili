@@ -106,6 +106,18 @@ settings {
     // Chromium apps) pays that multiplier in extra latency per relayout,
     // more so at "high". Try "medium" first.
     animate #false
+
+    // Messaging timeout for each Accessibility app connection, in
+    // milliseconds. Lower values keep the daemon responsive when one app
+    // is hung; too low risks treating a slow app as unresponsive. Clamped
+    // to 50–5000 by the AX layer.
+    ax-timeout-ms 500
+
+    // Treat an app's native macOS tab group as one opaque window: opening,
+    // closing, or switching tabs must not create placements or trigger a
+    // relayout. Set `#false` to restore the old "every tab is a new
+    // window" behavior if an app is detected incorrectly.
+    native-tabs #true
 }
 
 // Session persistence — every field optional, defaults shown below.
@@ -191,8 +203,9 @@ menubar {
 //   close                           close the focused window
 //   summon <text>                   focus+switch to the first window whose
 //                                   title or bundle id contains <text>
-//   set-floating on|off             toggle the focused window between
-//                                   tiled and floating at runtime
+//   set-floating on|off             set the focused window's placement
+//   toggle-floating                 flip the focused window between tiled
+//                                   and floating (hotkey-friendly)
 //   focus-monitor                   cycle which connected monitor commands
 //                                   target (no-op with only one monitor)
 //   mode <name>                     switch to a named keybindings mode
@@ -244,6 +257,10 @@ keybindings mode="main" {
     bind "alt-shift-equal" "resize 0.1"
     bind "alt-shift-0" "balance"
 
+    // Flip the focused window between tiled and floating without needing
+    // to remember its current state.
+    bind "alt-shift-f" "toggle-floating"
+
     // Cycles which connected monitor the above all target — a no-op with
     // only one monitor. See ROADMAP.md M9.
     bind "alt-m" "focus-monitor"
@@ -293,6 +310,8 @@ keybindings mode="manage" auto-exit=#true {
 //              `osascript -e 'id of app "Finder"'` or `mdls -name
 //              kMDItemCFBundleIdentifier /Applications/Finder.app`).
 //   workspace  required. Must name a workspace declared above.
+//   role       optional. Exact AX role match (normally "AXWindow").
+//   subrole    optional. Exact AX subrole match.
 //   always     optional, defaults to #false. Auto-routes every new window
 //              from this app, not just its first — the old behavior.
 workspace-rules {
@@ -310,6 +329,9 @@ workspace-rules {
 //   title      optional. A regex matched against the window title, for
 //              narrowing a rule to specific dialogs of an app that should
 //              otherwise tile normally.
+//   role       optional. Exact AX role match (normally "AXWindow").
+//   subrole    optional. Exact AX subrole match, e.g. "AXStandardWindow"
+//              or "AXDialog". Useful for floating only an app's dialogs.
 //   mode       optional, one of "float" (default)/"tile"/"ignore" —
 //              overrides tili's own guess at whether the window should
 //              float, tile, or be left completely untouched. Useful for an
