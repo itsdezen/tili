@@ -217,8 +217,9 @@ disconnect lagging clients.
 6. Improve multi-monitor correctness further: hot-plug race tests and a
    real usable display rectangle once coordinate conversion is thoroughly
    tested. Pinned workspace policy, focus-display targets, fallback
-   cleanup, global southeast parking, and the switch-vs-move semantics
-   shipped in 0.13.
+   cleanup, global southeast parking, home-display routing
+   (`workspace`/`workspace-here`/`move-workspace-to-monitor`), pair-based
+   `workspace-back`, and the switch-vs-move semantics shipped in 0.13.
 7. Add advanced features after the core: tabbed/stacked variants, sticky
    windows, per-app default workspace, and full native-tab support only
    when its semantics are reliable. The v0.13 native-tab guard already

@@ -51,12 +51,13 @@ resolve from keybindings too.
 | `tili query [state\|windows\|workspaces\|monitors] [--json]` | Print a machine-readable JSON snapshot |
 | `tili subscribe [--json]` | Stream JSON state events until interrupted |
 | `tili rule [--workspace <name>] [--copy]` | Print/copy a rule snippet for the focused window |
-| `tili workspace <name>` | Switch to a declared workspace; if it is already active on another display, focus that display instead of swapping layouts. |
-| `tili workspace-back` | Switch back to whichever workspace was active before this one |
+| `tili workspace <name>` | Go to the workspace's home display (or focus the display already showing it) instead of moving a parked workspace to an unrelated display. |
+| `tili workspace-here <name>` | Switch the focused display to the workspace, pulling/swapping it here. |
+| `tili workspace-back` | Return to the previous display+workspace pair. |
 | `tili move-to-workspace <name>` | Move the focused window to another workspace without switching focus to it. **Note:** the equivalent keybinding command string is spelled `move-node-to-workspace <name>`, not `move-to-workspace` — the CLI and the keybinding parser chose different verbs for the same underlying command. |
-| `tili move-workspace-to-monitor <target> [--workspace <name>]` | Move a workspace to a different monitor without switching focus; `target` is a monitor id, `"next"`, or `"main"`. Defaults to whatever workspace is currently active on the focused monitor. |
+| `tili move-workspace-to-monitor <target> [--workspace <name>]` | Push a workspace to another monitor without switching focus; `target` is a monitor id, `"next"`, `"prev"`, or `"main"`. An active workspace swaps with the target's; a parked one only changes its home. Defaults to the active workspace on the focused monitor. |
 | `tili list-workspaces` | List workspaces, with active/monitor markers |
-| `tili focus-monitor [target]` | Cycle monitors, or focus `main`, `next`, or a display id |
+| `tili focus-monitor [target]` | Cycle monitors, or focus `main`, `next`, `prev`, or a display id |
 | `tili list-monitors` | List connected monitors, marking which one is focused |
 | `tili list-windows` | List known windows (tiled/floating, frame, pid) |
 

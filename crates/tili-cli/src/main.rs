@@ -130,9 +130,12 @@ enum Commands {
     Resize { amount: f32 },
     /// List workspaces, marking which one is active.
     ListWorkspaces,
-    /// Switch the active workspace. Errors if `name` isn't declared in
-    /// config — workspaces are never created on the fly.
+    /// Switch to a workspace's home display (or focus the display already
+    /// showing it). Errors if `name` isn't declared in config.
     Workspace { name: String },
+    /// Switch the focused display to a workspace, pulling it here (and
+    /// swapping with whatever this display currently shows).
+    WorkspaceHere { name: String },
     /// Move the focused window to another workspace without following it.
     MoveToWorkspace { name: String },
     /// Toggle, or explicitly set, the focused window's container layout.
@@ -145,9 +148,9 @@ enum Commands {
         root: bool,
     },
     /// Cycle which connected monitor commands act on, or focus a specific
-    /// monitor (`main`, `next`, or a display id).
+    /// monitor (`main`, `next`, `prev`, or a display id).
     FocusMonitor {
-        /// Optional monitor id, `main`, or `next`; omit to cycle.
+        /// Optional monitor id, `main`, `next`, or `prev`; omit to cycle.
         target: Option<String>,
     },
     /// List connected monitors, marking which one is focused.
@@ -176,8 +179,8 @@ enum Commands {
     /// contains the given text.
     Summon { query: String },
     /// Move a workspace to a different monitor without switching focus to
-    /// it. Target is a monitor id, "next", or "main". Defaults to whatever
-    /// workspace is currently active on the focused monitor; pass
+    /// it. Target is a monitor id, "next", "prev", or "main". Defaults to
+    /// whatever workspace is currently active on the focused monitor; pass
     /// `--workspace` to name a different (possibly parked) one.
     MoveWorkspaceToMonitor {
         target: String,
@@ -296,6 +299,7 @@ fn main() {
         Commands::Resize { amount } => (Command::ResizeRatio { amount }, ExpectedPayload::None),
         Commands::ListWorkspaces => (Command::ListWorkspaces, ExpectedPayload::Workspaces),
         Commands::Workspace { name } => (Command::WorkspaceSwitch(name), ExpectedPayload::None),
+        Commands::WorkspaceHere { name } => (Command::WorkspaceHere(name), ExpectedPayload::None),
         Commands::MoveToWorkspace { name } => {
             (Command::MoveNodeToWorkspace(name), ExpectedPayload::None)
         }
@@ -318,7 +322,7 @@ fn main() {
             Some(target) => {
                 let target = parse_monitor_target(&target).unwrap_or_else(|| {
                     eprintln!(
-                        "tili: invalid monitor target '{target}' (expected a monitor id, 'next', or 'main')"
+                        "tili: invalid monitor target '{target}' (expected a monitor id, 'next', 'prev', or 'main')"
                     );
                     std::process::exit(1);
                 });
@@ -337,7 +341,7 @@ fn main() {
         Commands::MoveWorkspaceToMonitor { workspace, target } => {
             let target = parse_monitor_target(&target).unwrap_or_else(|| {
                 eprintln!(
-                    "tili: invalid monitor target '{target}' (expected a monitor id, 'next', or 'main')"
+                    "tili: invalid monitor target '{target}' (expected a monitor id, 'next', 'prev', or 'main')"
                 );
                 std::process::exit(1);
             });
@@ -579,6 +583,7 @@ fn homebrew_stable_equivalent(real_exe: &std::path::Path) -> Option<std::path::P
 fn parse_monitor_target(s: &str) -> Option<tili_ipc::MonitorTarget> {
     match s {
         "next" => Some(tili_ipc::MonitorTarget::Next),
+        "prev" => Some(tili_ipc::MonitorTarget::Prev),
         "main" => Some(tili_ipc::MonitorTarget::Main),
         _ => s.parse::<u32>().ok().map(tili_ipc::MonitorTarget::Id),
     }

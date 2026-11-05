@@ -64,8 +64,9 @@ shortcut.
 
 tili is at `v0.13.x` and already daily-drivable: tiling, workspaces,
 hot-reloaded config, built-in hotkeys, floating rules, multi-monitor
-(global southeast parking, monitor-pinned workspaces, display-aware
-fallback workspaces), mouse/focus-follows-monitor, session restore, JSON
+(home-display workspace flow, global southeast parking, monitor-pinned
+workspaces, display-aware fallback workspaces), mouse/focus-follows-monitor,
+session restore, JSON
 query/subscribe, a native-tab guard, a menu bar workspace badge, and a real
 signed release pipeline. See [ROADMAP.md](ROADMAP.md) for what's
 planned next.
@@ -148,9 +149,21 @@ monitor reports no name. Empty fallbacks disappear when the display
 disconnects; a non-empty one has its windows moved to the main/focused
 workspace before cleanup, so no window is silently closed or orphaned.
 
-`tili workspace <name>` focuses the display already showing that workspace
-instead of swapping the two displays' layouts. Use
-`tili move-workspace-to-monitor` to explicitly relocate one.
+Each workspace has a **home display** — the display currently showing it, a
+connected `monitor="..."` pin, or the display it last lived on. A workspace
+used for the first time is assigned to the focused display, so it still feels
+local. `tili workspace <name>` always goes to that home (focusing the display
+if the workspace is already visible there, or showing it there and parking the
+display's previous workspace). It never materializes a parked workspace on an
+unrelated display.
+
+Use `tili workspace-here <name>` to change the display you are on: it pulls the
+workspace here, swapping with whatever this display currently shows.
+`tili move-workspace-to-monitor next|prev|main` pushes the active workspace to
+another display (swapping with its occupant); moving a parked workspace only
+changes its home, so the target's screen is untouched. `tili workspace-back`
+returns to the previous `(display, workspace)` pair rather than following a
+workspace that may have moved.
 
 Parking is global: every inactive workspace's windows sit at the bottom-right
 corner of the southeast-most display, and are re-parked whenever displays
@@ -222,6 +235,10 @@ keybindings mode="main" {
     bind "alt-h" "focus left"
     bind "alt-shift-h" "move left"
     bind "alt-w" "workspace work"
+    bind "alt-ctrl-w" "workspace-here work"
+    bind "alt-ctrl-comma" "move-workspace-to-monitor prev"
+    bind "alt-ctrl-period" "move-workspace-to-monitor next"
+    bind "alt-ctrl-m" "move-workspace-to-monitor main"
     bind "alt-slash" "layout toggle"
     bind "alt-shift-f" "toggle-floating"
     bind "alt-m" "focus-monitor"
@@ -267,12 +284,13 @@ keybindings in your config resolve to (e.g. `bind "alt-h" "focus left"`).
 | `tili query [state\|windows\|workspaces\|monitors] [--json]` | Print a machine-readable JSON snapshot |
 | `tili subscribe [--json]` | Stream JSON state events until interrupted |
 | `tili rule [--workspace <name>] [--copy]` | Print/copy a rule snippet for the focused window |
-| `tili workspace <name>` | Switch to a declared workspace; if it is already on another display, focus that display instead of swapping |
-| `tili workspace-back` | Switch back to whichever workspace was active before this one |
+| `tili workspace <name>` | Go to the workspace's home display (or focus the display already showing it) |
+| `tili workspace-here <name>` | Switch the focused display to the workspace, pulling/swapping it here |
+| `tili workspace-back` | Return to the previous display+workspace pair |
 | `tili move-to-workspace <name>` | Move the focused window to another workspace |
-| `tili move-workspace-to-monitor <target> [--workspace <name>]` | Move a workspace to a different monitor without switching focus; defaults to the workspace currently active on the focused monitor |
+| `tili move-workspace-to-monitor <next\|prev\|main\|id> [--workspace <name>]` | Push a workspace to another monitor without switching focus; active workspaces swap, parked ones only change home |
 | `tili list-workspaces` | List workspaces, with active/monitor markers |
-| `tili focus-monitor [target]` | Cycle monitors, or focus `main`, `next`, or a display id |
+| `tili focus-monitor [target]` | Cycle monitors, or focus `main`, `next`, `prev`, or a display id |
 | `tili list-monitors` | List connected monitors |
 | `tili list-windows` | List known windows (tiled/floating, frame, pid) |
 

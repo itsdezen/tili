@@ -3,9 +3,9 @@
 Part of the [architecture notes](../ARCHITECTURE.md).
 
 `ping`, `list-windows`, `focus <dir>`, `move <dir>`, `list-workspaces`,
-`workspace <name>`, `move-to-workspace <name>`,
-`layout <toggle|tiles|accordion>`, `focus-monitor`, `list-monitors`,
-`stop`, `status`. The package is named `tili-cli` but the binary itself is
+`workspace <name>`, `workspace-here <name>`, `move-to-workspace <name>`,
+`layout <toggle|tiles|accordion>`, `focus-monitor`,
+`move-workspace-to-monitor`, `list-monitors`, `stop`, `status`. The package is named `tili-cli` but the binary itself is
 named `tili` (see the `[[bin]]` section in its `Cargo.toml`). No business
 logic belongs here — if you're tempted to add logic to the CLI, it probably
 belongs in `tili-daemon` behind a `Command` instead.
@@ -63,10 +63,11 @@ of falling through to `send()`/`print_response`):
   `tili doctor --fix` for scripting.
 
 `tili focus-monitor [target]` is an optional-target extension of the
-cycle-only hotkey command: `main`, `next`, or a numeric display id maps to
-`Command::FocusMonitorTarget`. `tili workspace <name>` now focuses the
-display already showing that workspace instead of swapping layouts;
-`move-workspace-to-monitor` remains the relocation command.
+cycle-only hotkey command: `main`, `next`, `prev`, or a numeric display id
+maps to `Command::FocusMonitorTarget`. `tili workspace <name>` goes to the
+workspace's home display, `tili workspace-here <name>` pulls/swaps it onto
+the focused display, and `tili move-workspace-to-monitor
+next|prev|main|id` pushes it (or only relocates a parked workspace's home).
 
 `tili query`/`tili subscribe`/`tili rule` are handled before the generic
 single-response path too. `query` sends `QueryState` (or one of the

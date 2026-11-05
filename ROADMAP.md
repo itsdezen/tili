@@ -5,9 +5,11 @@
 - **Global southeast parking and workspace routing.** All parked windows
   share the southeast-most display's bottom-right corner and are re-parked
   after display changes. Every display gets an active workspace;
-  `monitor="..."` pins are honored; fallback workspaces use display names;
-  switching to a workspace already on another display focuses that display
-  instead of swapping layouts.
+  `monitor="..."` pins are honored; fallback workspaces use display names.
+  Workspaces have a home display: `workspace X` goes there,
+  `workspace-here X` pulls it to the focused display, and
+  `move-workspace-to-monitor next|prev|main` relocates it. `workspace-back`
+  restores the previous display+workspace pair.
 - **`tili query` + `tili subscribe --json`.** JSON snapshots and
   line-delimited events for status bars and scripts.
 - **Window metadata and rule ergonomics.** `bundle_id`, `workspace`,

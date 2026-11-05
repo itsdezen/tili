@@ -1048,8 +1048,13 @@ pub struct WmState {
     /// `workspace "name" monitor="main|12"` pins, kept as raw config strings
     /// and resolved against the current monitor list on assignment.
     workspace_pins: HashMap<String, String>,
-    /// Per-monitor back-and-forth history for `workspace-back`.
+    /// Per-monitor back-and-forth history, kept for session persistence and
+    /// as a fallback when `previous_focus` has no recorded pair.
     previous_workspaces: HashMap<u32, String>,
+    /// The `(monitor, workspace)` pair the user was looking at before the
+    /// last navigation command. `workspace-back` restores this pair instead
+    /// of following a workspace that may since have moved displays.
+    previous_focus: Option<(u32, String)>,
     /// Last workspace that was active on each monitor, used to restore it
     /// after the same display reconnects.
     last_active_workspace: HashMap<u32, String>,
@@ -1302,6 +1307,7 @@ impl Default for WmState {
             declared_workspaces: Vec::new(),
             workspace_pins: HashMap::new(),
             previous_workspaces: HashMap::new(),
+            previous_focus: None,
             last_active_workspace: HashMap::new(),
             focused_monitor,
             frame_setter: Box::new(InstantFrameSetter),
@@ -2930,6 +2936,14 @@ impl WmState {
             self.previous_workspaces
                 .insert(self.focused_monitor, previous.clone());
         }
+        // Seed the pair-based back target from the restored per-monitor
+        // history. It's only a best-effort convenience; the first real
+        // navigation overwrites it.
+        self.previous_focus = self
+            .previous_workspaces
+            .get(&self.focused_monitor)
+            .cloned()
+            .map(|workspace| (self.focused_monitor, workspace));
 
         // Special saved windows that were never seen stay available for a
         // later appearance (native fullscreen on another Space, minimized
@@ -3647,15 +3661,27 @@ impl WmState {
     /// a no-op with fewer than two monitors connected.
     pub fn focus_monitor_next(&mut self) {
         if let Some(id) = self.next_monitor_id() {
-            self.focused_monitor = id;
+            self.record_previous_focus();
+            self.focus_monitor_by_id(id);
         }
     }
 
-    /// Focuses a specific monitor (`main`, `next`, or an id). Unlike
+    /// Focuses a specific monitor (`main`, `next`, `prev`, or an id). Unlike
     /// `focus_monitor_next`, an invalid target is an error rather than a
     /// silent no-op.
     pub fn focus_monitor_target(&mut self, target: tili_ipc::MonitorTarget) -> Result<(), String> {
         let id = self.resolve_monitor_target(target)?;
+        if id != self.focused_monitor {
+            self.record_previous_focus();
+        }
+        self.focus_monitor_by_id(id);
+        Ok(())
+    }
+
+    /// Focuses `id` as the command target and raises its remembered focus.
+    /// Shared by `focus-monitor`, `workspace`'s "already visible elsewhere"
+    /// branch, and `workspace-back`, none of which should change layouts.
+    fn focus_monitor_by_id(&mut self, id: u32) {
         self.focused_monitor = id;
         if let Some(workspace) = self.active_workspace.get(&id).cloned() {
             self.last_active_workspace.insert(id, workspace.clone());
@@ -3669,7 +3695,6 @@ impl WmState {
                 self.raise_focused();
             }
         }
-        Ok(())
     }
 
     /// The connected monitor id after `focused_monitor` in wraparound
@@ -3678,15 +3703,20 @@ impl WmState {
     /// `MonitorTarget::Next` arm, which must agree on exactly the same
     /// "next" monitor.
     fn next_monitor_id(&self) -> Option<u32> {
+        self.adjacent_monitor_id(self.focused_monitor, 1)
+    }
+
+    /// `base`'s neighbor in the deterministic monitor list, wrapping in
+    /// either direction. `delta` is `+1` for next / `-1` for previous.
+    fn adjacent_monitor_id(&self, base: u32, delta: isize) -> Option<u32> {
         if self.monitors.len() < 2 {
             return None;
         }
         let ids: Vec<u32> = self.monitors.iter().map(|m| m.id).collect();
-        let current_idx = ids
-            .iter()
-            .position(|&id| id == self.focused_monitor)
-            .unwrap_or(0);
-        Some(ids[(current_idx + 1) % ids.len()])
+        let current_idx = ids.iter().position(|&id| id == base).unwrap_or(0);
+        let len = isize::try_from(ids.len()).unwrap_or(1);
+        let index = (isize::try_from(current_idx).unwrap_or(0) + delta).rem_euclid(len);
+        ids.get(usize::try_from(index).unwrap_or(0)).copied()
     }
 
     /// Resolves a config `workspace "x" monitor="..."` value against the
@@ -3719,6 +3749,49 @@ impl WmState {
             .iter()
             .find(|(_, name)| name.as_str() == workspace)
             .map(|(&id, _)| id)
+    }
+
+    /// Remembers the `(display, workspace)` the user is looking at right
+    /// before a navigation command, so `workspace-back` can return there
+    /// even if the workspace later moves displays.
+    fn record_previous_focus(&mut self) {
+        if let Some(workspace) = self.active_workspace.get(&self.focused_monitor).cloned() {
+            self.previous_focus = Some((self.focused_monitor, workspace));
+        }
+    }
+
+    fn active_display_for_workspace(&self, workspace: &str) -> Option<u32> {
+        self.monitor_showing_workspace(workspace)
+    }
+
+    /// Where `workspace X` should take the user: the display already showing
+    /// it, then a connected pin, then the last display it lived on. `None`
+    /// when it has never been shown (or its home disconnected), in which
+    /// case the caller assigns it to the focused display.
+    fn workspace_home(&self, workspace: &str) -> Option<u32> {
+        if let Some(display) = self.active_display_for_workspace(workspace) {
+            return Some(display);
+        }
+        if let Some(spec) = self.workspace_pins.get(workspace) {
+            return self.resolve_workspace_pin(spec);
+        }
+        self.workspace_monitor
+            .get(workspace)
+            .copied()
+            .filter(|id| self.monitors.iter().any(|monitor| monitor.id == *id))
+    }
+
+    /// A pinned workspace whose target display is currently disconnected.
+    /// It stays reserved (never re-homed by accident), so `workspace X`
+    /// surfaces a clear error instead of silently showing it elsewhere.
+    fn workspace_pinned_to_disconnected_display(&self, workspace: &str) -> bool {
+        self.workspace_pins
+            .get(workspace)
+            .is_some_and(|spec| self.resolve_workspace_pin(spec).is_none())
+    }
+
+    fn workspace_is_synthetic(&self, workspace: &str) -> bool {
+        self.synthetic_workspaces.contains(workspace)
     }
 
     fn active_workspace_on_another_monitor(&self, workspace: &str, monitor_id: u32) -> bool {
@@ -3942,6 +4015,11 @@ impl WmState {
                 *workspace = new.to_string();
             }
         }
+        if let Some((_, workspace)) = self.previous_focus.as_mut()
+            && workspace == old
+        {
+            *workspace = new.to_string();
+        }
         for placement in self.placements.values_mut() {
             if placement.workspace == old {
                 placement.workspace = new.to_string();
@@ -4048,6 +4126,11 @@ impl WmState {
                 *workspace = to.to_string();
             }
         }
+        if let Some((_, workspace)) = self.previous_focus.as_mut()
+            && workspace == from
+        {
+            *workspace = to.to_string();
+        }
     }
 
     /// Removes an empty synthetic workspace and its bookkeeping.
@@ -4079,6 +4162,13 @@ impl WmState {
             if workspace == name {
                 *workspace = fallback.clone();
             }
+        }
+        if self
+            .previous_focus
+            .as_ref()
+            .is_some_and(|(_, workspace)| workspace == name)
+        {
+            self.previous_focus = None;
         }
     }
 
@@ -4136,6 +4226,11 @@ impl WmState {
             if let Some(name) = self.previous_workspaces.remove(&old_id) {
                 self.previous_workspaces.insert(new_id, name);
             }
+            if let Some((monitor, _)) = self.previous_focus.as_mut()
+                && *monitor == old_id
+            {
+                *monitor = new_id;
+            }
             for monitor in self.workspace_monitor.values_mut() {
                 if *monitor == old_id {
                     *monitor = new_id;
@@ -4154,6 +4249,13 @@ impl WmState {
         }
 
         for id in diff.disconnected {
+            if self
+                .previous_focus
+                .as_ref()
+                .is_some_and(|(monitor, _)| *monitor == id)
+            {
+                self.previous_focus = None;
+            }
             if let Some(name) = self.active_workspace.remove(&id) {
                 self.last_active_workspace.insert(id, name.clone());
                 if self.synthetic_workspaces.contains(&name) {
@@ -4998,13 +5100,19 @@ impl WmState {
         }
     }
 
-    /// Moves an entire workspace to a different connected monitor without
-    /// switching `focused_monitor` to it — whatever workspace `target` was
-    /// already showing gets displaced (swapped onto `workspace`'s old
-    /// monitor if it was visible anywhere, parked otherwise), mirroring
-    /// `switch_workspace`'s own "two monitors never show the same
-    /// workspace" invariant. `workspace: None` means whatever's currently
-    /// active on `focused_monitor`, rather than requiring an explicit name.
+    /// Moves a workspace to `target` without changing what the user is
+    /// looking at.
+    ///
+    /// * Active workspace: swap it with whatever `target` currently shows,
+    ///   so both displays keep exactly one active workspace and no window is
+    ///   lost. Repeating the command with the original target reverses it.
+    /// * Parked workspace: only move its **home** to `target`; the target's
+    ///   current screen is untouched. `workspace X` then opens it there.
+    ///
+    /// Refuses pinned workspaces moving off their pin, synthetic display
+    /// fallbacks, and swaps that would push a pinned/synthetic workspace off
+    /// its own display. `Next`/`Prev` are relative to the workspace's current
+    /// (or last) display, not necessarily the focused one.
     pub fn move_workspace_to_monitor(
         &mut self,
         workspace: Option<&str>,
@@ -5015,46 +5123,94 @@ impl WmState {
         if !self.workspaces.contains_key(workspace) {
             return Err(format!("workspace '{workspace}' isn't declared in config"));
         }
-        let target_monitor = self.resolve_monitor_target(target)?;
+        if self.workspace_is_synthetic(workspace) {
+            return Err(format!(
+                "workspace '{workspace}' is a display fallback and can't be moved"
+            ));
+        }
 
-        let current_monitor = self
-            .active_workspace
-            .iter()
-            .find(|(_, w)| w.as_str() == workspace)
-            .map(|(&mid, _)| mid);
-        if current_monitor == Some(target_monitor) {
+        let source = self.active_display_for_workspace(workspace);
+        let base = source
+            .or_else(|| self.workspace_home(workspace))
+            .unwrap_or(self.focused_monitor);
+        let target_monitor = self.resolve_monitor_target_from(target, base)?;
+        if source == Some(target_monitor) {
             return Ok(());
         }
-
-        let displaced = self.active_workspace.get(&target_monitor).cloned();
-        if let Some(old_monitor) = current_monitor {
-            if let Some(previous) = self.active_workspace.get(&old_monitor).cloned() {
-                self.previous_workspaces.insert(old_monitor, previous);
-            }
-            match &displaced {
-                Some(displaced_name) => {
-                    self.set_active_workspace(old_monitor, displaced_name.clone());
-                }
-                None => {
-                    self.active_workspace.remove(&old_monitor);
-                }
-            }
-        } else if let Some(displaced_name) = &displaced {
-            self.park_workspace(displaced_name);
+        if self.workspace_pinned_elsewhere(workspace, target_monitor) {
+            return Err(format!(
+                "workspace '{workspace}' is pinned to another monitor"
+            ));
         }
 
-        self.set_active_workspace(target_monitor, workspace.to_string());
-        self.relayout_monitor(target_monitor);
-        self.reposition_floating_for_monitor(target_monitor, true);
-        if let Some(old_monitor) = current_monitor {
-            self.relayout_monitor(old_monitor);
-            self.reposition_floating_for_monitor(old_monitor, true);
+        if let Some(source_monitor) = source {
+            match self.active_workspace.get(&target_monitor).cloned() {
+                Some(displaced_name) if displaced_name != workspace => {
+                    if self.workspace_is_synthetic(&displaced_name) {
+                        if self.workspace_has_windows(&displaced_name) {
+                            return Err(format!(
+                                "the target display is using fallback workspace \
+                                 '{displaced_name}' with windows; move those windows first"
+                            ));
+                        }
+                        self.remove_synthetic_workspace(&displaced_name);
+                    }
+                    if self.workspace_pinned_elsewhere(&displaced_name, source_monitor) {
+                        return Err(format!(
+                            "workspace '{displaced_name}' is pinned to another monitor"
+                        ));
+                    }
+
+                    self.previous_workspaces
+                        .insert(source_monitor, displaced_name.clone());
+                    self.previous_workspaces
+                        .insert(target_monitor, workspace.to_string());
+                    self.set_active_workspace(source_monitor, displaced_name);
+                    self.set_active_workspace(target_monitor, workspace.to_string());
+                    self.switch_epoch += 1;
+
+                    self.relayout_monitor(source_monitor);
+                    self.reposition_floating_for_monitor(source_monitor, true);
+                    self.relayout_monitor(target_monitor);
+                    self.reposition_floating_for_monitor(target_monitor, true);
+                    let focused = self.focused_monitor;
+                    self.focus_monitor_by_id(focused);
+                }
+                Some(_) => return Ok(()),
+                None => {
+                    self.active_workspace.remove(&source_monitor);
+                    self.set_active_workspace(target_monitor, workspace.to_string());
+                    self.ensure_monitor_workspaces();
+                    self.switch_epoch += 1;
+                    self.relayout_monitor(target_monitor);
+                    self.reposition_floating_for_monitor(target_monitor, true);
+                    let focused = self.focused_monitor;
+                    self.focus_monitor_by_id(focused);
+                }
+            }
+        } else {
+            // Parked: relocate the home only. This is the "safe move" — no
+            // visible workspace is disturbed, and `workspace X` opens it on
+            // the new display later.
+            self.workspace_monitor
+                .insert(workspace.to_string(), target_monitor);
         }
         self.renumber_synthetic_workspaces();
         Ok(())
     }
 
     fn resolve_monitor_target(&self, target: tili_ipc::MonitorTarget) -> Result<u32, String> {
+        self.resolve_monitor_target_from(target, self.focused_monitor)
+    }
+
+    /// Resolves a monitor target relative to `base` — used by workspace
+    /// moves so `next`/`prev` step from the workspace's own display rather
+    /// than from whichever display happens to be focused.
+    fn resolve_monitor_target_from(
+        &self,
+        target: tili_ipc::MonitorTarget,
+        base: u32,
+    ) -> Result<u32, String> {
         match target {
             tili_ipc::MonitorTarget::Id(id) => {
                 if self.monitors.iter().any(|m| m.id == id) {
@@ -5070,7 +5226,10 @@ impl WmState {
                 .map(|m| m.id)
                 .ok_or_else(|| "no main monitor connected".to_string()),
             tili_ipc::MonitorTarget::Next => self
-                .next_monitor_id()
+                .adjacent_monitor_id(base, 1)
+                .ok_or_else(|| "fewer than two monitors connected".to_string()),
+            tili_ipc::MonitorTarget::Prev => self
+                .adjacent_monitor_id(base, -1)
                 .ok_or_else(|| "fewer than two monitors connected".to_string()),
         }
     }
@@ -5157,76 +5316,108 @@ impl WmState {
         self.set_floating(!floating)
     }
 
-    /// Switches which workspace is active on `focused_monitor`: parks every
-    /// window in the outgoing workspace off-screen (tiled and floating
-    /// alike), lays out the incoming one's tiled tree for real and
-    /// re-centers its floating windows, and restores its remembered focus.
-    /// Creates the target workspace (empty) if it doesn't exist yet. A
-    /// no-op if `name` is already active on `focused_monitor`.
+    /// Switches to `name`, navigating to its **home display**: the display
+    /// already showing it, a connected `monitor="..."` pin, or the display
+    /// it last lived on. A workspace that has never been shown is assigned
+    /// to the focused display (so first use still feels local).
     ///
-    /// If `name` is currently shown on a *different* monitor, this focuses
-    /// that monitor instead of swapping the two workspaces. "Switch to
-    /// workspace X" means go where X already is; `move-workspace-to-monitor`
-    /// is the explicit way to relocate it. Two monitors still never show the
-    /// same workspace at once.
-    ///
-    /// Errors if `name` isn't a workspace declared in config — workspaces
-    /// are only ever created by `apply_config`'s declare-loop, never
-    /// on-the-fly by name.
+    /// A parked workspace is shown on its home display — never on an
+    /// unrelated focused display. The workspace occupying that display is
+    /// parked, so both workspaces keep their homes and no layout is swapped
+    /// behind the user's back. Use `workspace-here` for the explicit
+    /// "change this screen" action.
     pub fn switch_workspace(&mut self, name: &str) -> Result<(), String> {
+        if !self.workspaces.contains_key(name) {
+            return Err(format!("workspace '{name}' isn't declared in config"));
+        }
+        let focused_current = self.active_workspace.get(&self.focused_monitor).cloned();
+        if focused_current.as_deref() == Some(name) {
+            return Ok(());
+        }
+
+        // Already visible somewhere: navigating there is the whole action.
+        if let Some(display) = self.active_display_for_workspace(name) {
+            self.record_previous_focus();
+            self.switch_epoch += 1;
+            self.focus_monitor_by_id(display);
+            return Ok(());
+        }
+
+        if self.workspace_pinned_to_disconnected_display(name) {
+            return Err(format!(
+                "workspace '{name}' is pinned to a monitor that isn't connected"
+            ));
+        }
+
+        self.record_previous_focus();
+        let target = self
+            .workspace_home(name)
+            .filter(|id| self.monitors.iter().any(|monitor| monitor.id == *id))
+            .unwrap_or(self.focused_monitor);
+        self.switch_on_monitor(name, target, true)
+    }
+
+    /// Shows `name` on the currently focused display, pulling it from another
+    /// display (swap) or from parking (local switch). This is the explicit
+    /// "change this screen" counterpart to `switch_workspace`'s "go to X";
+    /// it is also what makes a pinned workspace's home meaningful.
+    pub fn switch_workspace_here(&mut self, name: &str) -> Result<(), String> {
+        if !self.workspaces.contains_key(name) {
+            return Err(format!("workspace '{name}' isn't declared in config"));
+        }
+        let target = self.focused_monitor;
+        if self.active_workspace.get(&target).map(String::as_str) == Some(name) {
+            return Ok(());
+        }
+        if self.workspace_is_synthetic(name) {
+            return Err(format!(
+                "workspace '{name}' is a display fallback and can't be pulled to another monitor"
+            ));
+        }
+        if self.workspace_pinned_elsewhere(name, target) {
+            return Err(format!("workspace '{name}' is pinned to another monitor"));
+        }
+
+        self.record_previous_focus();
+
+        if let Some(other) = self.active_display_for_workspace(name) {
+            self.swap_workspace_displays(name, other, target)?;
+            return Ok(());
+        }
+        self.switch_on_monitor(name, target, true)
+    }
+
+    /// Shows `name` on `monitor_id`, parking whatever was active there.
+    /// Shared by `workspace`'s home branch, `workspace-here`'s parked branch,
+    /// and `workspace-back`. Back-history is the caller's job, not this
+    /// function's.
+    fn switch_on_monitor(
+        &mut self,
+        name: &str,
+        monitor_id: u32,
+        focus: bool,
+    ) -> Result<(), String> {
         let switch_start = Instant::now();
         if !self.workspaces.contains_key(name) {
             return Err(format!("workspace '{name}' isn't declared in config"));
         }
-
-        let monitor_id = self.focused_monitor;
         let current = self.active_workspace.get(&monitor_id).cloned();
         if current.as_deref() == Some(name) {
-            return Ok(());
-        }
-
-        self.switch_epoch += 1;
-
-        let swap_monitor = self
-            .active_workspace
-            .iter()
-            .find(|(id, n)| **id != monitor_id && n.as_str() == name)
-            .map(|(&id, _)| id);
-
-        // The target workspace already lives on another display. Focus that
-        // display instead of swapping both layouts: "workspace X" from a
-        // hotkey/menu should take you to X where it already is, while
-        // `move-workspace-to-monitor` remains the explicit way to move it.
-        if let Some(target_monitor) = swap_monitor {
-            self.focused_monitor = target_monitor;
-            self.last_active_workspace
-                .insert(target_monitor, name.to_string());
-            let restore = self
-                .workspace_focus
-                .get(name)
-                .copied()
-                .or_else(|| self.active_tree().default_focus());
-            if let Some(node) = restore {
-                self.set_focused_node(node);
-                self.raise_focused();
+            if focus {
+                self.focus_monitor_by_id(monitor_id);
             }
             return Ok(());
         }
 
+        self.switch_epoch += 1;
         if let Some(outgoing) = current.clone() {
             self.previous_workspaces.insert(monitor_id, outgoing);
         }
 
         // Captured before any parking/relayout so the incoming workspace's
-        // windows can be brought on screen *first* (see below). Every
-        // window's AX write still fires concurrently within each of the
-        // steps below (see `write_windows_concurrently`) rather than one
-        // round-trip at a time, but the steps themselves stay ordered:
-        // parking the outgoing *tiled* windows before the incoming ones
-        // arrive would still leave a real (if brief) gap with nothing on
-        // screen but the desktop. Floating and tiled are tracked separately
-        // (see below) since that "avoid a blank gap" reasoning only applies
-        // to tiled windows, which fill the screen — floating ones don't.
+        // windows can be brought on screen first. The steps stay ordered for
+        // the same reason the original single-monitor switch did: parking
+        // the outgoing tiled windows first would leave a visible blank gap.
         let outgoing_tiled: Vec<WindowId> = current.as_ref().map_or(Vec::new(), |outgoing_name| {
             self.workspaces
                 .get(outgoing_name)
@@ -5240,12 +5431,6 @@ impl WmState {
 
         self.set_active_workspace(monitor_id, name.to_string());
 
-        // Suppressed even under `Settings::animate`: these calls reveal
-        // whatever this workspace's windows were left at — for most of
-        // them that's `park`'s hidden corner, which was never meant to be
-        // seen, so there's no meaningful start point to ease from (and
-        // "ease in from a hidden corner" would itself flash a slide across
-        // the screen, the opposite of the point).
         self.frame_setter.set_suppressed(true);
         let phase_start = Instant::now();
         self.relayout_monitor_concurrently(monitor_id);
@@ -5260,23 +5445,15 @@ impl WmState {
             phase_start.elapsed()
         ));
 
-        // Raised *before* either outgoing park loop below, not after —
-        // `raise_focused` changes z-order/keyboard focus only, it doesn't
-        // draw anything, so moving it earlier can't uncover the "blank
-        // screen" gap `outgoing_tiled`'s comment above is about. Some apps
-        // animate a `kAXPositionAttribute` change instead of snapping
-        // instantly; if `name`'s app isn't topmost yet by the time a
-        // floating outgoing window's park write lands, that window (always
-        // above tiled content in z-order) can still render mid-animation on
-        // top of the just-shown incoming workspace even though its park
-        // write was issued first. Settling z-order here means any such
-        // animation plays out already-hidden behind `name`.
         let restore = self
             .workspace_focus
             .get(name)
             .copied()
-            .or_else(|| self.active_tree().default_focus());
-        if let Some(node) = restore {
+            .or_else(|| self.workspaces.get(name).and_then(Tree::default_focus));
+        if focus {
+            self.focused_monitor = monitor_id;
+        }
+        if focus && let Some(node) = restore {
             self.set_focused_node(node);
             let phase_start = Instant::now();
             self.raise_focused();
@@ -5300,14 +5477,6 @@ impl WmState {
             phase_start.elapsed()
         ));
 
-        // Kept suppressed through the `swap_monitor` branch above too, not
-        // just the primary incoming relayout: `relayout_monitor_concurrently`/
-        // `reposition_floating_for_monitor_concurrently` bypass `frame_setter`
-        // entirely (direct concurrent writes), never calling `finish()` — so
-        // un-suppressing before they run wouldn't change *their* behavior,
-        // but it would let a window's stale in-flight tween from some
-        // earlier operation resume on the next `animation_tick` and visibly
-        // drag it away from the frame just written here.
         self.frame_setter.set_suppressed(false);
 
         // An empty synthetic fallback workspace should not linger once the
@@ -5324,19 +5493,129 @@ impl WmState {
         Ok(())
     }
 
-    /// Switches back to whichever workspace was active on `focused_monitor`
-    /// immediately before its last switch (back-and-forth toggle). Goes
-    /// through `switch_workspace` itself, so it updates
-    /// `previous_workspace` again in turn (to whatever's active right now),
-    /// making repeated calls toggle between the two rather than only ever
-    /// working once.
+    /// Swaps `workspace` (currently on `from`) with whatever is active on
+    /// `to`. Used only by `workspace-here`: both displays keep exactly one
+    /// active workspace, and every window follows its workspace.
+    fn swap_workspace_displays(
+        &mut self,
+        workspace: &str,
+        from: u32,
+        to: u32,
+    ) -> Result<(), String> {
+        if from == to {
+            return Ok(());
+        }
+        let displaced = self.active_workspace.get(&to).cloned();
+        let Some(displaced_name) = displaced else {
+            // Target had no workspace at all (should be rare after
+            // `ensure_monitor_workspaces`); move it and re-fill the source.
+            self.active_workspace.remove(&from);
+            self.set_active_workspace(to, workspace.to_string());
+            self.ensure_monitor_workspaces();
+            self.relayout_monitor(to);
+            self.reposition_floating_for_monitor(to, true);
+            self.focus_monitor_by_id(to);
+            self.switch_epoch += 1;
+            return Ok(());
+        };
+        if displaced_name == workspace {
+            self.focus_monitor_by_id(to);
+            return Ok(());
+        }
+        if self.workspace_is_synthetic(&displaced_name) {
+            if self.workspace_has_windows(&displaced_name) {
+                return Err(format!(
+                    "the focused display is using fallback workspace '{displaced_name}' \
+                     with windows; move those windows before pulling another workspace here"
+                ));
+            }
+            self.remove_synthetic_workspace(&displaced_name);
+        }
+        if self.workspace_pinned_elsewhere(&displaced_name, from) {
+            return Err(format!(
+                "workspace '{displaced_name}' is pinned to another monitor"
+            ));
+        }
+
+        self.previous_workspaces.insert(to, displaced_name.clone());
+        self.previous_workspaces.insert(from, workspace.to_string());
+        self.set_active_workspace(from, displaced_name);
+        self.set_active_workspace(to, workspace.to_string());
+        self.switch_epoch += 1;
+
+        self.relayout_monitor(from);
+        self.reposition_floating_for_monitor(from, true);
+        self.relayout_monitor(to);
+        self.reposition_floating_for_monitor(to, true);
+        self.focus_monitor_by_id(to);
+        Ok(())
+    }
+
+    /// Returns to the `(display, workspace)` pair the user was looking at
+    /// before the last navigation command. Restores the pair, not just the
+    /// workspace: if it is still on the remembered display it is focused; if
+    /// parked it is shown there; if it was swapped to another display from
+    /// the current one (the `workspace-here` case) the swap is undone.
+    /// Returning from a cross-display jump only focuses the remembered
+    /// display, never rearranging another screen. Repeated calls toggle,
+    /// since each one records the pair it left.
     pub fn switch_to_previous_workspace(&mut self) -> Result<(), String> {
-        let target = self
-            .previous_workspaces
-            .get(&self.focused_monitor)
-            .cloned()
+        let previous = self
+            .previous_focus
+            .clone()
+            .or_else(|| {
+                self.previous_workspaces
+                    .get(&self.focused_monitor)
+                    .cloned()
+                    .map(|workspace| (self.focused_monitor, workspace))
+            })
             .ok_or("no previous workspace to switch back to")?;
-        self.switch_workspace(&target)
+        let (monitor, workspace) = previous;
+        if !self
+            .monitors
+            .iter()
+            .any(|candidate| candidate.id == monitor)
+        {
+            self.previous_focus = None;
+            return Err("the previous monitor is no longer connected".to_string());
+        }
+
+        let current_pair = (self.focused_monitor, self.active_workspace_name());
+        self.previous_focus = Some(current_pair.clone());
+
+        if self.active_workspace.get(&monitor).map(String::as_str) == Some(workspace.as_str()) {
+            self.focus_monitor_by_id(monitor);
+            return Ok(());
+        }
+
+        if self.active_display_for_workspace(&workspace).is_none()
+            && self.workspaces.contains_key(&workspace)
+            && !self.workspace_pinned_elsewhere(&workspace, monitor)
+        {
+            self.switch_on_monitor(&workspace, monitor, true)?;
+            return Ok(());
+        }
+
+        // Backing out of `workspace-here` on the same display: the previous
+        // workspace was swapped to another display. Undo that swap locally
+        // instead of leaving the user on the pulled workspace with a no-op
+        // back. Only allowed for the display that was actually remembered;
+        // returning from a cross-display jump must not rearrange anything.
+        if monitor == self.focused_monitor
+            && let Some(other) = self.active_display_for_workspace(&workspace)
+            && self.workspaces.contains_key(&workspace)
+            && !self.workspace_is_synthetic(&workspace)
+            && !self.workspace_pinned_elsewhere(&workspace, monitor)
+        {
+            self.swap_workspace_displays(&workspace, other, monitor)?;
+            return Ok(());
+        }
+
+        // The workspace moved elsewhere (or its display's layout changed
+        // under us); returning to the remembered screen is enough. Never
+        // pull another display's layout back implicitly.
+        self.focus_monitor_by_id(monitor);
+        Ok(())
     }
 
     /// Current value of `switch_epoch` — see its doc comment on `WmState`.
@@ -7166,6 +7445,50 @@ mod tests {
         ]
     }
 
+    fn three_monitor_fixture() -> Vec<Monitor> {
+        vec![
+            Monitor {
+                id: 1,
+                frame: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: true,
+                notch: 0.0,
+                pretty_name: "Main Display".to_string(),
+                ordinal: 1,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect {
+                    x: 1920.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+                notch: 0.0,
+                pretty_name: "Display 2".to_string(),
+                ordinal: 2,
+            },
+            Monitor {
+                id: 3,
+                frame: Rect {
+                    x: 3840.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+                is_main: false,
+                notch: 0.0,
+                pretty_name: "Display 3".to_string(),
+                ordinal: 3,
+            },
+        ]
+    }
+
     #[allow(clippy::field_reassign_with_default)]
     fn floating_test_state() -> WmState {
         let mut state = WmState::default();
@@ -7186,6 +7509,31 @@ mod tests {
         state
             .active_workspace
             .insert(1, DEFAULT_WORKSPACE.to_string());
+        state.focused_monitor = 1;
+        state
+    }
+
+    /// m1=work, m2=entertain; random home m1, trade home m2.
+    #[allow(clippy::field_reassign_with_default)]
+    fn two_display_home_state() -> WmState {
+        let mut state = WmState::default();
+        state.monitors = two_monitor_fixture();
+        state.workspaces.clear();
+        for name in ["work", "entertain", "random", "trade"] {
+            state.workspaces.insert(name.to_string(), Tree::new());
+        }
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "work".to_string());
+        state.active_workspace.insert(2, "entertain".to_string());
+        state.workspace_monitor.clear();
+        state.workspace_monitor.insert("work".to_string(), 1);
+        state.workspace_monitor.insert("entertain".to_string(), 2);
+        state.workspace_monitor.insert("random".to_string(), 1);
+        state.workspace_monitor.insert("trade".to_string(), 2);
+        state.last_active_workspace.insert(1, "work".to_string());
+        state
+            .last_active_workspace
+            .insert(2, "entertain".to_string());
         state.focused_monitor = 1;
         state
     }
@@ -9013,6 +9361,29 @@ mod tests {
             state.resolve_monitor_target(tili_ipc::MonitorTarget::Next),
             Ok(2)
         );
+        assert_eq!(
+            state.resolve_monitor_target(tili_ipc::MonitorTarget::Prev),
+            Ok(2),
+            "with two monitors, previous wraps to the same neighbor as next"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn focus_monitor_prev_wraps_backwards() {
+        let mut state = WmState::default();
+        state.monitors = three_monitor_fixture();
+        state.focused_monitor = 1;
+
+        state
+            .focus_monitor_target(tili_ipc::MonitorTarget::Prev)
+            .unwrap();
+        assert_eq!(state.focused_monitor, 3);
+
+        state
+            .focus_monitor_target(tili_ipc::MonitorTarget::Next)
+            .unwrap();
+        assert_eq!(state.focused_monitor, 1);
     }
 
     #[test]
@@ -9039,7 +9410,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
-    fn move_workspace_to_monitor_from_parked_displaces_whatever_was_shown() {
+    fn move_workspace_to_monitor_from_parked_only_changes_its_home() {
         let mut state = WmState::default();
         state.monitors = two_monitor_fixture();
         state.workspaces.insert("parked".to_string(), Tree::new());
@@ -9054,8 +9425,90 @@ mod tests {
                 .is_ok()
         );
 
-        assert_eq!(state.active_workspace.get(&2), Some(&"parked".to_string()));
-        assert!(!state.active_workspace.values().any(|w| w == "shown"));
+        assert_eq!(
+            state.active_workspace.get(&2),
+            Some(&"shown".to_string()),
+            "a parked workspace's move must not disturb the target display"
+        );
+        assert!(!state.active_workspace.values().any(|w| w == "parked"));
+        assert_eq!(state.workspace_monitor.get("parked"), Some(&2));
+        assert_eq!(state.workspace_home("parked"), Some(2));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn move_workspace_to_monitor_next_and_prev_step_from_the_workspaces_display() {
+        let mut state = WmState::default();
+        state.monitors = three_monitor_fixture();
+        for name in ["a", "b", "c"] {
+            state.workspaces.insert(name.to_string(), Tree::new());
+        }
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "a".to_string());
+        state.active_workspace.insert(2, "b".to_string());
+        state.active_workspace.insert(3, "c".to_string());
+        state.focused_monitor = 1;
+
+        // "a" is on monitor 1; next is monitor 2.
+        assert!(
+            state
+                .move_workspace_to_monitor(Some("a"), tili_ipc::MonitorTarget::Next)
+                .is_ok()
+        );
+        assert_eq!(state.active_workspace.get(&2), Some(&"a".to_string()));
+        assert_eq!(state.active_workspace.get(&1), Some(&"b".to_string()));
+
+        // "a" is now on monitor 2; prev is monitor 1.
+        assert!(
+            state
+                .move_workspace_to_monitor(Some("a"), tili_ipc::MonitorTarget::Prev)
+                .is_ok()
+        );
+        assert_eq!(state.active_workspace.get(&1), Some(&"a".to_string()));
+        assert_eq!(state.active_workspace.get(&2), Some(&"b".to_string()));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn move_workspace_to_monitor_refuses_a_pinned_workspace_off_its_pin() {
+        let mut state = WmState::default();
+        state.monitors = two_monitor_fixture();
+        state.workspaces.insert("pinned".to_string(), Tree::new());
+        state.workspaces.insert("other".to_string(), Tree::new());
+        state.active_workspace.clear();
+        state.active_workspace.insert(1, "pinned".to_string());
+        state.active_workspace.insert(2, "other".to_string());
+        state.focused_monitor = 1;
+        state
+            .workspace_pins
+            .insert("pinned".to_string(), "1".to_string());
+
+        assert!(
+            state
+                .move_workspace_to_monitor(Some("pinned"), tili_ipc::MonitorTarget::Id(2))
+                .is_err()
+        );
+        assert_eq!(state.active_workspace.get(&1), Some(&"pinned".to_string()));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn move_workspace_to_monitor_refuses_a_synthetic_fallback() {
+        let mut state = WmState::default();
+        state.monitors = two_monitor_fixture();
+        state
+            .workspaces
+            .insert("display-2".to_string(), Tree::new());
+        state.synthetic_workspaces.insert("display-2".to_string());
+        state.active_workspace.clear();
+        state.active_workspace.insert(2, "display-2".to_string());
+        state.focused_monitor = 1;
+
+        assert!(
+            state
+                .move_workspace_to_monitor(Some("display-2"), tili_ipc::MonitorTarget::Main)
+                .is_err()
+        );
     }
 
     #[test]
@@ -9233,6 +9686,179 @@ mod tests {
 
         assert!(state.switch_to_previous_workspace().is_ok());
         assert_eq!(state.active_workspace_name(), "b");
+    }
+
+    #[test]
+    fn workspace_goes_to_its_home_display_instead_of_the_focused_one() {
+        let mut state = two_display_home_state();
+        // Park work on m1 by switching m1 to random, then stand on m2.
+        state.active_workspace.insert(1, "random".to_string());
+        state.focused_monitor = 2;
+
+        assert!(state.switch_workspace("work").is_ok());
+
+        assert_eq!(
+            state.active_workspace.get(&1),
+            Some(&"work".to_string()),
+            "work belongs to m1 and must return there"
+        );
+        assert_eq!(
+            state.active_workspace.get(&2),
+            Some(&"entertain".to_string()),
+            "m2 keeps its own workspace"
+        );
+        assert_eq!(state.focused_monitor, 1);
+    }
+
+    #[test]
+    fn workspace_already_visible_elsewhere_only_focuses_that_display() {
+        let mut state = two_display_home_state();
+        // work is on m1, entertain on m2, focus m1.
+        assert!(state.switch_workspace("entertain").is_ok());
+
+        assert_eq!(state.focused_monitor, 2);
+        assert_eq!(state.active_workspace.get(&1), Some(&"work".to_string()));
+        assert_eq!(
+            state.active_workspace.get(&2),
+            Some(&"entertain".to_string())
+        );
+    }
+
+    #[test]
+    fn first_use_assigns_a_never_shown_workspace_to_the_focused_display() {
+        let mut state = two_display_home_state();
+        state.workspaces.insert("fresh".to_string(), Tree::new());
+        state.workspace_monitor.remove("fresh");
+        state.focused_monitor = 2;
+
+        assert!(state.switch_workspace("fresh").is_ok());
+
+        assert_eq!(state.active_workspace.get(&2), Some(&"fresh".to_string()));
+        assert_eq!(state.workspace_monitor.get("fresh"), Some(&2));
+        assert_eq!(state.active_workspace.get(&1), Some(&"work".to_string()));
+    }
+
+    #[test]
+    fn workspace_here_pulls_a_parked_workspace_to_the_focused_display() {
+        let mut state = two_display_home_state();
+        state.active_workspace.insert(1, "random".to_string());
+        state.focused_monitor = 2;
+
+        assert!(state.switch_workspace_here("work").is_ok());
+
+        assert_eq!(state.active_workspace.get(&2), Some(&"work".to_string()));
+        assert_eq!(state.workspace_monitor.get("work"), Some(&2));
+        assert_eq!(
+            state.active_workspace.get(&1),
+            Some(&"random".to_string()),
+            "the source display is unchanged for a parked pull"
+        );
+        assert_eq!(state.focused_monitor, 2);
+    }
+
+    #[test]
+    fn workspace_here_swaps_a_workspace_visible_on_another_display() {
+        let mut state = two_display_home_state();
+
+        assert!(state.switch_workspace_here("entertain").is_ok());
+
+        assert_eq!(
+            state.active_workspace.get(&1),
+            Some(&"entertain".to_string())
+        );
+        assert_eq!(state.active_workspace.get(&2), Some(&"work".to_string()));
+        assert_eq!(state.workspace_monitor.get("entertain"), Some(&1));
+        assert_eq!(state.workspace_monitor.get("work"), Some(&2));
+        assert_eq!(state.focused_monitor, 1);
+    }
+
+    #[test]
+    fn workspace_here_refuses_a_workspace_pinned_to_another_display() {
+        let mut state = two_display_home_state();
+        state
+            .workspace_pins
+            .insert("entertain".to_string(), "2".to_string());
+
+        assert!(state.switch_workspace_here("entertain").is_err());
+        assert_eq!(
+            state.active_workspace.get(&2),
+            Some(&"entertain".to_string())
+        );
+    }
+
+    #[test]
+    fn workspace_pinned_to_a_disconnected_display_errors_instead_of_moving() {
+        let mut state = two_display_home_state();
+        state.workspaces.insert("reserved".to_string(), Tree::new());
+        state
+            .workspace_pins
+            .insert("reserved".to_string(), "99".to_string());
+
+        assert!(state.switch_workspace("reserved").is_err());
+        assert!(!state.active_workspace.values().any(|w| w == "reserved"));
+    }
+
+    #[test]
+    fn workspace_back_returns_to_the_previous_display_workspace_pair() {
+        let mut state = two_display_home_state();
+
+        assert!(state.switch_workspace("entertain").is_ok());
+        assert_eq!(state.focused_monitor, 2);
+
+        assert!(state.switch_to_previous_workspace().is_ok());
+        assert_eq!(state.focused_monitor, 1);
+        assert_eq!(state.active_workspace.get(&1), Some(&"work".to_string()));
+    }
+
+    #[test]
+    fn workspace_back_does_not_steal_a_workspace_that_moved_displays() {
+        let mut state = two_display_home_state();
+
+        // focus m2 via the visible workspace.
+        assert!(state.switch_workspace("entertain").is_ok());
+        // work moves to m2, swapping with entertain.
+        assert!(
+            state
+                .move_workspace_to_monitor(Some("work"), tili_ipc::MonitorTarget::Id(2))
+                .is_ok()
+        );
+        assert_eq!(
+            state.active_workspace.get(&1),
+            Some(&"entertain".to_string())
+        );
+        assert_eq!(state.active_workspace.get(&2), Some(&"work".to_string()));
+
+        // Back remembers (m1, work), but work now lives on m2. It must only
+        // return to m1, not drag work back across displays.
+        assert!(state.switch_to_previous_workspace().is_ok());
+        assert_eq!(state.focused_monitor, 1);
+        assert_eq!(
+            state.active_workspace.get(&1),
+            Some(&"entertain".to_string())
+        );
+        assert_eq!(state.active_workspace.get(&2), Some(&"work".to_string()));
+    }
+
+    #[test]
+    fn workspace_back_undoes_a_workspace_here_swap() {
+        let mut state = two_display_home_state();
+
+        // Pull entertain (m2) onto m1: m1=entertain, m2=work.
+        assert!(state.switch_workspace_here("entertain").is_ok());
+        assert_eq!(
+            state.active_workspace.get(&1),
+            Some(&"entertain".to_string())
+        );
+        assert_eq!(state.active_workspace.get(&2), Some(&"work".to_string()));
+
+        // Back restores the pair on the same display by swapping back.
+        assert!(state.switch_to_previous_workspace().is_ok());
+        assert_eq!(state.active_workspace.get(&1), Some(&"work".to_string()));
+        assert_eq!(
+            state.active_workspace.get(&2),
+            Some(&"entertain".to_string())
+        );
+        assert_eq!(state.focused_monitor, 1);
     }
 
     #[test]

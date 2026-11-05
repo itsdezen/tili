@@ -33,6 +33,10 @@ pub enum MonitorTarget {
     Id(u32),
     /// Whichever monitor `Command::FocusMonitor` would cycle to next.
     Next,
+    /// Whichever monitor is one step before the current one in the
+    /// deterministic display order (`main`, then left-to-right). Used by
+    /// `focus-monitor prev` and `move-workspace-to-monitor prev`.
+    Prev,
     /// The main display.
     Main,
 }
@@ -57,6 +61,11 @@ pub enum Command {
     /// perpendicular container.
     Join(Direction),
     WorkspaceSwitch(String),
+    /// Switches the currently focused monitor to `name`, pulling the
+    /// workspace to this display (swapping with whatever is there) instead
+    /// of navigating to the workspace's home display. This is the explicit
+    /// "change this screen" counterpart to `WorkspaceSwitch`'s "go to X".
+    WorkspaceHere(String),
     MoveNodeToWorkspace(String),
     /// `root: true` targets the workspace's root tiling container instead
     /// of the focused window's immediate parent. Still a single-container
@@ -132,7 +141,7 @@ pub enum Command {
     /// Cycles which connected monitor `Focus`/`Move`/`WorkspaceSwitch`/etc.
     /// operate on. A no-op with fewer than two monitors connected.
     FocusMonitor,
-    /// Focuses a specific connected monitor (`main`, `next`, or a display id)
+    /// Focuses a specific connected monitor (`main`, `next`, `prev`, or a display id)
     /// instead of cycling. Used by `tili focus-monitor <target>`; the
     /// cycle-only `FocusMonitor` remains the hotkey-friendly default.
     FocusMonitorTarget(MonitorTarget),

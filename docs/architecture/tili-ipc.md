@@ -24,9 +24,14 @@ files, the socket, config syntax, the state file). See
 
 `WorkspaceInfo` now carries `display_name`/`synthetic` (auto-created
 display fallbacks expose the monitor's pretty name) and `last_monitor`
-(the display a parked workspace will return to). `MonitorInfo` carries
-`ordinal` and `pretty_name` so clients can render `Display 2`/`Sidecar
-Display` without a second query.
+(the display a parked workspace returns to — its home). `MonitorInfo`
+carries `ordinal` and `pretty_name` so clients can render `Display
+2`/`Sidecar Display` without a second query.
+
+`MonitorTarget` includes `Next` and `Prev`, and `Command::WorkspaceHere(name)`
+is the explicit local-switch counterpart to `WorkspaceSwitch(name)`'s home
+navigation. The keybinding parser accepts `workspace-here <name>` and
+`move-workspace-to-monitor ... prev`.
 
 `Command::QueryState`'s payload, `QueryState`, is the external-integration
 snapshot: versioned, and unlike `SnapshotInfo` it includes every tracked

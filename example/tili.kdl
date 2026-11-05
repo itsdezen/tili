@@ -184,12 +184,17 @@ menubar {
 //   move <dir>                      move the focused window itself
 //   join <dir>                      wrap focused window + neighbor in a new
 //                                    perpendicular container
-//   workspace <name>                switch to a declared workspace
-//   workspace-back                  switch back to the previously-active one
+//   workspace <name>                go to a workspace's home display, or
+//                                   focus the display already showing it
+//   workspace-here <name>           switch the focused display to the
+//                                   workspace, pulling/ swapping it here
+//   workspace-back                  return to the previous display+workspace
 //   move-node-to-workspace <name>   move the focused window to a workspace
-//   move-workspace-to-monitor next|main
+//   move-workspace-to-monitor next|prev|main
 //                                   move the active (or a named) workspace
-//                                   to another connected monitor
+//                                   to another connected monitor; an active
+//                                   workspace swaps, a parked one only
+//                                   changes its home display
 //   layout toggle[ root]            flip focused container Tiles<->Accordion
 //   layout tiles[ root]             set focused container to Tiles
 //   layout accordion[ root]         set focused container to Accordion
@@ -213,7 +218,7 @@ menubar {
 //   toggle-floating                 flip the focused window between tiled
 //                                   and floating (hotkey-friendly)
 //   focus-monitor [target]           cycle monitors, or focus "main",
-//                                   "next", or a numeric display id
+//                                   "next", "prev", or a numeric display id
 //   mode <name>                     switch to a named keybindings mode
 //   mode exit                       return to the default ("main") mode
 //
@@ -235,20 +240,33 @@ keybindings mode="main" {
     // one with its left neighbor.
     bind "alt-shift-g" "join left"
 
+    // Alt = go to the workspace's home display (or focus the display
+    // already showing it). A parked workspace returns to the display it
+    // belongs to, never to whichever display happens to be focused.
     bind "alt-w" "workspace work"
     bind "alt-e" "workspace entertain"
     bind "alt-r" "workspace random"
+
+    // Alt+Ctrl = move workspaces between displays.
+    // Pull a workspace to the focused display (swap if it lives elsewhere).
+    bind "alt-ctrl-w" "workspace-here work"
+    bind "alt-ctrl-e" "workspace-here entertain"
+    bind "alt-ctrl-r" "workspace-here random"
+
+    // Push the active workspace to the previous/next display, or to main.
+    // An active workspace swaps with the target; a parked one only changes
+    // its home display.
+    bind "alt-ctrl-comma" "move-workspace-to-monitor prev"
+    bind "alt-ctrl-period" "move-workspace-to-monitor next"
+    bind "alt-ctrl-m" "move-workspace-to-monitor main"
 
     bind "alt-shift-w" "move-node-to-workspace work"
     bind "alt-shift-e" "move-node-to-workspace entertain"
     bind "alt-shift-r" "move-node-to-workspace random"
 
-    // Switches back to whichever workspace was active before this one.
+    // Returns to the display+workspace pair you were looking at before the
+    // last navigation command.
     bind "alt-tab" "workspace-back"
-
-    // Moves the current workspace to the next connected monitor — a no-op
-    // with only one monitor.
-    bind "alt-shift-tab" "move-workspace-to-monitor next"
 
     bind "alt-slash" "layout toggle"
 

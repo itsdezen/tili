@@ -205,11 +205,25 @@ low-fps on real hardware.
   on `on_displays_changed`. Assignment order is pinned workspace, last
   workspace on that display, first free declared workspace in config order,
   then a synthetic `display-<ordinal>` fallback.
-- A workspace is never active on two displays at once. `switch_workspace`
-  focuses the display already showing the target; `move-workspace-to-monitor`
-  is the explicit relocation command.
+- A workspace is never active on two displays at once. Each workspace has a
+  **home display**: the display showing it, a connected pin, or the display
+  it last lived on. `switch_workspace` goes to that home (focusing an
+  already-visible workspace, or showing a parked one there and parking the
+  display's previous workspace). It never materializes a parked workspace on
+  an unrelated display; a never-shown workspace is assigned to the focused
+  display on first use.
+- `switch_workspace_here` is the explicit local verb: it shows the workspace
+  on the focused display, swapping with its occupant when the workspace lives
+  elsewhere. `move-workspace-to-monitor next|prev|main` pushes the active
+  workspace (swap) or only changes a parked workspace's home.
+- `workspace-back` restores the previous `(display, workspace)` pair. It
+  undoes a `workspace-here` swap locally when still on the same display, but
+  returning from a cross-display jump only focuses the remembered display and
+  never rearranges another screen.
 - Pins (`workspace "x" monitor="main|id"`) reserve the workspace even while
-  the target display is disconnected.
+  the target display is disconnected. A pinned workspace cannot be moved off
+  its pin by `workspace-here` or `move-workspace-to-monitor`; a synthetic
+  display fallback cannot be relocated at all.
 - Synthetic fallbacks are marked, use the monitor's pretty name
   (`NSScreen.localizedName` fallback `Display N`), are renumbered when the
   layout changes, and are never persisted empty. On disconnect an empty

@@ -267,9 +267,14 @@ rationale (and real-hardware evidence) behind each is in
   monitor's `NSScreen.localizedName` for display, are renumbered when the
   layout changes, and are removed after their windows are migrated when
   the display disconnects. Empty synthetic workspaces are never persisted.
-- **`workspace <name>` focuses the display already showing it; it never
-  swaps layouts.** `move-workspace-to-monitor` is the explicit relocation
-  command. Back-and-forth history is per monitor.
+- **Workspaces have a home display.** `workspace <name>` goes there — the
+  display already showing it, a connected `monitor="..."` pin, or the
+  display it last lived on — and never materializes a parked workspace on an
+  unrelated display. `workspace-here <name>` is the explicit local verb
+  (pull/swap onto the focused display); `move-workspace-to-monitor
+  next|prev|main` pushes the active workspace or changes a parked one's home
+  only. `workspace-back` restores the previous `(display, workspace)` pair
+  and never steals a layout from another display.
 - **Native tabs are app-owned and opaque to tili.** A brand-new window
   matching a managed same-app/same-frame sibling (with the old window no
   longer enumerable, or an explicit `AXTabGroup`) is folded into that

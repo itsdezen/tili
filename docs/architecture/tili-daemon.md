@@ -351,12 +351,38 @@ model; synthetic ids are renumbered `display-<ordinal>` when the layout
 changes.
 
 `Command::FocusMonitor` (`focus_monitor_next`) cycles monitors;
-`Command::FocusMonitorTarget` focuses `main`/`next`/a specific id. M10's
-focus-follows-monitor also changes `focused_monitor`. `switch_workspace`
-focuses the display already showing the target workspace — it no longer
-swaps both displays' layouts. `move-workspace-to-monitor` is the explicit
-relocation command and still swaps with whatever occupies the target.
-Back-and-forth history (`previous_workspaces`) is per monitor.
+`Command::FocusMonitorTarget` focuses `main`/`next`/`prev`/a specific id.
+M10's focus-follows-monitor also changes `focused_monitor`.
+
+Workspaces have a **home display**, resolved by `workspace_home` as:
+the display currently showing it, then a connected `monitor="..."` pin,
+then `workspace_monitor`'s last display. `switch_workspace` goes there:
+an already-visible workspace just focuses its display; a parked one is shown
+on its home (parking that display's previous workspace) and the display is
+focused. A never-shown workspace is assigned to the focused display on first
+use. It never materializes a parked workspace on an unrelated display, and a
+pin whose display is disconnected is an error instead of a silent fallback.
+
+`switch_workspace_here` is the explicit local verb: it shows the workspace
+on the focused display, swapping with whatever is there when the workspace
+lives on another display, and parking the current workspace when the target
+was parked. `move-workspace-to-monitor next|prev|main` pushes the active
+workspace (swap with the target) or, for a parked workspace, only changes its
+home — the target's current screen is untouched. `next`/`prev` are resolved
+relative to the workspace's own display through `resolve_monitor_target_from`.
+Pinned and synthetic workspaces are refused by both relocation paths, and a
+swap is refused when it would push a pinned/synthetic workspace off its
+display.
+
+`previous_focus: Option<(monitor, workspace)>` backs `workspace-back`: it
+records the pair before each navigation (`workspace`, `workspace-here`,
+`focus-monitor`) and restores it. If the remembered workspace is still on the
+remembered display it just focuses it; if it is parked it is shown there; if
+it was swapped to another display from the *current* display (the
+`workspace-here` case) the swap is undone locally. Returning from a
+cross-display jump only focuses the remembered display and never rearranges
+another screen. The older per-monitor `previous_workspaces` map is still
+persisted for session compatibility and as a fallback.
 
 `on_displays_changed` (called from `main.rs` on every
 `spawn_display_watcher` signal) is the hot-plug/unplug handler: a

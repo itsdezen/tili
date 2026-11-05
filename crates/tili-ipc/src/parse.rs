@@ -53,6 +53,7 @@ fn parse_tokens(tokens: &[&str]) -> Command {
         ["move", dir] => direction(dir).map_or_else(|| raw(tokens), Command::Move),
         ["join", dir] => direction(dir).map_or_else(|| raw(tokens), Command::Join),
         ["workspace", name] => Command::WorkspaceSwitch((*name).to_string()),
+        ["workspace-here", name] => Command::WorkspaceHere((*name).to_string()),
         ["workspace-back"] => Command::WorkspaceBack,
         ["move-node-to-workspace", name] => Command::MoveNodeToWorkspace((*name).to_string()),
         ["move-workspace-to-monitor", target] => monitor_target(target).map_or_else(
@@ -116,6 +117,7 @@ fn parse_tokens(tokens: &[&str]) -> Command {
 fn monitor_target(s: &str) -> Option<MonitorTarget> {
     match s {
         "next" => Some(MonitorTarget::Next),
+        "prev" => Some(MonitorTarget::Prev),
         "main" => Some(MonitorTarget::Main),
         _ => s.parse::<u32>().ok().map(MonitorTarget::Id),
     }
@@ -157,6 +159,11 @@ mod tests {
             parse("workspace entertain"),
             Command::WorkspaceSwitch(name) if name == "entertain"
         ));
+        assert!(matches!(
+            parse("workspace-here entertain"),
+            Command::WorkspaceHere(name) if name == "entertain"
+        ));
+        assert!(matches!(parse("workspace-here"), Command::Raw { .. }));
         assert!(matches!(
             parse("move-node-to-workspace random"),
             Command::MoveNodeToWorkspace(name) if name == "random"
@@ -283,6 +290,11 @@ mod tests {
                 if workspace == Some("work".to_string())
         ));
         assert!(matches!(
+            parse("move-workspace-to-monitor work prev"),
+            Command::MoveWorkspaceToMonitor { workspace, target: MonitorTarget::Prev }
+                if workspace == Some("work".to_string())
+        ));
+        assert!(matches!(
             parse("move-workspace-to-monitor work main"),
             Command::MoveWorkspaceToMonitor { workspace, target: MonitorTarget::Main }
                 if workspace == Some("work".to_string())
@@ -362,6 +374,10 @@ mod tests {
         assert!(matches!(
             parse("focus-monitor main"),
             Command::FocusMonitorTarget(MonitorTarget::Main)
+        ));
+        assert!(matches!(
+            parse("focus-monitor prev"),
+            Command::FocusMonitorTarget(MonitorTarget::Prev)
         ));
         assert!(matches!(
             parse("focus-monitor 12"),

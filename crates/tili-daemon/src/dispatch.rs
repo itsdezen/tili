@@ -56,6 +56,7 @@ fn dispatch_inner(state: &mut WmState, command: Command) -> Response {
         Command::OrientationToggle(root) => result_response(state.toggle_orientation(root)),
         Command::ListWorkspaces => payload_response(state.list_workspaces()),
         Command::WorkspaceSwitch(name) => result_response(state.switch_workspace(&name)),
+        Command::WorkspaceHere(name) => result_response(state.switch_workspace_here(&name)),
         Command::MoveNodeToWorkspace(name) => {
             result_response(state.move_focused_to_workspace(&name))
         }

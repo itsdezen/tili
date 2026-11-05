@@ -40,9 +40,18 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   (`Sidecar Display`, `DELL U2720Q`) or `Display N`, and are renumbered
   on layout changes. Empty fallbacks are removed on disconnect; non-empty
   ones migrate their windows to the main/focused workspace before removal.
-  `tili workspace <name>` now focuses the display already showing that
-  workspace instead of swapping layouts, and
-  `tili focus-monitor [main|next|id]` focuses a specific display.
+  `tili focus-monitor [main|next|prev|id]` focuses a specific display.
+- **Home-display workspace flow.** Every workspace now has a home display:
+  `tili workspace <name>` goes there (or focuses the display already showing
+  it) and never materializes a parked workspace on an unrelated display.
+  `tili workspace-here <name>` explicitly pulls a workspace to the focused
+  display, swapping with its occupant. `tili move-workspace-to-monitor
+  next|prev|main` pushes the active workspace (swap) or moves a parked
+  workspace's home without disturbing the target. `tili workspace-back` now
+  restores the previous `(display, workspace)` pair instead of following a
+  workspace that may have moved displays. Default binds:
+  `alt-ctrl-comma`/`alt-ctrl-period`/`alt-ctrl-m` for previous/next/main,
+  and `alt-ctrl-<workspace>` for `workspace-here`.
 - **Floating windows re-anchor on display changes.** Rule-placed floating
   windows no longer keep coordinates from the previous monitor after a
   workspace moves or a display reconnects.
