@@ -16,6 +16,33 @@ This page mirrors the repository's
 directly rather than a separate hand-written summary — recent releases in
 full below, earlier ones collapsed further down.
 
+## [0.14.0] - 2026-11-07
+
+### Added
+
+- **Absolute floating sizes alongside ratios.** `floating-rules`' `rule`
+  bodies accept `width-ratio`/`height-ratio`, and its `defaults` block
+  accepts absolute `width`/`height` (points). Both forms may be present at
+  once; per dimension the absolute value wins over a ratio at the same
+  level, and a matching rule still overrides `defaults`.
+- **Menu bar shape default is now `rounded`** instead of `pill`.
+
+### Changed
+
+- **Floating windows use an absolute default size.** With no sizing
+  configured, a floating window opens at 800×600 points instead of 60% of
+  its monitor. A fixed point size behaves consistently across displays of
+  different resolutions; a ratio grows the window on exactly the large
+  screens where it doesn't need to.
+
+### Migration
+
+- To keep monitor-relative sizing, set `defaults { width-ratio 0.6;
+  height-ratio 0.6 }` (or the per-rule equivalents) — ratio-only configs
+  keep working unchanged and are not shadowed by the new absolute default.
+- To restore the old capsule menu bar badge, set `menubar { shape "pill" }`.
+  The daemon-unreachable "connecting" badge always stays a pill.
+
 ## [0.13.0] - 2026-11-05
 
 ### Added
