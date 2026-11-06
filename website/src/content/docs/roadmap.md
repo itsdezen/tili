@@ -5,11 +5,13 @@ description: What tili has shipped, what is planned next, and how the roadmap ma
 
 ## Shipped
 
-- **v0.13.0** — home-display workspace routing, global southeast parking,
-  JSON query/subscribe, window metadata and rule ergonomics, native-tab
-  guard, `toggle-floating`, and configurable AX timeout.
-- **v0.12.0** — session state and recovery.
-- Earlier releases — see the [CHANGELOG](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md).
+- **[v0.13.0](/docs/changelog#0130---2026-11-05)** — home-display workspace
+  routing, global southeast parking, JSON query/subscribe, window metadata
+  and rule ergonomics, native-tab guard, `toggle-floating`, and configurable
+  AX timeout.
+- **[v0.12.0](/docs/changelog#0120---2026-11-05)** — session state and
+  recovery.
+- Earlier releases — see the [Changelog](/docs/changelog).
 
 ## Planned
 
@@ -17,6 +19,10 @@ description: What tili has shipped, what is planned next, and how the roadmap ma
 - **Full native-tab support.** Only if the guard proves insufficient;
   depends on reliable AX tab semantics.
 - **Sticky windows.** Stay visible across workspace switches.
+
+Have a use case for one of these, or a feature that is missing? Open an
+issue on [GitHub](https://github.com/itsdezen/tili/issues) rather than
+assuming it is already planned.
 
 ## Design principles
 

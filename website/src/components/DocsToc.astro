@@ -1,0 +1,35 @@
+---
+export interface Heading {
+  depth: number
+  slug: string
+  text: string
+}
+
+interface Props {
+  headings: Array<Heading>
+}
+
+const { headings } = Astro.props
+
+// Only top-level sections: sub-headings produce long, ragged labels that make
+// the list noisy, and the page is still short enough to scan without them.
+// The changelog has dozens of version headings inside its <details> archive, so
+// a table of contents there would be longer than the page it indexes.
+const sections = headings.filter((heading) => heading.depth === 2)
+const visible = sections.length >= 4 && sections.length <= 14
+---
+
+{visible && (
+  <nav class="docs-toc" aria-labelledby="docs-toc-title" data-pagefind-ignore>
+    <p class="docs-toc-title" id="docs-toc-title">
+      On this page
+    </p>
+    <ul class="docs-toc-list">
+      {sections.map((section) => (
+        <li>
+          <a href={`#${section.slug}`}>{section.text}</a>
+        </li>
+      ))}
+    </ul>
+  </nav>
+)}

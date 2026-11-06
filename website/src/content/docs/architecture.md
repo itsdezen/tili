@@ -102,4 +102,6 @@ preference:
 For the full per-crate rationale and hardware-confirmed findings behind
 each of these, see
 [`docs/architecture/`](https://github.com/itsdezen/tili/tree/main/docs/architecture)
-in the repository.
+in the repository. The runtime side is documented in
+[Commands](/docs/commands), and the config side in
+[Configuration](/docs/configuration).

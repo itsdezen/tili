@@ -106,6 +106,37 @@ describe('docs content', () => {
   })
 })
 
+describe('docs onboarding', () => {
+  it('lists a default keybinding cheat sheet', () => {
+    const gettingStarted = docs.find((doc) => doc.id === 'getting-started')
+
+    expect(gettingStarted?.body).toContain('## Default keybindings')
+    for (const key of ['alt-shift-semicolon', 'alt-shift-m', 'alt-tab']) {
+      expect(gettingStarted?.body).toContain(key)
+    }
+  })
+
+  it('points new readers at the first pages', () => {
+    const intro = docs.find((doc) => doc.id === 'index')
+
+    expect(intro?.body).toContain('## Where to start')
+    for (const href of [
+      '/docs/getting-started',
+      '/docs/configuration',
+      '/docs/commands',
+    ]) {
+      expect(intro?.body).toContain(`](${href})`)
+    }
+  })
+
+  it('links shipped roadmap versions to changelog anchors', () => {
+    const roadmap = docs.find((doc) => doc.id === 'roadmap')
+
+    expect(roadmap?.body).toContain('/docs/changelog#0130---2026-11-05')
+    expect(roadmap?.body).toContain('/docs/changelog#0120---2026-11-05')
+  })
+})
+
 describe('docs routing', () => {
   it('maps the index entry to /docs and everything else under it', () => {
     expect(docPath('index')).toBe('/docs')

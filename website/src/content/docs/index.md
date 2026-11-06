@@ -7,6 +7,21 @@ tili is a tiling window manager for macOS, built for speed. It follows an
 i3-style workflow — directional focus/move, named workspaces, keybinding
 modes — while staying entirely on public macOS APIs.
 
+## Where to start
+
+- [Getting Started](/docs/getting-started) — install, permissions, first
+  windows, and the default keybindings.
+- [Configuration](/docs/configuration) — every `tili.kdl` section, key,
+  type, and default.
+- [Commands](/docs/commands) — the CLI reference and the command strings
+  keybindings bind to.
+- [Architecture](/docs/architecture) — how the Rust workspace is split and
+  why the boundaries are where they are.
+- [Menu Bar Badge](/docs/menu-bar) — the workspace badge and its menu.
+
+The rest of this page explains why tili exists and what state the project
+is in today.
+
 ## Why tili
 
 Most tiling window managers on macOS force a trade-off: either they poll the

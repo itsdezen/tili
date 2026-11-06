@@ -2,20 +2,33 @@
 import { getCollection } from 'astro:content'
 import DocsNav from '../components/DocsNav.astro'
 import DocsSearch from '../components/DocsSearch.astro'
+import DocsToc from '../components/DocsToc.astro'
 import Base from './Base.astro'
 import { docNeighbors, docPath, sortDocs, type DocEntry } from '../lib/docs'
 import { breadcrumbJsonLd, techArticleJsonLd } from '../lib/seo'
 import { site } from '../lib/site'
 import '../styles/docs.css'
 
-interface Props {
-  entry: DocEntry
+interface Heading {
+  depth: number
+  slug: string
+  text: string
 }
 
-const { entry } = Astro.props
+interface Props {
+  entry: DocEntry
+  headings: Array<Heading>
+}
+
+const { entry, headings } = Astro.props
 const docs = sortDocs(await getCollection('docs'))
 const path = docPath(entry.id)
 const { previous, next } = docNeighbors(docs, entry.id)
+
+// Two groups read better than eight flat rows: orientation first, reference
+// second. The split follows the published order rather than a second list.
+const startHere = docs.slice(0, 4)
+const reference = docs.slice(4)
 
 const crumbs = [
   { name: 'Home', path: '/' },
@@ -28,6 +41,11 @@ const elsewhere = [
   { label: 'Source on GitHub', href: site.repository },
   { label: 'Sponsor', href: site.sponsor },
 ]
+
+const sourceUrl = `${site.repository}/edit/main/website/src/content/docs/${entry.id}.md`
+const issueUrl = `${site.repository}/issues/new?title=${encodeURIComponent(
+  `Docs: ${entry.data.title}`,
+)}`
 ---
 
 <Base
@@ -59,9 +77,11 @@ const elsewhere = [
 
   <div class="docs">
     <aside class="docs-sidebar" data-pagefind-ignore>
-      <p class="docs-sidebar-title">Documentation</p>
-      <DocsNav items={docs} current={entry.id} />
-      <p class="docs-sidebar-title docs-nav-external">Elsewhere</p>
+      <p class="docs-sidebar-title">Start here</p>
+      <DocsNav items={startHere} current={entry.id} />
+      <p class="docs-sidebar-title docs-nav-group">Reference</p>
+      <DocsNav items={reference} current={entry.id} />
+      <p class="docs-sidebar-title docs-nav-group">Elsewhere</p>
       <ul class="docs-nav">
         {elsewhere.map((link) => (
           <li>
@@ -77,7 +97,10 @@ const elsewhere = [
 
     <details class="docs-mobile-nav" data-pagefind-ignore>
       <summary>Documentation menu</summary>
-      <DocsNav items={docs} current={entry.id} />
+      <p class="docs-sidebar-title">Start here</p>
+      <DocsNav items={startHere} current={entry.id} />
+      <p class="docs-sidebar-title docs-nav-group">Reference</p>
+      <DocsNav items={reference} current={entry.id} />
     </details>
 
     <article class="prose" data-pagefind-body>
@@ -95,7 +118,19 @@ const elsewhere = [
         <p class="page-lede">{entry.data.description}</p>
       </header>
 
+      <DocsToc headings={headings} />
+
       <slot />
+
+      <p class="docs-meta" data-pagefind-ignore>
+        <a href={sourceUrl} target="_blank" rel="noopener noreferrer">
+          Edit this page on GitHub
+          <span class="sr-only"> (opens in new tab)</span>
+        </a>
+        <a href={issueUrl} target="_blank" rel="noopener noreferrer">
+          Report a docs issue<span class="sr-only"> (opens in new tab)</span>
+        </a>
+      </p>
 
       <nav class="docs-pager" aria-label="Docs pagination" data-pagefind-ignore>
         {previous ? (
@@ -117,4 +152,56 @@ const elsewhere = [
   </div>
 
   <DocsSearch />
+
+  {/* Progressive enhancement: works without it, since every code block is
+      still plain selectable text when this never runs. */}
+  <script is:inline data-enhancement="copy-code">
+    document.querySelectorAll('.prose pre').forEach(function (pre) {
+      if (!pre.parentElement) return
+      if (pre.parentElement.classList.contains('code-block')) return
+
+      const wrapper = document.createElement('div')
+      wrapper.className = 'code-block'
+      pre.parentNode.insertBefore(wrapper, pre)
+      wrapper.appendChild(pre)
+
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'code-copy'
+      button.textContent = 'Copy'
+      button.setAttribute('aria-label', 'Copy code block')
+      button.addEventListener('click', function () {
+        const text = (pre.textContent || '').replace(/\n$/, '')
+        const combo = /Mac|iPhone|iPad/.test(navigator.platform || '')
+          ? '⌘C'
+          : 'Ctrl+C'
+
+        navigator.clipboard.writeText(text).then(
+          function () {
+            button.textContent = 'Copied'
+            window.setTimeout(function () {
+              button.textContent = 'Copy'
+            }, 1500)
+          },
+          function () {
+            // Clipboard permission denied: select the block so the shortcut
+            // the label names can finish the job.
+            const selection = window.getSelection()
+            const range = document.createRange()
+            range.selectNodeContents(pre)
+            if (selection) {
+              selection.removeAllRanges()
+              selection.addRange(range)
+            }
+            button.textContent = 'Press ' + combo
+            window.setTimeout(function () {
+              button.textContent = 'Copy'
+            }, 2500)
+          },
+        )
+      })
+
+      wrapper.appendChild(button)
+    })
+  </script>
 </Base>

@@ -8,9 +8,9 @@ if (!entry) {
   throw new Error('Missing src/content/docs/index.md')
 }
 
-const { Content } = await render(entry)
+const { Content, headings } = await render(entry)
 ---
 
-<DocsLayout entry={entry}>
+<DocsLayout entry={entry} headings={headings}>
   <Content />
 </DocsLayout>

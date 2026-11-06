@@ -7,10 +7,10 @@ const errors = []
 const htmlFiles = []
 const jsFiles = []
 
-// The only client-side JavaScript this site allows: the copy-install
-// progressive enhancement (inline, marked) and Pagefind's own bundle on docs
-// pages. Everything else must stay static.
-const copyInstallScript = /data-enhancement=["']copy-install["']/
+// The only client-side JavaScript this site allows: the two inline
+// progressive enhancements (copy install command, copy code block) and
+// Pagefind's own bundle on docs pages. Everything else must stay static.
+const enhancementScript = /data-enhancement=["']copy-(install|code)["']/
 const pagefindScript =
   /<script[^>]+src=["']\/pagefind\/pagefind-component-ui\.js["'][^>]*>/i
 
@@ -96,7 +96,7 @@ for (const file of htmlFiles) {
   )
 
   for (const tag of executableScripts) {
-    const allowed = copyInstallScript.test(tag) || pagefindScript.test(tag)
+    const allowed = enhancementScript.test(tag) || pagefindScript.test(tag)
 
     if (!allowed) fail(`${name}: unexpected executable <script> ${tag}`)
   }

@@ -89,6 +89,12 @@ a:hover {
   border: 0;
 }
 
+/* Author `display` rules (e.g. the nav row) otherwise win over the UA
+   stylesheet and reveal elements marked `hidden`. */
+[hidden] {
+  display: none !important;
+}
+
 .skip-link {
   position: absolute;
   top: 0;

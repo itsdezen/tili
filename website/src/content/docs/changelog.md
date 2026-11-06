@@ -9,6 +9,8 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+For planned work rather than history, see the [Roadmap](/docs/roadmap).
+
 This page mirrors the repository's
 [`CHANGELOG.md`](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md)
 directly rather than a separate hand-written summary — recent releases in

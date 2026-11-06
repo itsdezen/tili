@@ -3,6 +3,13 @@
   gap: var(--space-5);
 }
 
+/* Grid items default to min-content widths, so a long code line or a wide
+   table would push the whole page sideways on mobile. Let each child shrink
+   and keep the overflow inside the code block / table instead. */
+.docs > * {
+  min-width: 0;
+}
+
 @media (min-width: 900px) {
   .docs {
     grid-template-columns: var(--docs-sidebar) minmax(0, 1fr);
@@ -58,7 +65,7 @@
   text-underline-offset: 3px;
 }
 
-.docs-nav-external {
+.docs-nav-group {
   margin-top: var(--space-4);
 }
 
@@ -97,6 +104,58 @@
   border-bottom: 1px solid var(--color-line-soft);
 }
 
+/* In-page index. Same quiet language as the sidebar rows — dotted rules and
+   no box — so it reads as part of the page, not a widget. */
+.docs-toc {
+  padding: var(--space-3) 0 0;
+}
+
+.docs-toc-title {
+  padding-left: var(--space-2);
+  color: var(--color-ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.docs .docs-toc-list {
+  margin-top: var(--space-2);
+  padding-left: 0;
+  columns: 2;
+  column-gap: var(--space-6);
+  list-style: none;
+}
+
+.docs .docs-toc-list li {
+  margin-top: 0;
+  border-top: 1px dotted var(--color-line-soft);
+  break-inside: avoid;
+}
+
+.docs .docs-toc-list a,
+.docs .docs-toc-list a:visited {
+  display: block;
+  padding: 2px var(--space-2);
+  color: var(--color-ink-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.docs .docs-toc-list a:hover {
+  background: var(--color-row-hover);
+  color: var(--color-ink);
+}
+
+@media (max-width: 640px) {
+  /* On a narrow screen the contents list is taller than it is useful; the docs
+     menu and search already cover navigation. */
+  .docs-toc {
+    display: none;
+  }
+}
+
 .prose {
   max-width: 72ch;
 }
@@ -122,6 +181,11 @@
   margin-top: var(--space-5);
   font-size: var(--text-lg);
   line-height: 1.3;
+}
+
+.prose h2,
+.prose h3 {
+  scroll-margin-top: var(--space-4);
 }
 
 .prose h4 {
@@ -180,6 +244,35 @@
   background: var(--color-surface-2);
 }
 
+/* Copy button is added by a small inline enhancement; without JS the block is
+   unchanged and the text is still selectable. */
+.code-block {
+  position: relative;
+}
+
+.code-block pre {
+  padding-right: 68px;
+}
+
+.code-copy {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  padding: 1px 8px;
+  border: 1px solid var(--color-line-soft);
+  background: var(--color-surface);
+  color: var(--color-ink-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.code-copy:hover {
+  border-color: var(--color-ink);
+  background: var(--color-ink);
+  color: var(--color-surface);
+}
+
 .prose pre code {
   padding: 0;
   background: none;
@@ -233,6 +326,28 @@
   font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.docs-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-7);
+  padding-top: var(--space-3);
+  border-top: 1px dotted var(--color-line-soft);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+}
+
+.docs-meta a,
+.docs-meta a:visited {
+  color: var(--color-ink-muted);
+  text-decoration: none;
+}
+
+.docs-meta a:hover {
+  color: var(--color-ink);
+  text-decoration: underline;
 }
 
 .docs-pager {
@@ -305,7 +420,13 @@ pagefind-modal-trigger * {
 
 @media print {
   .prose pre,
-  .prose blockquote {
+  .prose blockquote,
+  .docs-toc {
     break-inside: avoid;
+  }
+
+  .code-copy,
+  .docs-meta {
+    display: none;
   }
 }
