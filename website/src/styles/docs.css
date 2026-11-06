@@ -300,6 +300,18 @@
   background: var(--color-surface-2);
 }
 
+.doc-figure {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+}
+
+.doc-figure figcaption {
+  color: var(--color-ink-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+}
+
 .prose code {
   padding: 1px 4px;
   background: var(--color-surface-2);

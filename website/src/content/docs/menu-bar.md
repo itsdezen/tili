@@ -7,6 +7,19 @@ description: How the tili-menubar NSStatusItem badge shows the focused display's
 a small `NSStatusItem` badge showing the active workspace on your focused
 monitor.
 
+<figure class="doc-figure">
+  <img
+    src="/screenshots/menubar-badge.png"
+    alt="The tili menu bar badge: a filled pill showing the active workspace name, work, sitting in the macOS menu bar."
+    width="128"
+    height="52"
+  />
+  <figcaption>
+    The badge in the macOS menu bar, showing the focused display's active
+    workspace (<code>work</code> in the starter config).
+  </figcaption>
+</figure>
+
 ## What it shows
 
 - The badge title is the focused monitor's active workspace name — the
