@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(snapshot.mode, "main");
         let style = snapshot.style.expect("daemon always reports a style");
         assert_eq!(style.fill, tili_ipc::MenubarFill::Filled);
-        assert_eq!(style.shape, tili_ipc::MenubarShape::Pill);
+        assert_eq!(style.shape, tili_ipc::MenubarShape::Rounded);
         assert!(!style.uppercase);
     }
 

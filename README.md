@@ -248,7 +248,7 @@ floating-rules {
     rule app-id="com.apple.finder"
     rule app-id="com.apple.systempreferences" { width 900; height 600; center #true }
 
-    defaults { center #true; width-ratio 0.6; height-ratio 0.6 }
+    defaults { center #true; width 800; height 600 }
 }
 ```
 

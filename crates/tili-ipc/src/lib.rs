@@ -332,11 +332,13 @@ pub enum MenubarFill {
 
 /// The badge's corner rounding — `Pill` (radius = half the badge height,
 /// fully rounded ends, the original look) or `Rounded` (a smaller, fixed
-/// corner radius, more like an ordinary button).
+/// corner radius, more like an ordinary button — the default). Only the
+/// daemon-unreachable "connecting" badge stays hardcoded to `Pill`, so it
+/// can't be mistaken for the normal badge.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MenubarShape {
-    #[default]
     Pill,
+    #[default]
     Rounded,
 }
 

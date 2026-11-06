@@ -166,7 +166,7 @@ starts normally.
 ```kdl
 menubar {
     style "filled"
-    shape "pill"
+    shape "rounded"
     uppercase #false
 }
 ```
@@ -178,7 +178,7 @@ restart needed.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `style` | `"filled"` / `"outlined"` | `"filled"` | `"filled"`: a solid pill with the workspace name/glyph knocked out as transparency. `"outlined"`: a stroked border instead, with the text drawn normally inside it. Any other value falls back to `"filled"`. |
-| `shape` | `"pill"` / `"rounded"` | `"pill"` | `"pill"`: fully rounded ends. `"rounded"`: a smaller, fixed corner radius, more like an ordinary button. Any other value falls back to `"pill"`. |
+| `shape` | `"pill"` / `"rounded"` | `"rounded"` | `"rounded"`: a smaller, fixed corner radius, more like an ordinary button. `"pill"`: fully rounded ends. Any other value falls back to `"rounded"`. |
 | `uppercase` | boolean | `#false` | Uppercases the workspace name shown in the badge itself. Doesn't affect the dropdown menu's item labels, which stay as-typed for readability. |
 
 > **Note**
@@ -278,14 +278,18 @@ floating-rules {
         height 600
         center #true
     }
+    rule app-id="com.example.ratio-app" {
+        width-ratio 0.5
+        height-ratio 0.5
+    }
     rule app-id="com.example.app" title="^(Preferences|About)$" { center #true }
     rule app-id="com.example.misclassified-dialog-app" mode="tile"
     rule app-id="com.example.menu-bar-panel" mode="ignore"
 
     defaults {
         center #false
-        width-ratio 0.6
-        height-ratio 0.6
+        width 800
+        height 600
     }
 }
 ```
@@ -308,20 +312,40 @@ order, first match wins.
 
 | Key | Type | Required | Description |
 |---|---|---|---|
-| `width` | integer (points) | no | Falls back to `defaults.width-ratio` when omitted. |
-| `height` | integer (points) | no | Falls back to `defaults.height-ratio` when omitted. |
+| `width` | integer (points) | no | Absolute size for this dimension. Falls back to `defaults.width`, then `defaults.width-ratio`, then the built-in 800-point default. |
+| `height` | integer (points) | no | Absolute size. Falls back to `defaults.height`, then `defaults.height-ratio`, then the built-in 600-point default. |
+| `width-ratio` | float (accepts a bare integer too) | no | Fraction of the monitor's usable width, e.g. `0.6` = 60%. Ignored when this rule also sets `width`. |
+| `height-ratio` | float (accepts a bare integer too) | no | Same, for height; ignored when this rule also sets `height`. |
 | `center` | boolean | no | Falls back to `defaults.center` when omitted. |
 
 ### `defaults` block
 
 Fallback centering/sizing applied to a floating window that matched a rule
-with no explicit `width`/`height`/`center` of its own.
+with no explicit sizing/`center` of its own.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `center` | boolean | `#true` | Whether to center the window on its monitor. |
-| `width-ratio` | float (accepts a bare integer too) | `0.6` | Fraction of the monitor's usable width, e.g. `0.6` = 60%. |
-| `height-ratio` | float (accepts a bare integer too) | `0.6` | Fraction of the monitor's usable height. |
+| `width` | integer (points) | `800` | Absolute width. Wins over `width-ratio` when both are set. |
+| `height` | integer (points) | `600` | Absolute height. Wins over `height-ratio` when both are set. |
+| `width-ratio` | float (accepts a bare integer too) | unset | Opts this dimension into monitor-relative sizing instead of the absolute default. Ignored when `width` is also set. |
+| `height-ratio` | float (accepts a bare integer too) | unset | Same, for height; ignored when `height` is also set. |
+
+Each dimension resolves independently, most specific source first:
+
+1. the matching rule's absolute `width`/`height`
+2. the rule's `width-ratio`/`height-ratio`
+3. `defaults.width`/`height`
+4. `defaults.width-ratio`/`height-ratio`
+5. the built-in absolute size (800×600)
+
+Both forms on the same rule or in the same `defaults` block are accepted;
+the absolute value wins there, and a rule's ratio still wins over a
+default's absolute value because the rule is the more specific source.
+Absolute sizing is the default because a fixed point size behaves
+consistently across displays of different resolutions: a ratio grows the
+window on exactly the large screens where it doesn't need to. Ratio-only
+configuration keeps working unchanged for anyone who prefers it.
 
 `mode` meanings, in full:
 

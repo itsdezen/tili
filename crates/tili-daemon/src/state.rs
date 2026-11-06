@@ -133,6 +133,29 @@ fn cascade_offset(index: u32) -> (f64, f64) {
     (magnitude * sign, magnitude * sign)
 }
 
+/// Resolves one dimension of a floating window's size, most specific
+/// instruction first: the matching rule's absolute size, then its ratio,
+/// then `floating_defaults`' absolute size, then its ratio, then the
+/// built-in absolute default. Absolute beats a ratio at the same level
+/// (a fixed size is the more specific request); a rule's ratio still beats
+/// a default's absolute size, since the rule is the more specific source.
+/// Pure so the precedence is unit-testable without a live `AXUIElement`.
+fn resolve_floating_extent(
+    rule_abs: Option<u32>,
+    rule_ratio: Option<f32>,
+    defaults_abs: Option<u32>,
+    defaults_ratio: Option<f32>,
+    builtin_default: f64,
+    area_extent: f64,
+) -> f64 {
+    rule_abs
+        .map(f64::from)
+        .or_else(|| rule_ratio.map(|ratio| area_extent * f64::from(ratio)))
+        .or_else(|| defaults_abs.map(f64::from))
+        .or_else(|| defaults_ratio.map(|ratio| area_extent * f64::from(ratio)))
+        .unwrap_or(builtin_default)
+}
+
 fn frames_match(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() < FLOAT_DRIFT_EPSILON
         && (a.y - b.y).abs() < FLOAT_DRIFT_EPSILON
@@ -941,6 +964,8 @@ struct CompiledFloatingRule {
     subrole: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
+    width_ratio: Option<f32>,
+    height_ratio: Option<f32>,
     center: Option<bool>,
     mode: tili_config::FloatingRuleMode,
 }
@@ -3513,6 +3538,8 @@ impl WmState {
                     subrole: rule.subrole.clone(),
                     width: rule.width,
                     height: rule.height,
+                    width_ratio: rule.width_ratio,
+                    height_ratio: rule.height_ratio,
                     center: rule.center,
                     mode: rule.mode,
                 })
@@ -6510,19 +6537,29 @@ impl WmState {
     /// explicit matching rule's `width`/`height`/`center` win, falling back
     /// to `floating_defaults` for anything the rule didn't specify (or if
     /// no rule matched at all, e.g. a `Dialog`-kind window with no app-id
-    /// entry in `floating-rules`). Also returns whether centering was
-    /// requested, so `place_floating_window` knows whether a post-write
-    /// correction is meaningful.
+    /// entry in `floating-rules`), and finally to the built-in absolute
+    /// size. See `resolve_floating_extent` for the per-dimension
+    /// precedence. Also returns whether centering was requested, so
+    /// `place_floating_window` knows whether a post-write correction is
+    /// meaningful.
     fn initial_floating_frame_in(&self, window: &AxWindow, area: Rect) -> (Rect, bool) {
         let rule = self.matching_floating_rule(window);
-        let width = rule
-            .and_then(|r| r.width)
-            .map(f64::from)
-            .unwrap_or(area.width * f64::from(self.floating_defaults.width_ratio));
-        let height = rule
-            .and_then(|r| r.height)
-            .map(f64::from)
-            .unwrap_or(area.height * f64::from(self.floating_defaults.height_ratio));
+        let width = resolve_floating_extent(
+            rule.and_then(|r| r.width),
+            rule.and_then(|r| r.width_ratio),
+            self.floating_defaults.width,
+            self.floating_defaults.width_ratio,
+            f64::from(tili_config::DEFAULT_FLOATING_WIDTH),
+            area.width,
+        );
+        let height = resolve_floating_extent(
+            rule.and_then(|r| r.height),
+            rule.and_then(|r| r.height_ratio),
+            self.floating_defaults.height,
+            self.floating_defaults.height_ratio,
+            f64::from(tili_config::DEFAULT_FLOATING_HEIGHT),
+            area.height,
+        );
         let center = rule
             .and_then(|r| r.center)
             .unwrap_or(self.floating_defaults.center);
@@ -7782,6 +7819,51 @@ mod tests {
             cascade_offset(FLOATING_CASCADE_CYCLE + 1),
             cascade_offset(1)
         );
+    }
+
+    #[test]
+    fn floating_extent_prefers_absolute_over_ratio_within_one_level() {
+        // Both a rule-level absolute and ratio: absolute wins.
+        assert_eq!(
+            resolve_floating_extent(Some(900), Some(0.5), None, None, 800.0, 1000.0),
+            900.0
+        );
+        // Both defaults-level: absolute still wins.
+        assert_eq!(
+            resolve_floating_extent(None, None, Some(720), Some(0.5), 800.0, 1000.0),
+            720.0
+        );
+    }
+
+    #[test]
+    fn floating_extent_falls_back_through_rule_then_defaults_then_builtin() {
+        // Rule ratio beats a defaults absolute: the rule is more specific.
+        assert_eq!(
+            resolve_floating_extent(None, Some(0.5), Some(720), None, 800.0, 1000.0),
+            500.0
+        );
+        // No rule sizing falls through to the defaults absolute.
+        assert_eq!(
+            resolve_floating_extent(None, None, Some(720), Some(0.5), 800.0, 1000.0),
+            720.0
+        );
+        // A ratio-only defaults block beats the built-in absolute.
+        assert_eq!(
+            resolve_floating_extent(None, None, None, Some(0.5), 800.0, 1000.0),
+            500.0
+        );
+        // Nothing configured anywhere: built-in absolute, not a ratio.
+        assert_eq!(
+            resolve_floating_extent(None, None, None, None, 800.0, 1000.0),
+            800.0
+        );
+    }
+
+    #[test]
+    fn floating_extent_keeps_width_and_height_independent() {
+        let width = resolve_floating_extent(Some(640), None, None, None, 800.0, 1000.0);
+        let height = resolve_floating_extent(None, None, None, None, 600.0, 1000.0);
+        assert_eq!((width, height), (640.0, 600.0));
     }
 
     #[test]

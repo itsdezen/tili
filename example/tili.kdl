@@ -156,9 +156,9 @@ menubar {
     // text drawn normally inside it.
     style "filled"
 
-    // "pill" (default): fully rounded ends. "rounded": a smaller, fixed
-    // corner radius, more like an ordinary button.
-    shape "pill"
+    // "rounded" (default): a smaller, fixed corner radius, more like an
+    // ordinary button. "pill": fully rounded ends.
+    shape "rounded"
 
     // Uppercases the workspace name shown in the badge itself — not the
     // dropdown menu's item labels, which stay as-typed.
@@ -360,11 +360,17 @@ workspace-rules {
 //              overrides tili's own guess at whether the window should
 //              float, tile, or be left completely untouched. Useful for an
 //              app tili misclassifies, without needing a source change.
-//   width      optional, in points. Falls back to `defaults.width-ratio`.
-//   height     optional, in points. Falls back to `defaults.height-ratio`.
+//   width      optional, in points. Falls back to `defaults.width`, then
+//              `defaults.width-ratio`, then the built-in 800pt default.
+//   height     optional, in points. Falls back to `defaults.height`, then
+//              `defaults.height-ratio`, then the built-in 600pt default.
+//   width-ratio  optional. Fraction of the monitor's usable width, e.g.
+//              `0.6` = 60%. Ignored when this rule also sets `width`.
+//   height-ratio optional. Same, for height.
 //   center     optional. Falls back to `defaults.center`.
-// `width`/`height`/`center` go in a `{ }` body after the rule, as shown
-// below — only meaningful when `mode` is "float" (the default).
+// `width`/`height`/`width-ratio`/`height-ratio`/`center` go in a `{ }` body
+// after the rule, as shown below — only meaningful when `mode` is "float"
+// (the default).
 floating-rules {
     rule app-id="com.apple.finder" { center #true }
     rule app-id="com.apple.systempreferences" { center #true }
@@ -391,9 +397,17 @@ floating-rules {
     // menu-bar-only utility panel that should never be touched.
     // rule app-id="com.example.menu-bar-panel" mode="ignore"
 
+    // Sizes are absolute points by default (800x600 when this block is
+    // absent), so a floating window keeps the same physical size across
+    // displays of different resolutions. Ratios are still supported for
+    // anyone who prefers monitor-relative sizing; uncomment both lines
+    // below (and remove width/height) to opt in. When both forms are set,
+    // the absolute width/height wins.
     defaults {
         center #false
-        width-ratio 0.6
-        height-ratio 0.6
+        width 800
+        height 600
+        // width-ratio 0.6
+        // height-ratio 0.6
     }
 }

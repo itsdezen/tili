@@ -15,7 +15,9 @@ tree (M4 through M7's approach).
 Floating windows (M8: matched a `floating-rules` entry at creation time,
 via `compute_floating_frame`, which checks `AxWindow::bundle_id()` against
 each compiled rule in order and computes a centered/sized `Rect` from the
-rule's or the config's `defaults`' width/height-ratio) join their
+rule's or the config's `defaults` sizing — absolute points or a monitor
+ratio, with `resolve_floating_extent` picking the first available source
+and the built-in 800×600 default as the final fallback) join their
 workspace's `Tree` too, as a `tili_tree::Node::Floating` leaf — a normal
 child for insertion/removal/lookup, so `workspace_focus`/`focused_node()`
 can address a floating window exactly like a tiled one, but excluded

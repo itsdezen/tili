@@ -6,6 +6,30 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [Unreleased]
+
+### Added
+
+- **Absolute floating sizes alongside ratios.** `floating-rules`' `rule`
+  bodies now also accept `width-ratio`/`height-ratio`, and its `defaults`
+  block accepts absolute `width`/`height` (points). Both forms can be
+  present at once without a parse error; per dimension the absolute value
+  wins over a ratio at the same level, and a matching rule still overrides
+  `defaults`. Ratio-only configuration keeps working unchanged.
+
+### Changed
+
+- **Floating windows use an absolute default size.** With no
+  `floating-rules` sizing configured, a floating window now opens at
+  800×600 points instead of 60% of its monitor's width and height. A fixed
+  point size reads consistently across displays of different resolutions;
+  a ratio grows the window on exactly the large screens where it doesn't
+  need to. Set `defaults { width-ratio 0.6; height-ratio 0.6 }` (or the
+  per-rule equivalents) to keep monitor-relative sizing.
+- **The menu bar badge defaults to the rounded shape** instead of the
+  fully-rounded pill. `menubar { shape "pill" }` restores the previous
+  look; the daemon-unreachable "connecting" badge always stays a pill.
+
 ## [0.13.0] - 2026-11-05
 
 ### Added

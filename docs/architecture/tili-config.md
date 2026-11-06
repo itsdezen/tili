@@ -15,6 +15,23 @@ matched exactly against the window's AX role/subrole (for example
 windows keep tiling). `title` remains a regex only on `floating-rules`;
 `workspace-rules` still has no sizing/`mode` field.
 
+`floating-rules` sizing accepts both absolute points (`width`/`height`,
+`defaults { width N; height N }`) and monitor ratios (`width-ratio`/
+`height-ratio`) at both the rule and `defaults` level, and both may be
+present at once without a parse error. Resolution is `tili-daemon`'s job:
+per dimension it prefers the matching rule's absolute value, then the
+rule's ratio, then `defaults`' absolute value, then `defaults`' ratio, and
+finally the built-in `DEFAULT_FLOATING_WIDTH`/`HEIGHT` (800×600 points).
+Absolute wins a ratio within the same level; a rule's ratio still beats a
+default's absolute value because the rule is more specific. The ratios are
+`Option<f32>` specifically so an explicit ratio-only config can beat the
+built-in absolute default rather than being shadowed by it.
+
+`menubar`'s shape defaults to `Rounded`; `shape "pill"` restores the
+original capsule look. The daemon-unreachable "connecting" badge stays
+hardcoded to `Pill` regardless, so it can't be confused with the normal
+badge.
+
 `workspace-rules { rule app-id="..." workspace="name" always=#bool? ... }`
 is a separate, independent section — `app-id`/`workspace` required, no
 `title`/sizing/`mode`, since it's a purely event-driven "which workspace

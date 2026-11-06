@@ -98,8 +98,16 @@ pub struct FloatingRule {
     pub role: Option<String>,
     /// Optional exact-match AX subrole (`AXStandardWindow`, `AXDialog`, ...).
     pub subrole: Option<String>,
+    /// Absolute size in points. Wins over the same dimension's ratio when
+    /// both are present on one rule — a fixed size is the more specific
+    /// instruction.
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Fraction of the monitor's usable width/height, e.g. `0.6` = 60%.
+    /// Only used when the same dimension's absolute `width`/`height` is
+    /// absent.
+    pub width_ratio: Option<f32>,
+    pub height_ratio: Option<f32>,
     pub center: Option<bool>,
     pub mode: FloatingRuleMode,
 }
@@ -123,22 +131,43 @@ pub enum FloatingRuleMode {
     Ignore,
 }
 
+/// Absolute size, in points, a floating window gets when neither a matching
+/// rule nor `floating-rules`' `defaults` says anything about that
+/// dimension. Deliberately absolute rather than a monitor ratio: the same
+/// point size reads consistently across displays of different resolutions,
+/// while a ratio grows a window on exactly the large screens where it
+/// doesn't need to.
+pub const DEFAULT_FLOATING_WIDTH: u32 = 800;
+pub const DEFAULT_FLOATING_HEIGHT: u32 = 600;
+
 /// Fallback centering/sizing for a floating window that matched a rule
-/// with no explicit `width`/`height`/`center` of its own.
+/// with no explicit sizing/`center` of its own.
+///
+/// Each dimension resolves independently: absolute `width`/`height` wins
+/// over `width_ratio`/`height_ratio` when both are set here, and a rule's
+/// own values always win over these. Both size fields staying `None` means
+/// "no preference", letting `DEFAULT_FLOATING_WIDTH`/`HEIGHT` apply — which
+/// is also why the ratios are `Option<f32>` rather than defaults of their
+/// own: an explicit ratio-only config must beat the built-in absolute
+/// size, not lose to it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct FloatingDefaults {
     pub center: bool,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
     /// Fraction of the monitor's usable width/height, e.g. `0.6` = 60%.
-    pub width_ratio: f32,
-    pub height_ratio: f32,
+    pub width_ratio: Option<f32>,
+    pub height_ratio: Option<f32>,
 }
 
 impl Default for FloatingDefaults {
     fn default() -> Self {
         Self {
             center: true,
-            width_ratio: 0.6,
-            height_ratio: 0.6,
+            width: None,
+            height: None,
+            width_ratio: None,
+            height_ratio: None,
         }
     }
 }
@@ -284,8 +313,8 @@ pub enum MenubarFill {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MenubarShape {
-    #[default]
     Pill,
+    #[default]
     Rounded,
 }
 
@@ -536,8 +565,8 @@ fn parse_menubar(doc: &KdlDocument) -> MenubarConfig {
     }
     if let Some(v) = children.get_arg("shape").and_then(|v| v.as_string()) {
         menubar.shape = match v {
-            "rounded" => MenubarShape::Rounded,
-            _ => MenubarShape::Pill,
+            "pill" => MenubarShape::Pill,
+            _ => MenubarShape::Rounded,
         };
     }
     if let Some(v) = children.get_arg("uppercase").and_then(|v| v.as_bool()) {
@@ -623,9 +652,11 @@ fn parse_workspace_rules(doc: &KdlDocument) -> Vec<WorkspaceRule> {
 }
 
 /// `floating-rules { rule app-id="..." title="..." { width N; height N;
-/// center #bool } ... defaults { center #bool; width-ratio F; height-ratio
-/// F } }`. Rules are returned in document order — callers should match
-/// first-wins.
+/// width-ratio F; height-ratio F; center #bool } ... defaults { center
+/// #bool; width N; height N; width-ratio F; height-ratio F } }`. Rules are
+/// returned in document order — callers should match first-wins. Both size
+/// forms are parsed unconditionally; which one applies is a runtime
+/// precedence decision (`tili-daemon`), not a parse error.
 fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaults) {
     let Some(children) = doc.get("floating-rules").and_then(KdlNode::children) else {
         return (Vec::new(), FloatingDefaults::default());
@@ -654,13 +685,15 @@ fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaul
                 Some("ignore") => FloatingRuleMode::Ignore,
                 _ => FloatingRuleMode::Float,
             };
-            let (width, height, center) = match n.children() {
+            let (width, height, width_ratio, height_ratio, center) = match n.children() {
                 Some(rule_children) => (
                     as_u32(rule_children.get_arg("width")),
                     as_u32(rule_children.get_arg("height")),
+                    as_f32(rule_children.get_arg("width-ratio")),
+                    as_f32(rule_children.get_arg("height-ratio")),
                     rule_children.get_arg("center").and_then(|v| v.as_bool()),
                 ),
-                None => (None, None, None),
+                None => (None, None, None, None, None),
             };
             Some(FloatingRule {
                 app_id,
@@ -669,6 +702,8 @@ fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaul
                 subrole,
                 width,
                 height,
+                width_ratio,
+                height_ratio,
                 center,
                 mode,
             })
@@ -683,11 +718,17 @@ fn parse_floating_rules(doc: &KdlDocument) -> (Vec<FloatingRule>, FloatingDefaul
         {
             defaults.center = v;
         }
+        if let Some(v) = as_u32(defaults_children.get_arg("width")) {
+            defaults.width = Some(v);
+        }
+        if let Some(v) = as_u32(defaults_children.get_arg("height")) {
+            defaults.height = Some(v);
+        }
         if let Some(v) = as_f32(defaults_children.get_arg("width-ratio")) {
-            defaults.width_ratio = v;
+            defaults.width_ratio = Some(v);
         }
         if let Some(v) = as_f32(defaults_children.get_arg("height-ratio")) {
-            defaults.height_ratio = v;
+            defaults.height_ratio = Some(v);
         }
     }
 
@@ -1100,8 +1141,71 @@ mod tests {
         assert_eq!(titled.title.as_deref(), Some("^Copy$"));
 
         assert!(config.floating_defaults.center);
-        assert!((config.floating_defaults.width_ratio - 0.6).abs() < f32::EPSILON);
-        assert!((config.floating_defaults.height_ratio - 0.6).abs() < f32::EPSILON);
+        assert_eq!(config.floating_defaults.width_ratio, Some(0.6));
+        assert_eq!(config.floating_defaults.height_ratio, Some(0.6));
+        assert_eq!(config.floating_defaults.width, None);
+        assert_eq!(config.floating_defaults.height, None);
+    }
+
+    #[test]
+    fn parses_floating_absolute_and_ratio_together_at_both_levels() {
+        let source = r#"
+            floating-rules {
+                rule app-id="com.apple.systempreferences" {
+                    width 900
+                    height 600
+                    width-ratio 0.9
+                    height-ratio 0.9
+                }
+
+                defaults {
+                    width 800
+                    height 600
+                    width-ratio 0.5
+                    height-ratio 0.5
+                }
+            }
+        "#;
+        let config = parse(source).unwrap();
+
+        let rule = &config.floating_rules[0];
+        assert_eq!(rule.width, Some(900));
+        assert_eq!(rule.height, Some(600));
+        assert_eq!(rule.width_ratio, Some(0.9));
+        assert_eq!(rule.height_ratio, Some(0.9));
+
+        assert_eq!(config.floating_defaults.width, Some(800));
+        assert_eq!(config.floating_defaults.height, Some(600));
+        assert_eq!(config.floating_defaults.width_ratio, Some(0.5));
+        assert_eq!(config.floating_defaults.height_ratio, Some(0.5));
+    }
+
+    #[test]
+    fn floating_defaults_ratio_only_config_is_preserved() {
+        let source = r#"
+            floating-rules {
+                defaults {
+                    width-ratio 0.5
+                    height-ratio 0.25
+                }
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.floating_defaults.width, None);
+        assert_eq!(config.floating_defaults.height, None);
+        assert_eq!(config.floating_defaults.width_ratio, Some(0.5));
+        assert_eq!(config.floating_defaults.height_ratio, Some(0.25));
+    }
+
+    #[test]
+    fn floating_rule_accepts_whole_number_ratios() {
+        let source = r#"
+            floating-rules {
+                rule app-id="com.example.app" { width-ratio 1 }
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.floating_rules[0].width_ratio, Some(1.0));
     }
 
     #[test]
@@ -1184,7 +1288,10 @@ mod tests {
     fn floating_defaults_fall_back_when_block_is_absent() {
         let config = parse("").unwrap();
         assert!(config.floating_defaults.center);
-        assert!((config.floating_defaults.width_ratio - 0.6).abs() < f32::EPSILON);
+        assert_eq!(config.floating_defaults.width, None);
+        assert_eq!(config.floating_defaults.height, None);
+        assert_eq!(config.floating_defaults.width_ratio, None);
+        assert_eq!(config.floating_defaults.height_ratio, None);
     }
 
     #[test]
@@ -1252,7 +1359,7 @@ mod tests {
     fn menubar_defaults_when_section_is_absent() {
         let config = parse("").unwrap();
         assert_eq!(config.menubar.fill, MenubarFill::Filled);
-        assert_eq!(config.menubar.shape, MenubarShape::Pill);
+        assert_eq!(config.menubar.shape, MenubarShape::Rounded);
         assert!(!config.menubar.uppercase);
     }
 
@@ -1281,7 +1388,7 @@ mod tests {
         "#;
         let config = parse(source).unwrap();
         assert_eq!(config.menubar.fill, MenubarFill::Filled);
-        assert_eq!(config.menubar.shape, MenubarShape::Pill);
+        assert_eq!(config.menubar.shape, MenubarShape::Rounded);
     }
 
     #[test]
