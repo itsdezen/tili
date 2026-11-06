@@ -153,6 +153,22 @@ const issueUrl = `${site.repository}/issues/new?title=${encodeURIComponent(
 
   <DocsSearch />
 
+  {/* Progressive enhancement: heading ids already exist, so linking still
+      works without this — the `#` is just a visible handle. */}
+  <script is:inline data-enhancement="heading-anchors">
+    document
+      .querySelectorAll('.prose h2[id], .prose h3[id]')
+      .forEach(function (heading) {
+        const link = document.createElement('a')
+        link.className = 'heading-anchor'
+        link.href = '#' + heading.id
+        link.textContent = '#'
+        link.setAttribute('aria-hidden', 'true')
+        link.tabIndex = -1
+        heading.appendChild(link)
+      })
+  </script>
+
   {/* Progressive enhancement: works without it, since every code block is
       still plain selectable text when this never runs. */}
   <script is:inline data-enhancement="copy-code">

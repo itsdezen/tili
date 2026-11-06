@@ -10,7 +10,8 @@ const jsFiles = []
 // The only client-side JavaScript this site allows: the two inline
 // progressive enhancements (copy install command, copy code block) and
 // Pagefind's own bundle on docs pages. Everything else must stay static.
-const enhancementScript = /data-enhancement=["']copy-(install|code)["']/
+const enhancementScript =
+  /data-enhancement=["'](copy-install|copy-code|heading-anchors)["']/
 const pagefindScript =
   /<script[^>]+src=["']\/pagefind\/pagefind-component-ui\.js["'][^>]*>/i
 

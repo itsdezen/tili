@@ -154,6 +154,57 @@
   .docs-toc {
     display: none;
   }
+
+  /* Reference tables stack into labelled blocks: each row becomes a key line
+     followed by its type/default/description, so nothing needs sideways
+     scrolling. Labels come from rehype-table-labels.mjs. */
+  .prose table {
+    display: block;
+    overflow: visible;
+  }
+
+  .prose thead {
+    display: none;
+  }
+
+  .prose tbody,
+  .prose tr,
+  .prose td {
+    display: block;
+  }
+
+  .prose tr {
+    padding: var(--space-2) 0;
+    border-top: 1px dotted var(--color-line-soft);
+  }
+
+  .prose tr:last-child {
+    border-bottom: 1px dotted var(--color-line-soft);
+  }
+
+  .prose td {
+    padding: 1px 0;
+    border: 0;
+  }
+
+  .prose td::before {
+    display: block;
+    color: var(--color-ink-muted);
+    font-family: var(--font-ui);
+    font-size: var(--text-xs);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    content: attr(data-label);
+  }
+
+  .prose td:first-child {
+    color: var(--color-ink);
+    font-weight: bold;
+  }
+
+  .prose td:first-child::before {
+    display: none;
+  }
 }
 
 .prose {
@@ -186,6 +237,20 @@
 .prose h2,
 .prose h3 {
   scroll-margin-top: var(--space-4);
+}
+
+.prose .heading-anchor,
+.prose .heading-anchor:visited {
+  margin-left: var(--space-2);
+  color: var(--color-line-soft);
+  font-family: var(--font-mono);
+  font-size: 0.7em;
+  font-weight: normal;
+  text-decoration: none;
+}
+
+.prose .heading-anchor:hover {
+  color: var(--color-link);
 }
 
 .prose h4 {
@@ -228,6 +293,11 @@
 
 .prose a {
   color: var(--color-link);
+}
+
+.prose img {
+  border: 1px solid var(--color-line-soft);
+  background: var(--color-surface-2);
 }
 
 .prose code {

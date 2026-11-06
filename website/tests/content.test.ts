@@ -129,6 +129,18 @@ describe('docs onboarding', () => {
     }
   })
 
+  it('gives every command row a stable anchor', () => {
+    const commands = docs.find((doc) => doc.id === 'commands')
+    const ids = [
+      ...(commands?.body.matchAll(/<span id="(cmd-[a-z-]+)"><\/span>/g) ?? []),
+    ].map((match) => match[1])
+
+    expect(ids).toHaveLength(37)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids).toContain('cmd-status')
+    expect(ids).toContain('cmd-mode-exit')
+  })
+
   it('links shipped roadmap versions to changelog anchors', () => {
     const roadmap = docs.find((doc) => doc.id === 'roadmap')
 

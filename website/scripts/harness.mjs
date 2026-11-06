@@ -53,7 +53,9 @@ function executableScripts(html) {
   return tags.filter(
     (tag) =>
       !/type\s*=\s*["']application\/ld\+json["']/i.test(tag) &&
-      !/data-enhancement=["']copy-(install|code)["']/i.test(tag) &&
+      !/data-enhancement=["'](copy-install|copy-code|heading-anchors)["']/i.test(
+        tag,
+      ) &&
       !/src=["']\/pagefind\/pagefind-component-ui\.js["']/i.test(tag),
   )
 }

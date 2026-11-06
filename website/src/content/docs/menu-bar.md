@@ -31,7 +31,7 @@ monitor.
 | Item | Behavior |
 |---|---|
 | A workspace name | Goes to that workspace's home display (or focuses the display already showing it). |
-| **Copy rule for focused window** | Runs `tili rule --copy`, putting a ready-to-paste `floating-rules` snippet on the clipboard. |
+| **Copy rule for focused window** | Runs [`tili rule --copy`](/docs/commands#cmd-rule), putting a ready-to-paste `floating-rules` snippet on the clipboard. |
 | **Open Settings** | Opens `~/.config/tili/tili.kdl`, trying `$EDITOR` first (if set), then `open <path>` (Launch Services' registered default for `.kdl`), then `open -a TextEdit <path>` as a last resort that's guaranteed to work. |
 | **Quit tili** | Runs `tili stop` (stopping the daemon too, not just this process) and then exits. |
 

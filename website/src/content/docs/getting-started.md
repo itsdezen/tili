@@ -62,7 +62,7 @@ list.
 tili status
 ```
 
-`tili status` reports whether the daemon is running and reachable. Two
+[`tili status`](/docs/commands#cmd-status) reports whether the daemon is running and reachable. Two
 other quick checks: the workspace badge appears in the menu bar (see
 [Menu Bar Badge](/docs/menu-bar)), and opening a second window tiles it
 into the same workspace instead of stacking it on top of the first.

@@ -24,6 +24,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.12",
+    "@astrojs/markdown-remark": "^7.3.6",
     "@eslint/js": "^10.0.1",
     "@resvg/resvg-js": "^2.6.2",
     "eslint": "^10.14.0",

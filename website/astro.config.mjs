@@ -1,7 +1,9 @@
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import { join, normalize, resolve, sep } from 'node:path'
+import { unified } from '@astrojs/markdown-remark'
 import sitemap from '@astrojs/sitemap'
 import { defineConfig } from 'astro/config'
+import rehypeTableLabels from './scripts/rehype-table-labels.mjs'
 
 const contentTypes = {
   '.css': 'text/css; charset=utf-8',
@@ -71,6 +73,14 @@ export default defineConfig({
     // Light-only site: a light syntax theme keeps code blocks readable on the
     // ivory surface without a second color scheme.
     shikiConfig: { theme: 'github-light' },
+    // Astro 7 defaults to Sätteri; the unified processor is opted into because
+    // these two rehype passes are not expressible as Sätteri options.
+    processor: unified({
+      rehypePlugins: [
+        // Reference tables stack into labelled blocks on narrow screens.
+        rehypeTableLabels,
+      ],
+    }),
   },
   build: {
     // `file` emits /docs/commands.html so Cloudflare's `drop-trailing-slash`
