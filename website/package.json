@@ -5,13 +5,35 @@
   "private": true,
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build",
+    "build": "astro build && pagefind --site dist && bun run check:build",
     "preview": "astro preview",
-    "astro": "astro"
+    "harness": "bun run build && bun scripts/harness.mjs",
+    "verify": "bun run check && bun run lint && bun run format:check && bun run test && bun run harness",
+    "check": "astro check",
+    "check:build": "bun scripts/check-build.mjs",
+    "lint": "eslint .",
+    "format": "prettier --write . && eslint --fix .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "og": "bun scripts/generate-og.mjs"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.34.0",
-    "astro": "^5.5.0",
-    "sharp": "^0.33.5"
+    "@astrojs/sitemap": "^3.7.4",
+    "astro": "^7.4.7",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.12",
+    "@eslint/js": "^10.0.1",
+    "@resvg/resvg-js": "^2.6.2",
+    "eslint": "^10.14.0",
+    "eslint-plugin-astro": "^3.2.1",
+    "globals": "^17.14.0",
+    "pagefind": "^1.6.0",
+    "prettier": "^3.9.10",
+    "prettier-plugin-astro": "^1.1.2",
+    "typescript": "6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vitest": "^5.1.0"
   }
 }

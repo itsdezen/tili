@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: Full reference for every section and key tili.kdl accepts, straight from tili-config's schema.
+description: Complete tili.kdl reference for workspaces, gaps, keybindings, floating rules, menu bar, and hot reload, mirroring the parser schema.
 ---
 
 Configuration is [KDL](https://kdl.dev), read from `~/.config/tili/tili.kdl`
@@ -16,10 +16,10 @@ This page mirrors `crates/tili-config/src/schema.rs` exactly — every node
 name, attribute, type, and default below is what the parser actually
 implements today, not an aspirational schema.
 
-:::caution
-KDL v2 booleans are `#true`/`#false` — bare `true`/`false` is a parse
-error, unlike KDL v1 or most other config languages.
-:::
+> **Caution**
+>
+> KDL v2 booleans are `#true`/`#false` — bare `true`/`false` is a parse
+> error, unlike KDL v1 or most other config languages.
 
 ## `workspaces`
 
@@ -50,11 +50,11 @@ default-layout "accordion"
 
 A single top-level node (not a block) taking one string argument.
 
-:::note
-This key is parsed into `Config.default_layout`, but nothing in
-`tili-daemon` currently reads it — setting it has no observable effect
-today. It's part of the schema ahead of the behavior that will consume it.
-:::
+> **Note**
+>
+> This key is parsed into `Config.default_layout`, but nothing in
+> `tili-daemon` currently reads it — setting it has no observable effect
+> today. It's part of the schema ahead of the behavior that will consume it.
 
 ## `gaps`
 
@@ -123,15 +123,15 @@ Every key here is independently optional — an invalid or unrecognized
 value for one key (e.g. `animate "ludicrous"`) falls back to that key's own
 default rather than rejecting the rest of the `settings` block or the file.
 
-:::note
-**`animate` performance tradeoff**: each animation step is a real
-Accessibility API write, not a free interpolation. Going from off to
-`"medium"` (~60fps) is roughly 6x the AX round-trips per relayout (~6
-steps instead of 1); `"high"` (~120fps) is roughly 11x. Mostly unnoticeable
-on native apps; a slow-to-respond app (some Electron/Chromium apps) pays
-that multiplier in extra latency per relayout, more so at `"high"`. Try
-`"medium"` first.
-:::
+> **Note**
+>
+> **`animate` performance tradeoff**: each animation step is a real
+> Accessibility API write, not a free interpolation. Going from off to
+> `"medium"` (~60fps) is roughly 6x the AX round-trips per relayout (~6
+> steps instead of 1); `"high"` (~120fps) is roughly 11x. Mostly unnoticeable
+> on native apps; a slow-to-respond app (some Electron/Chromium apps) pays
+> that multiplier in extra latency per relayout, more so at `"high"`. Try
+> `"medium"` first.
 
 ## `session`
 
@@ -181,12 +181,12 @@ restart needed.
 | `shape` | `"pill"` / `"rounded"` | `"pill"` | `"pill"`: fully rounded ends. `"rounded"`: a smaller, fixed corner radius, more like an ordinary button. Any other value falls back to `"pill"`. |
 | `uppercase` | boolean | `#false` | Uppercases the workspace name shown in the badge itself. Doesn't affect the dropdown menu's item labels, which stay as-typed for readability. |
 
-:::note
-The "connecting" spinner shown when the daemon is unreachable (see
-[Menu Bar Badge](/docs/menu-bar)) always renders as the built-in filled
-pill, ignoring this section entirely — a custom style must never be
-mistakable for "everything's fine."
-:::
+> **Note**
+>
+> The "connecting" spinner shown when the daemon is unreachable (see
+> [Menu Bar Badge](/docs/menu-bar)) always renders as the built-in filled
+> pill, ignoring this section entirely — a custom style must never be
+> mistakable for "everything's fine."
 
 ## `keybindings`
 
@@ -234,15 +234,15 @@ digits, punctuation (`slash`/`semicolon`/`minus`/`equal`/…), and
 | `resize` | `alt-shift-semicolon` | Yes — stays active until you press `escape` or `enter` | Repeated `h`/`l` presses each apply one `resize -0.1`/`resize 0.1` step, for fine-tuning a window's share of its container without re-pressing the entry combo each time. |
 | `manage` | `alt-shift-m` | No — `auto-exit=#true`, so firing any bound command returns to `"main"` immediately | Less-frequent, "do one thing" operations: `escape` → `reload-config`, `r` → `flatten`, and `alt-shift-h`/`j`/`k`/`l` → `join left`/`down`/`up`/`right`. |
 
-:::note
-`"main"` also has its own `alt-shift-g` → `join left` bind, independent of
-`manage` mode's join binds above. It's a standalone shortcut for the one
-most common direction, for when you just want that without leaving
-`"main"` — it dispatches the exact same `join left` command `manage`
-mode's `alt-shift-h` does (see [Commands](/docs/commands)), just wired
-directly at the top level. Reach for `manage` mode instead when you need
-`down`/`up`/`right`, since those three have no top-level equivalent.
-:::
+> **Note**
+>
+> `"main"` also has its own `alt-shift-g` → `join left` bind, independent of
+> `manage` mode's join binds above. It's a standalone shortcut for the one
+> most common direction, for when you just want that without leaving
+> `"main"` — it dispatches the exact same `join left` command `manage`
+> mode's `alt-shift-h` does (see [Commands](/docs/commands)), just wired
+> directly at the top level. Reach for `manage` mode instead when you need
+> `down`/`up`/`right`, since those three have no top-level equivalent.
 
 ## `workspace-rules`
 

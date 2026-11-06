@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-description: What tili has shipped and what's planned next.
+description: What tili has shipped, what is planned next, and how the roadmap maps to releases and the changelog.
 ---
 
 ## Shipped

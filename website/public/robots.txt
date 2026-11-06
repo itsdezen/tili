@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://tili.dezen.me/sitemap-index.xml

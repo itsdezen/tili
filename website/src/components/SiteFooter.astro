@@ -1,0 +1,18 @@
+---
+import { site } from '../lib/site'
+
+const year = new Date().getFullYear()
+---
+
+<footer class="site-footer" data-pagefind-ignore>
+  <span>© {year} tili · MIT licensed · macOS</span>
+  <span class="footer-links">
+    <a href={site.repository} target="_blank" rel="noopener noreferrer">
+      GitHub<span class="sr-only"> (opens in new tab)</span>
+    </a>
+    <a href={site.sponsor} target="_blank" rel="noopener noreferrer">
+      Sponsor<span class="sr-only"> (opens in new tab)</span>
+    </a>
+    <a href={site.authorUrl}>dezen.me</a>
+  </span>
+</footer>

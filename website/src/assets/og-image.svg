@@ -1,0 +1,93 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1200"
+  height="630"
+  viewBox="0 0 1200 630"
+  role="img"
+  aria-label="tili — a tiling window manager for macOS"
+>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#171512" stroke-opacity="0.05" stroke-width="1" />
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="630" fill="#f2ede1" />
+  <rect width="1200" height="630" fill="url(#grid)" />
+
+  <!-- Window: ink frame, hard offset shadow, no radius — same shell as the site. -->
+  <rect x="204" y="92" width="800" height="446" fill="#171512" opacity="0.14" />
+  <rect x="196" y="84" width="800" height="446" fill="#fbf8f0" stroke="#171512" stroke-width="2" />
+
+  <rect x="196" y="84" width="800" height="34" fill="#171512" />
+  <circle cx="214" cy="101" r="5" fill="#1f9d1f" />
+  <text
+    x="230"
+    y="106"
+    fill="#fbf8f0"
+    font-family="Verdana, Geneva, sans-serif"
+    font-size="13"
+    letter-spacing="1.5"
+  >TILI / MACOS</text>
+  <text
+    x="980"
+    y="106"
+    fill="#b9b2a3"
+    font-family="'Courier New', Courier, monospace"
+    font-size="13"
+    text-anchor="end"
+  >/</text>
+
+  <text
+    x="244"
+    y="248"
+    fill="#171512"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="104"
+    font-weight="bold"
+    letter-spacing="-3"
+  >tili</text>
+
+  <text
+    x="244"
+    y="304"
+    fill="#5c574c"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="34"
+  >a tiling window manager for macOS</text>
+
+  <rect x="244" y="344" width="560" height="52" fill="#e9e2d2" stroke="#171512" stroke-width="2" />
+  <text
+    x="264"
+    y="377"
+    fill="#171512"
+    font-family="'Courier New', Courier, monospace"
+    font-size="22"
+  >brew install itsdezen/tap/tili</text>
+
+  <text
+    x="244"
+    y="446"
+    fill="#5c574c"
+    font-family="Verdana, Geneva, sans-serif"
+    font-size="15"
+    letter-spacing="1.2"
+  >I3-STYLE · RUST · PUBLIC ACCESSIBILITY API · NO SIP DISABLE</text>
+
+  <line x1="196" y1="474" x2="996" y2="474" stroke="#d5cbb6" stroke-width="1" />
+
+  <text
+    x="244"
+    y="504"
+    fill="#5c574c"
+    font-family="'Courier New', Courier, monospace"
+    font-size="14"
+  >MIT licensed · tili.dezen.me</text>
+
+  <!-- Tiling motif: a tiled row in the window's upper-right corner. -->
+  <g stroke="#171512" stroke-width="2" fill="#fbf8f0">
+    <rect x="700" y="150" width="120" height="64" />
+    <rect x="824" y="150" width="64" height="64" fill="#e9e2d2" />
+    <rect x="892" y="150" width="64" height="64" />
+  </g>
+</svg>

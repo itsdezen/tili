@@ -1,6 +1,6 @@
 ---
 title: Menu Bar Badge
-description: tili-menubar, the NSStatusItem workspace badge that ships alongside the daemon.
+description: How the tili-menubar NSStatusItem badge shows the focused display's active workspace, and how to style, configure, or quit it.
 ---
 
 `tili start` also installs and starts `tili-menubar` alongside the daemon —

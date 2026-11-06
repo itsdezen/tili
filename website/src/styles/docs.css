@@ -1,0 +1,311 @@
+.docs {
+  display: grid;
+  gap: var(--space-5);
+}
+
+@media (min-width: 900px) {
+  .docs {
+    grid-template-columns: var(--docs-sidebar) minmax(0, 1fr);
+    gap: var(--space-7);
+    align-items: start;
+  }
+
+  .docs-mobile-nav {
+    display: none;
+  }
+}
+
+@media (max-width: 899px) {
+  .docs-sidebar {
+    display: none;
+  }
+}
+
+.docs-sidebar-title {
+  padding: 0 var(--space-2) var(--space-2);
+  color: var(--color-ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.docs-nav {
+  border-top: 1px solid var(--color-line-soft);
+  list-style: none;
+}
+
+.docs-nav a,
+.docs-nav a:visited {
+  display: block;
+  padding: 4px var(--space-2);
+  border-bottom: 1px dotted var(--color-line-soft);
+  color: var(--color-ink-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.docs-nav a:hover {
+  background: var(--color-row-hover);
+  color: var(--color-ink);
+}
+
+.docs-nav a[aria-current='page'] {
+  color: var(--color-ink);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+.docs-nav-external {
+  margin-top: var(--space-4);
+}
+
+.docs-mobile-nav summary {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-line);
+  background: var(--color-surface-2);
+  box-shadow: var(--button-shadow);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  list-style: none;
+}
+
+.docs-mobile-nav summary::-webkit-details-marker {
+  display: none;
+}
+
+.docs-mobile-nav summary::after {
+  margin-left: var(--space-2);
+  content: '▾';
+}
+
+.docs-mobile-nav[open] summary::after {
+  content: '▴';
+}
+
+.docs-mobile-nav .docs-nav {
+  margin-top: var(--space-2);
+}
+
+.docs-header {
+  display: grid;
+  gap: var(--space-2);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--color-line-soft);
+}
+
+.prose {
+  max-width: 72ch;
+}
+
+.prose > * + * {
+  margin-top: var(--space-4);
+}
+
+.prose h1 {
+  font-size: var(--text-3xl);
+  line-height: 1.15;
+}
+
+.prose h2 {
+  margin-top: var(--space-7);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-line-soft);
+  font-size: var(--text-xl);
+  line-height: 1.25;
+}
+
+.prose h3 {
+  margin-top: var(--space-5);
+  font-size: var(--text-lg);
+  line-height: 1.3;
+}
+
+.prose h4 {
+  margin-top: var(--space-5);
+  font-size: var(--text-base);
+}
+
+.prose p,
+.prose li,
+.prose dd {
+  color: var(--color-ink-muted);
+}
+
+.prose strong {
+  color: var(--color-ink);
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.2em;
+}
+
+.prose li + li {
+  margin-top: var(--space-1);
+}
+
+.prose hr {
+  height: 3px;
+  margin: var(--space-6) 0;
+  border: 0;
+  border-top: 1px solid var(--color-line);
+  border-bottom: 1px solid var(--color-line);
+}
+
+.prose hr + h2 {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.prose a {
+  color: var(--color-link);
+}
+
+.prose code {
+  padding: 1px 4px;
+  background: var(--color-surface-2);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.prose pre {
+  overflow-x: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--color-line-soft);
+  background: var(--color-surface-2);
+}
+
+.prose pre code {
+  padding: 0;
+  background: none;
+  font-size: var(--text-sm);
+}
+
+/* Shiki writes its own background inline; the panel stays ivory like every
+   other surface instead of introducing a second white. */
+.prose pre.astro-code {
+  background: var(--color-surface-2) !important;
+}
+
+.prose table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.prose th,
+.prose td {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--color-line-soft);
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th {
+  color: var(--color-ink);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.prose blockquote {
+  padding: var(--space-2) var(--space-4);
+  border-left: 3px solid var(--color-line);
+  background: var(--color-surface-2);
+  color: var(--color-ink-muted);
+}
+
+.prose blockquote > * + * {
+  margin-top: var(--space-2);
+}
+
+.prose blockquote p:first-child strong {
+  color: var(--color-ink);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.docs-pager {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-8);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-line-soft);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+}
+
+.docs-pager a {
+  text-decoration: none;
+}
+
+.docs-pager a:hover {
+  text-decoration: underline;
+}
+
+.docs-pager span {
+  color: var(--color-ink-muted);
+}
+
+/*
+ * Pagefind Component UI renders in shadow-ish hosts that apply `all: initial`,
+ * so the only reliable theming surface is its `--pf-*` custom properties.
+ * Custom properties are exempt from `all`, which is why these still inherit.
+ */
+:root {
+  --pf-text: #171512;
+  --pf-text-secondary: #5c574c;
+  --pf-text-muted: #5c574c;
+  --pf-background: #fbf8f0;
+  --pf-border: #d5cbb6;
+  --pf-border-focus: #0000cc;
+  --pf-skeleton: #e9e2d2;
+  --pf-skeleton-shine: #f2ede1;
+  --pf-hover: #fff6cf;
+  --pf-mark: #171512;
+  --pf-outline-focus: #0000cc;
+  --pf-outline-width: 2px;
+  --pf-outline-offset: 2px;
+  --pf-font: Verdana, Geneva, Tahoma, sans-serif;
+  --pf-border-radius: 0px;
+  --pf-input-height: 34px;
+  --pf-modal-backdrop: rgba(23, 21, 18, 0.35);
+  --pf-modal-max-width: 640px;
+  --pf-modal-top: 10dvh;
+  --pf-shadow-lg: 4px 4px 0 rgba(23, 21, 18, 0.18);
+}
+
+.docs-search-trigger {
+  display: inline-block;
+}
+
+/*
+ * The One Window shell has square corners everywhere, but Pagefind ships
+ * rounded defaults (the modal itself is a hardcoded 12px). Squared off here
+ * with a broad rule because Pagefind's own selectors are deliberately
+ * high-specificity to survive host sites.
+ */
+pagefind-modal,
+pagefind-modal *,
+pagefind-modal-trigger * {
+  border-radius: 0 !important;
+}
+
+@media print {
+  .prose pre,
+  .prose blockquote {
+    break-inside: avoid;
+  }
+}

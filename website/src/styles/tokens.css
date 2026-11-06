@@ -1,35 +1,48 @@
 :root {
-  --color-gray-0: #ffffff;
-  --color-gray-50: #fafafa;
-  --color-gray-100: #f2f2f2;
-  --color-gray-200: #e5e5e5;
-  --color-gray-300: #d4d4d4;
-  --color-gray-400: #a3a3a3;
-  --color-gray-500: #737373;
-  --color-gray-600: #525252;
-  --color-gray-700: #404040;
-  --color-gray-800: #262626;
-  --color-gray-900: #171717;
-  --color-gray-950: #0a0a0a;
+  --color-bg: #f2ede1;
+  --color-bg-grid: rgba(23, 21, 18, 0.035);
+  --color-surface: #fbf8f0;
+  --color-surface-2: #e9e2d2;
+  --color-ink: #171512;
+  --color-ink-muted: #5c574c;
+  --color-line: #29251f;
+  --color-line-soft: #d5cbb6;
+  --color-link: #0000cc;
+  --color-link-visited: #551a8b;
+  --color-selection: #d9e2f2;
+  --color-row-hover: #fff6cf;
+  --color-titlebar: #171512;
+  --color-titlebar-fg: #fbf8f0;
+  --color-titlebar-muted: #b9b2a3;
+  --color-status: #1f9d1f;
 
-  --color-bg: var(--color-gray-0);
-  --color-surface: var(--color-gray-50);
-  --color-fg: var(--color-gray-900);
-  --color-fg-muted: var(--color-gray-600);
-  --color-border: var(--color-gray-200);
-  --color-accent: var(--color-gray-950);
-  --color-accent-fg: var(--color-gray-0);
+  --font-body: Georgia, 'Times New Roman', Times, serif;
+  --font-ui: Verdana, Geneva, Tahoma, sans-serif;
+  --font-mono: 'Courier New', Courier, monospace;
 
-  --font-sans: -apple-system, 'SF Pro Text', 'Inter', system-ui, sans-serif;
-  --font-display: 'SF Pro Display', 'SF Pro Icons', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-}
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 36px;
 
-.dark {
-  --color-bg: var(--color-gray-950);
-  --color-surface: var(--color-gray-900);
-  --color-fg: var(--color-gray-50);
-  --color-fg-muted: var(--color-gray-400);
-  --color-border: var(--color-gray-800);
-  --color-accent: var(--color-gray-0);
-  --color-accent-fg: var(--color-gray-950);
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 48px;
+  --space-9: 64px;
+
+  --window-width: 680px;
+  --window-width-wide: 920px;
+  --measure: 62ch;
+  --docs-sidebar: 13rem;
+  --focus: #0000cc;
+  --shadow: 4px 4px 0 rgba(23, 21, 18, 0.12);
+  --button-shadow: 2px 2px 0 var(--color-line);
 }

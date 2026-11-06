@@ -6,5 +6,9 @@
   // serves straight out of the Astro build output.
   "assets": {
     "directory": "./dist",
+    // Routes are emitted as `<route>.html`; these two settings make
+    // /docs/commands serve docs/commands.html and /docs/ redirect to /docs.
+    "html_handling": "drop-trailing-slash",
+    "not_found_handling": "404-page",
   },
 }

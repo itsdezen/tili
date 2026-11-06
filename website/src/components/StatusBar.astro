@@ -1,0 +1,23 @@
+---
+interface Props {
+  left: string
+  right?: { label: string; href: string }
+}
+
+const { left, right } = Astro.props
+const external = right?.href.startsWith('http') ?? false
+---
+
+<div class="statusbar" data-pagefind-ignore>
+  <span>{left}</span>
+  {right && (
+    <a
+      href={right.href}
+      target={external ? '_blank' : undefined}
+      rel={external ? 'noopener noreferrer' : undefined}
+    >
+      {right.label}
+      {external && <span class="sr-only"> (opens in new tab)</span>}
+    </a>
+  )}
+</div>

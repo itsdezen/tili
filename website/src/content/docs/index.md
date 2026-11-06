@@ -1,6 +1,6 @@
 ---
 title: Introduction
-description: Why tili exists and what it does differently from other macOS tiling window managers.
+description: Why tili exists, how it avoids polling and private APIs, and what state the project is in today.
 ---
 
 tili is a tiling window manager for macOS, built for speed. It follows an

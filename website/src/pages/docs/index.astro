@@ -1,0 +1,16 @@
+---
+import { getEntry, render } from 'astro:content'
+import DocsLayout from '../../layouts/DocsLayout.astro'
+
+const entry = await getEntry('docs', 'index')
+
+if (!entry) {
+  throw new Error('Missing src/content/docs/index.md')
+}
+
+const { Content } = await render(entry)
+---
+
+<DocsLayout entry={entry}>
+  <Content />
+</DocsLayout>

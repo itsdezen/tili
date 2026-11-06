@@ -1,7 +1,11 @@
 ---
 title: Getting Started
-description: Install tili, run it for the first time, and grant the permissions it needs.
+description: Install tili on macOS with Homebrew, start the daemon, and grant the Accessibility and Input Monitoring permissions it needs.
 ---
+
+tili installs as a signed macOS app through Homebrew. This page covers the
+install, the permissions tili asks for on first run, troubleshooting, and
+building from source if you would rather not use the tap.
 
 ## Install
 
@@ -38,12 +42,12 @@ stop it and remove the LaunchAgent (so it stays stopped until you run
 `tili --version`/`tili help` for the installed version and full command
 list.
 
-:::tip
-If a three-finger swipe up (Mission Control) shows tiled windows at tiny or
-wildly mismatched sizes, enable **Group windows by application** under
-**System Settings → Desktop & Dock → Mission Control** — this is a macOS
-Mission Control layout setting, not something tili controls.
-:::
+> **Tip**
+>
+> If a three-finger swipe up (Mission Control) shows tiled windows at tiny or
+> wildly mismatched sizes, enable **Group windows by application** under
+> **System Settings → Desktop & Dock → Mission Control** — this is a macOS
+> Mission Control layout setting, not something tili controls.
 
 ## Troubleshooting
 

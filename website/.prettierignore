@@ -1,0 +1,9 @@
+node_modules
+dist
+.astro
+public/pagefind
+src/content
+bun.lock
+package-lock.json
+pnpm-lock.yaml
+yarn.lock

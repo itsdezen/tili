@@ -1,0 +1,23 @@
+---
+import { docPath } from '../lib/docs'
+
+interface Props {
+  items: Array<{ id: string; data: { title: string } }>
+  current: string
+}
+
+const { items, current } = Astro.props
+---
+
+<ul class="docs-nav">
+  {items.map((item) => (
+    <li>
+      <a
+        href={docPath(item.id)}
+        aria-current={item.id === current ? 'page' : undefined}
+      >
+        {item.data.title}
+      </a>
+    </li>
+  ))}
+</ul>

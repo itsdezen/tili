@@ -1,7 +1,13 @@
 {
-  "name": "tili",
+  "name": "tili — a tiling window manager for macOS",
   "short_name": "tili",
-  "description": "A tiling window manager for macOS, built for speed.",
+  "description": "An i3-style tiling window manager for macOS, built for speed: Rust, public Accessibility API only, no SIP disable.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f2ede1",
+  "theme_color": "#f2ede1",
+  "lang": "en",
   "icons": [
     {
       "src": "/web-app-manifest-192x192.png",
@@ -15,8 +21,5 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ],
-  "theme_color": "#0a0a0a",
-  "background_color": "#ffffff",
-  "display": "standalone"
+  ]
 }

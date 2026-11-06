@@ -1,7 +1,6 @@
 ---
 title: Changelog
-description: Real release history for tili, pulled from the repository's CHANGELOG.md.
-tableOfContents: false
+description: The release history for tili, mirrored from the repository's CHANGELOG.md and grouped by version with migration notes.
 ---
 
 All notable changes to this project are documented here. Format follows

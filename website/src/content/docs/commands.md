@@ -1,19 +1,19 @@
 ---
 title: Commands
-description: The full tili CLI reference, plus the keybinding command-string syntax config binds resolve to.
+description: Every tili CLI command, plus the keybinding command-string syntax that tili.kdl bind lines resolve to.
 ---
 
 `tili start`/`stop`/`uninstall`/`status`/`doctor` manage the daemon's
 LaunchAgent and local state directly; everything else below is a client
 command sent over a Unix socket to a daemon that's already running.
 
-:::note
-The CLI (`crates/tili-cli`) and the keybinding command strings your config
-binds (parsed by `crates/tili-ipc`) are two separate parsers that mostly
-agree on spelling — but not always. Where they differ, it's called out
-below; see [Configuration → keybindings](/docs/configuration#keybindings)
-for how `bind` lines resolve.
-:::
+> **Note**
+>
+> The CLI (`crates/tili-cli`) and the keybinding command strings your config
+> binds (parsed by `crates/tili-ipc`) are two separate parsers that mostly
+> agree on spelling — but not always. Where they differ, it's called out
+> below; see [Configuration → keybindings](/docs/configuration#keybindings)
+> for how `bind` lines resolve.
 
 ## Daemon & local state
 

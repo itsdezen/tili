@@ -1,0 +1,63 @@
+---
+import { navLinks } from '../lib/site'
+
+interface Props {
+  path: string
+  search?: boolean
+}
+
+const { path, search = false } = Astro.props
+const onDocs = path === '/docs' || path.startsWith('/docs/')
+---
+
+<header data-pagefind-ignore>
+  <div class="titlebar">
+    <a href="/" aria-label="tili home">
+      tili
+    </a>
+    <span class="titlebar-path">
+      <span class="status-dot" aria-hidden="true">
+        ●
+      </span>
+      {path === '/' ? 'index' : path}
+    </span>
+  </div>
+  <nav aria-label="Primary">
+    <ul class="site-nav">
+      {navLinks.map((link) => (
+        <li>
+          <a
+            href={link.href}
+            aria-current={link.href === '/docs' && onDocs ? 'page' : undefined}
+            target={link.external ? '_blank' : undefined}
+            rel={link.external ? 'noopener noreferrer' : undefined}
+          >
+            {link.label}
+            {link.external && (
+              <>
+                <span aria-hidden="true"> ↗</span>
+                <span class="sr-only"> (opens in new tab)</span>
+              </>
+            )}
+          </a>
+        </li>
+      ))}
+      {search && (
+        <>
+          <li class="docs-search-trigger">
+            <pagefind-modal-trigger placeholder="Search docs"></pagefind-modal-trigger>
+          </li>
+          {/* Second trigger with a browser-safe shortcut. macOS/Windows
+              browsers often claim Cmd/Ctrl+K for the address bar, so `/` is
+              kept as a fallback that always reaches the page. */}
+          <li hidden>
+            <pagefind-modal-trigger
+              shortcut="/"
+              hide-shortcut
+            ></pagefind-modal-trigger>
+          </li>
+        </>
+      )}
+    </ul>
+  </nav>
+</header>

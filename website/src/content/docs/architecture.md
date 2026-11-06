@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: How tili's Cargo workspace is split, and why the boundaries are strict.
+description: How tili's Cargo workspace is split, why the Accessibility boundary is strict, and how layout stays testable without a Mac.
 ---
 
 tili is a Cargo workspace split along strict boundaries so the hardest

@@ -1,0 +1,22 @@
+---
+import Base from '../layouts/Base.astro'
+import { site } from '../lib/site'
+---
+
+<Base
+  title="Page not found"
+  description="That page does not exist on tili.dezen.me. Start from the landing page or the documentation."
+  path="/404"
+  noIndex
+  statusLeft="404 · not found"
+  statusRight={{ label: 'github.com/itsdezen/tili', href: site.repository }}
+>
+  <div class="page-header not-found">
+    <p class="page-kicker">Error 404</p>
+    <h1 class="page-title">Page not found</h1>
+    <p class="page-lede">
+      That page does not exist. Try the <a href="/docs">documentation</a>, or
+      head back <a href="/">home</a>.
+    </p>
+  </div>
+</Base>
