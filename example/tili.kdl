@@ -114,10 +114,10 @@ settings {
     animate #false
 
     // How long one frame transition takes when `animate` is on, in
-    // milliseconds. 200 (default) reads as a quick, visible transition;
+    // milliseconds. 120 (default) reads as a quick, visible transition;
     // lower is snappier, higher is slower. Only meaningful with `animate`
     // on.
-    animate-duration-ms 200
+    animate-duration-ms 120
 
     // Messaging timeout for each Accessibility app connection, in
     // milliseconds. Lower values keep the daemon responsive when one app

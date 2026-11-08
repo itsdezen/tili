@@ -107,7 +107,7 @@ Four sanctioned, narrowly-scoped exceptions:
    isn't polled — the timer doesn't even tick — while nothing is
    mid-animation, which is always true under `AnimationSpeed::Off` and
    true the overwhelming majority of the time even when animating (each
-   animation only runs for the configured `animate-duration-ms`, 200ms by
+   animation only runs for the configured `animate-duration-ms`, 120ms by
    default). Faster than
    `maintenance_tick` (30ms) because animation smoothness depends directly
    on this cadence, unlike `maintenance_tick`'s bookkeeping, where a
@@ -179,7 +179,7 @@ the time read as visibly choppy, so it was split into its own faster,
 activity-gated timer instead — and then made speed-configurable
 (`AnimationSpeed::Medium`/`::High`) once even 16ms/~60fps still read as
 low-fps on real hardware. The animation's own length is separately
-configurable via `settings { animate-duration-ms }` (200ms default).
+configurable via `settings { animate-duration-ms }` (120ms default).
 
 ## Session state is startup-only and never stores NodeIds
 

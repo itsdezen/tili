@@ -1356,6 +1356,18 @@ just falls back to `Config::default()` like before M10.
 of the main `select!` loop — see [invariants.md](invariants.md)'s
 polling-exceptions section for why it exists and what it costs.
 
+`WmEvent::WindowCreated` is the one window change that bypasses that
+debounce. A brand-new window is already on screen at whatever frame the app
+drew it with, so waiting for the next tick leaves that native frame visible
+for up to 30ms before tili can place it. The event branch drains the pid
+immediately instead, subject to `CREATED_DRAIN_COALESCE` (15ms): a second
+window from the same launch burst stays on the normal debounced path, so a
+multi-window restore still coalesces instead of placing each window in its
+own relayout. Under `TILI_TRACE_TIMING` this path logs
+`window-created pid=… age_ms=…` — the time from the AX notification to the
+placement write — which is the remaining first-frame flash tili can't
+remove (see `scripts/dev/window-created-latency.sh`).
+
 `WmEvent::SystemDidWake` (from `NSWorkspaceDidWakeNotification`, registered
 via `tili_ax::register_on_main` — see [tili-ax.md](tili-ax.md), confirmed on
 real hardware across several repeated sleep/wake cycles to be reliably

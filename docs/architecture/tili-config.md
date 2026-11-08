@@ -65,7 +65,7 @@ catches up — see README.md's config preview vs. `example/tili.kdl` for
 `settings { ax-timeout-ms; native-tabs; animate-duration-ms }` carries the
 per-app AX messaging timeout (default 500ms, clamped by `tili-ax` to
 50–5000), whether the native-tab guard is enabled (default `#true`), and the
-tween duration used when `animate` is on (default 200ms, clamped to at least
+tween duration used when `animate` is on (default 120ms, clamped to at least
 1ms). `tili-daemon` applies all three; this crate only parses them.
 
 `session { enabled; state-path; restore-grace-ms; save-debounce-ms;

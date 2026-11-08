@@ -114,7 +114,7 @@ real window must go through `dyn WindowFrameSetter`, not call
 `TweenedFrameSetter`, which eases a window from its old frame to its new
 one over a caller-supplied duration (an ease-out curve) instead of jumping
 straight there — `tili-daemon` constructs it with
-`Settings::animate_duration_ms` (200ms default, overridable in config).
+`Settings::animate_duration_ms` (120ms default, overridable in config).
 `tili-daemon::WmState::apply_config` swaps which one is boxed behind
 `frame_setter` only when `Settings::animate` itself changes; a duration-only
 reload updates the existing setter through `set_duration`, so an unrelated
@@ -175,7 +175,7 @@ burst of these into `pending_pids` (a `HashSet<i32>`, drained once per
 `maintenance_tick`, 30ms — see its own doc comment), so in practice
 `apply_windows_changed` → `relayout_active` → `set_frame` re-fires with
 the *same* target roughly once per `maintenance_tick` during an
-animation's lifetime (≈7 times over the default 200ms), not once per
+animation's lifetime (≈4 times over the default 120ms), not once per
 animation tick. Still enough to matter: restarting the tween's
 clock on any one of those self-triggered calls would push convergence out
 by another `maintenance_tick` each time, and since the notification these
@@ -345,7 +345,11 @@ single coarse `WmEvent::WindowsChanged { pid }` per change — callers
 re-read that process's windows via `list_windows_for_pid` rather than
 trying to interpret individual notification payloads (this sidesteps having
 to reason about whether a specific `AXUIElement` is still valid to query at
-the exact moment its destroyed-notification fires).
+the exact moment its destroyed-notification fires). `AXWindowCreated` is
+split into its own `WmEvent::WindowCreated { pid, at }` so the daemon can
+place a new window before the debounced tick, which would otherwise leave
+the app's native first frame on screen for up to 30ms — `at` is the instant
+the watcher saw it, reported by the `window-created … age_ms=…` trace line.
 
 An earlier version of this loop also carried a `SystemTime`-based
 wall-clock-gap wake-detection backstop (`SLEEP_GAP_THRESHOLD`), added

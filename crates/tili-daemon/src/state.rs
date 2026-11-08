@@ -49,7 +49,7 @@ const FLOAT_DRIFT_EPSILON: f64 = 0.5;
 /// first config load replaces it. Long enough to read as motion, short
 /// enough not to hold up a window operation; `settings {
 /// animate-duration-ms }` overrides it at runtime.
-const ANIMATION_DURATION: Duration = Duration::from_millis(200);
+const ANIMATION_DURATION: Duration = Duration::from_millis(120);
 
 /// `main.rs`'s `animation_tick` period for `AnimationSpeed::Medium`
 /// (~60fps) and `::High` (~120fps) — see `WmState::animation_tick_period`.
@@ -1996,6 +1996,7 @@ impl WmState {
         //
         // One AX read per brand-new standard window, reused both by the
         // guard and by the tab-group-member bookkeeping below.
+        let probe_start = trace::enabled().then(Instant::now);
         let tab_group_buttons: HashMap<WindowId, Option<usize>> = if self.native_tabs {
             fresh
                 .iter()
@@ -2008,6 +2009,12 @@ impl WmState {
         } else {
             HashMap::new()
         };
+        if let Some(probe_start) = probe_start {
+            trace::log(format_args!(
+                "tili-daemon: native-tab probe map took {:?}",
+                probe_start.elapsed()
+            ));
+        }
         let native_tab_replacements = self.native_tab_replacements(pid, &fresh, &tab_group_buttons);
         let mut tab_replaced = false;
         if !native_tab_replacements.is_empty() {
@@ -6480,6 +6487,7 @@ impl WmState {
 
         let animate_entry = self.animate != tili_config::AnimationSpeed::Off;
         let placements = tree.layout(area, gaps);
+        let layout_start = trace::enabled().then(Instant::now);
         for (id, rect) in placements {
             let entry = self.animate_entry.remove(&id);
             if let Some(window) = self.windows.get_mut(&id) {
@@ -6526,6 +6534,12 @@ impl WmState {
                     self.frame_setter.set_frame(window, rect);
                 }
             }
+        }
+        if let Some(layout_start) = layout_start {
+            trace::log(format_args!(
+                "tili-daemon: relayout monitor={monitor_id} took {:?}",
+                layout_start.elapsed()
+            ));
         }
     }
 

@@ -135,6 +135,20 @@ pub enum WmEvent {
     WindowsChanged {
         pid: i32,
     },
+    /// A window was created, split out of `WindowsChanged` so the daemon can
+    /// scan it immediately instead of waiting for the next debounced tick.
+    /// That tick is what coalesces moved/resized notifications (including
+    /// the ones tili's own tween writes generate), but for a brand-new
+    /// window it also leaves the app's native first frame on screen for up
+    /// to the tick interval before tili can place it. Other changes stay
+    /// debounced.
+    WindowCreated {
+        pid: i32,
+        /// When the watcher saw the AX notification. The daemon reports
+        /// `at.elapsed()` under trace as the "native frame age" — how long
+        /// the app's first frame stayed unmanaged before tili placed it.
+        at: std::time::Instant,
+    },
     WindowFocused {
         pid: i32,
     },
@@ -632,6 +646,11 @@ fn watch_app(
                 || event.notification == AX_MAIN_WINDOW_CHANGED_NOTIFICATION
             {
                 WmEvent::WindowFocused { pid }
+            } else if event.notification == AX_WINDOW_CREATED_NOTIFICATION {
+                WmEvent::WindowCreated {
+                    pid,
+                    at: std::time::Instant::now(),
+                }
             } else {
                 WmEvent::WindowsChanged { pid }
             };

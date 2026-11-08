@@ -4,7 +4,7 @@ mod socket;
 mod state;
 mod trace;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,13 @@ const WAIT_FOR_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// that gap while making ordinary Cmd-Tab/Dock-click-reveal feel laggy, so
 /// this stays short rather than growing to cover a full app launch.
 const REVEAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Spacing below which a second `WindowCreated` for the same pid stays on
+/// the debounced path instead of taking the immediate one. An app restoring
+/// several windows at once would otherwise trigger one scan/relayout per
+/// window; the first window still gets the fast path, which is the one whose
+/// native frame would otherwise linger on screen.
+const CREATED_DRAIN_COALESCE: std::time::Duration = std::time::Duration::from_millis(15);
 
 /// The real process entry point — deliberately not `#[tokio::main]`. A real
 /// `NSApplication` instance needs its `run()` to own the actual OS process
@@ -206,7 +213,13 @@ async fn async_daemon_main(
     // rescan per `maintenance_tick`, using whichever state is current at
     // that moment — a pid re-signaled before its tick naturally coalesces
     // into that one pass rather than triggering a second rescan.
+    // `WmEvent::WindowCreated` also lands here, but the event branch below
+    // drains it immediately (except during a multi-window launch burst).
     let mut pending_pids: HashSet<i32> = HashSet::new();
+    // Last time each pid took the immediate `WindowCreated` path; keeps a
+    // burst of windows from one launch on the debounced path after the
+    // first (see `CREATED_DRAIN_COALESCE`).
+    let mut last_created_drain: HashMap<i32, Instant> = HashMap::new();
     // Armed by `MouseSignal::ButtonUp` *and* `WmEvent::FrontmostAppChanged`
     // (both funnel into this one deferred check rather than calling
     // `WmState::reveal_frontmost`/`reveal_current_frontmost` synchronously)
@@ -475,13 +488,25 @@ async fn async_daemon_main(
                         // true no-op (see handle_event's own doc comments)
                         // — neither is worth waking a blocked WaitForChange
                         // caller for.
+                        //
+                        // WindowCreated carries the instant the watcher saw
+                        // the AX notification, so this branch can report how
+                        // long the app's native first frame was left on
+                        // screen before tili placed the window.
+                        let created = match &event {
+                            WmEvent::WindowCreated { pid, at } => Some((*pid, *at)),
+                            _ => None,
+                        };
                         changed = matches!(
                             event,
-                            WmEvent::WindowsChanged { .. } | WmEvent::AppTerminated { .. }
+                            WmEvent::WindowsChanged { .. }
+                                | WmEvent::WindowCreated { .. }
+                                | WmEvent::AppTerminated { .. }
                         );
                         let session_event = matches!(
                             event,
                             WmEvent::WindowsChanged { .. }
+                                | WmEvent::WindowCreated { .. }
                                 | WmEvent::AppTerminated { .. }
                                 | WmEvent::FrontmostAppChanged { .. }
                         );
@@ -496,6 +521,35 @@ async fn async_daemon_main(
                         .await;
                         if session_event {
                             state.mark_session_dirty();
+                        }
+                        if let Some((pid, at)) = created {
+                            let now = Instant::now();
+                            let too_soon = last_created_drain
+                                .get(&pid)
+                                .is_some_and(|last| now.duration_since(*last) < CREATED_DRAIN_COALESCE);
+                            if too_soon {
+                                if trace::enabled() {
+                                    trace::log(format_args!(
+                                        "tili-daemon: window-created pid={pid} coalesced queue_ms={:.2}",
+                                        at.elapsed().as_secs_f64() * 1000.0
+                                    ));
+                                }
+                            } else {
+                                last_created_drain.insert(pid, now);
+                                if trace::enabled() {
+                                    trace::log(format_args!(
+                                        "tili-daemon: window-created pid={pid} queue_ms={:.2}",
+                                        at.elapsed().as_secs_f64() * 1000.0
+                                    ));
+                                }
+                                changed |= drain_pending_windows(&mut state, &mut pending_pids);
+                                if trace::enabled() {
+                                    trace::log(format_args!(
+                                        "tili-daemon: window-created pid={pid} total_ms={:.2}",
+                                        at.elapsed().as_secs_f64() * 1000.0
+                                    ));
+                                }
+                            }
                         }
                     }
                     None => eprintln!("tili-daemon: event watcher channel closed unexpectedly"),
@@ -519,6 +573,10 @@ async fn async_daemon_main(
                 let pids_changed = drain_pending_windows(&mut state, &mut pending_pids);
                 state.finalize_expired_removals();
                 state.finalize_expired_launches();
+                // Only recent entries matter for burst coalescing; pids are
+                // process-lifetime values reused by the OS eventually, so
+                // don't keep them around forever.
+                last_created_drain.retain(|_, at| at.elapsed() < Duration::from_secs(2));
                 let restore_finalized = state.tick_restore();
 
                 let session_due = last_save_at.elapsed() >= session_periodic
@@ -924,11 +982,14 @@ fn drain_pending_windows(state: &mut WmState, pending_pids: &mut HashSet<i32>) -
         // tracing is on, so the normal path pays one flag read.
         let scan_start = trace::enabled().then(std::time::Instant::now);
         let windows = tili_ax::list_windows_for_pid(pid);
+        let listed = std::time::Instant::now();
         let window_count = windows.len();
         state.apply_windows_changed(pid, windows);
         if let Some(scan_start) = scan_start {
             trace::log(format_args!(
-                "tili-daemon: scan pid={pid} windows={window_count} took {:?}",
+                "tili-daemon: scan pid={pid} windows={window_count} list={:?} apply={:?} total={:?}",
+                listed.duration_since(scan_start),
+                listed.elapsed(),
                 scan_start.elapsed()
             ));
         }
@@ -957,6 +1018,13 @@ async fn handle_event(
         // (common during a window's open/resize/move sequence) coalesces
         // into a single rescan instead of one per notification.
         WmEvent::WindowsChanged { pid } => {
+            pending_pids.insert(pid);
+        }
+        // Same queue as `WindowsChanged`; the event loop drains it right
+        // away for the first window of a burst (see
+        // `CREATED_DRAIN_COALESCE`) so the app's native first frame doesn't
+        // linger for a whole tick.
+        WmEvent::WindowCreated { pid, .. } => {
             pending_pids.insert(pid);
         }
         WmEvent::AppTerminated { pid } => {
