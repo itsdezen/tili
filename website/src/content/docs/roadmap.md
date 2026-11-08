@@ -5,6 +5,12 @@ description: What tili has shipped, what is planned next, and how the roadmap ma
 
 ## Shipped
 
+- **[v0.15.0](/docs/changelog#0150---2026-11-09)** — native-tab guard fixes
+  for Terminal's tab-bar resize and the 2→1 close, new-window entry
+  animation, configurable animation duration (120ms default), and immediate
+  placement on window creation.
+- **[v0.14.0](/docs/changelog#0140---2026-11-07)** — absolute floating sizes
+  and the rounded menu bar default.
 - **[v0.13.0](/docs/changelog#0130---2026-11-05)** — home-display workspace
   routing, global southeast parking, JSON query/subscribe, window metadata
   and rule ergonomics, native-tab guard, `toggle-floating`, and configurable

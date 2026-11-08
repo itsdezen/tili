@@ -16,6 +16,36 @@ This page mirrors the repository's
 directly rather than a separate hand-written summary — recent releases in
 full below, earlier ones collapsed further down.
 
+## [0.15.0] - 2026-11-09
+
+### Added
+
+- **New-window entry animation.** A newly tiled window starts at its target
+  slot's size just outside the edge its container grows toward, then eases
+  into place, instead of tweening from the frame the app created it with. A
+  lone window in a workspace lands straight on its slot.
+- **Configurable animation duration.** `animate-duration-ms` in `settings`
+  sets how long an `animate` transition takes (default 120ms, minimum 1ms).
+- **New windows are placed on creation,** not on the next 30ms maintenance
+  tick, removing up to 30ms of the app's native first frame from the flash
+  before tili places the window.
+
+### Changed
+
+- **Default animation duration is 120ms** (down from 200ms). The tab-bar
+  correction after a native-tab fold is now instant rather than animated.
+
+### Fixed
+
+- **Native-tab guard handles Terminal's tab-bar resize.** Opening, closing,
+  or switching tabs no longer tiles each tab as a separate window or leaves
+  hidden tab windows behind as ghost slots; the 2→1 close also folds now.
+
+### Migration
+
+- To keep the previous animation feel, set
+  `settings { animate-duration-ms 200 }`. The new default is 120ms.
+
 ## [0.14.0] - 2026-11-07
 
 ### Added

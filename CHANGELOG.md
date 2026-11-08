@@ -6,6 +6,38 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [0.15.0] - 2026-11-09
+
+### Added
+
+- **New-window entry animation.** A newly tiled window now starts at its
+  target slot's size just outside the edge its container grows toward, then
+  eases into place, instead of tweening from whichever frame the app created
+  it with. A lone window in a workspace lands straight on its slot.
+- **Configurable animation duration.** `settings { animate-duration-ms N }`
+  (default 120ms, clamped to at least 1ms) sets how long an `animate` frame
+  transition takes. A duration-only hot reload updates in-flight animations
+  instead of dropping them.
+- **New windows are placed on creation, not on the next tick.** The AX
+  window-created notification now takes an immediate path (with a short
+  coalescing guard for multi-window launches), removing up to 30ms of the
+  app's native first frame from the flash before tili places the window.
+
+### Changed
+
+- **Default animation duration is 120ms**, down from 200ms. Set
+  `animate-duration-ms 200` to keep the previous feel.
+- **The tab-bar correction after a native-tab fold is instant** rather than
+  animated: the app moved the window, not a layout change tili initiated.
+
+### Fixed
+
+- **Native-tab guard handles Terminal's tab-bar resize.** Opening, closing,
+  or switching tabs no longer tiles each tab as a separate window or leaves
+  the hidden tab windows behind as ghost slots. The guard now recognizes a
+  tab-bar-sized frame change, remembers multi-tab members so the 2→1 close
+  still folds, and snaps the corrective frame write.
+
 ## [0.14.0] - 2026-11-07
 
 ### Added

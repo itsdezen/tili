@@ -102,6 +102,7 @@ settings {
     default-root-orientation "auto"
     mouse-resize-step 0.1
     animate #false
+    animate-duration-ms 120
     ax-timeout-ms 500
     native-tabs #true
 }
@@ -116,6 +117,7 @@ settings {
 | `default-root-orientation` | string | `"auto"` | Orientation a workspace's root container gets when it's created for its second window: `"horizontal"`, `"vertical"`, or `"auto"` (derived from the target monitor's aspect ratio). Any other string is treated as `"auto"` by `tili-daemon`. |
 | `mouse-resize-step` | float (accepts a bare integer too) | `0.1` | Weight-space grid a mouse-drag tile resize snaps its result to, so a released size always matches some whole number of `resize <amount>` keypresses at this same step. |
 | `animate` | `#true` / `#false` / `"medium"` / `"high"` | `#false` (off) | Eases tiled relayout and floating placement into their new frame instead of jumping straight there. `#true` resolves to `"medium"`. Any unrecognized string value falls back to off. See the animation cost note below. |
+| `animate-duration-ms` | integer (ms) | `120` | How long one frame transition takes while `animate` is on; clamped to at least 1ms. Lower is snappier, higher is smoother. A duration-only hot reload updates in-flight animations. |
 | `ax-timeout-ms` | integer (ms) | `500` | Per-app Accessibility messaging timeout. Lower values keep the daemon responsive when one app is hung; too low risks treating a slow app as unresponsive. Clamped to 50–5000. |
 | `native-tabs` | boolean | `#true` | Treat an app-owned native tab group as one opaque window: tab open/close/switch never creates placements or relayouts. Set `#false` if an app is detected incorrectly. |
 
