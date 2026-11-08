@@ -276,13 +276,23 @@ rationale (and real-hardware evidence) behind each is in
   only. `workspace-back` restores the previous `(display, workspace)` pair
   and never steals a layout from another display.
 - **Native tabs are app-owned and opaque to tili.** A brand-new window
-  matching a managed same-app/same-frame sibling (with the old window no
-  longer enumerable, or an explicit `AXTabGroup`) is folded into that
-  existing placement by replacing the tree leaf's `WindowId` — never
-  inserted as a new tile/float, never rule-matched, never relaid out.
-  Ambiguous matches are skipped. `settings { native-tabs #false }` is the
-  escape hatch. Do not turn this into full tab-group membership/restore
-  without a separate design.
+  matching a managed same-app sibling is folded into that existing placement
+  by replacing the tree leaf's `WindowId` — never inserted as a new
+  tile/float, never rule-matched, never relaid out. The sibling must either
+  be gone from the current `AXWindows` scan with a matching frame, or expose
+  an explicit multi-tab `AXTabGroup` (≥2 `AXTabButton`s — a brand-new window
+  has only one tab), or have been remembered as a multi-tab member (the 2→1
+  close hides the tab bar, so the survivor can't prove it on its own);
+  because a tab bar legitimately changes the window's
+  geometry (Terminal.app grows it, and shaves a couple of points of width at
+  the solo gaps), the tabs-gone case accepts a tab-bar-sized vertical
+  difference and a few points of horizontal slack, each capped at half the
+  candidate's own extent so it can never reach an adjacent tile regardless
+  of the configured gaps. The app's own tab-bar resize — on open *and* on
+  the follow-up resize closing can cause — is corrected by
+  `WindowFrameSetter::snap` (never animated); ambiguous matches are skipped. `settings { native-tabs #false }` is the escape
+  hatch. Do not turn this into full tab-group membership/restore without a
+  separate design.
 - **Hotkey- and socket-triggered commands both go through `dispatch()`**
   — no parallel command path. The hotkey tap's `active_bindings:
   Arc<Mutex<HashSet<KeyCombo>>>` is the *one* sanctioned lock (the tap

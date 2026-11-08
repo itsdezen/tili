@@ -163,6 +163,52 @@ fn frames_match(a: Rect, b: Rect) -> bool {
         && (a.height - b.height).abs() < FLOAT_DRIFT_EPSILON
 }
 
+/// How far a window's *vertical* geometry may move when its native tab bar
+/// appears or disappears and still count as the same app window. Adding the
+/// tab bar grows the window and can shift its top edge (Terminal.app:
+/// `644,33 620x751` -> `644,30 620x770` when tiled next to another window,
+/// and `80,45 1120x699` -> `80,45 1118x741` when alone at the solo gaps).
+const TAB_BAR_FRAME_TOLERANCE: f64 = 64.0;
+
+/// Horizontal slack for the same tab-bar transition: the solo-gap case above
+/// also loses 2pt of width when the tab bar appears. Still far tighter than
+/// the distance between two distinct tiles, so it can't merge a real second
+/// window; a genuine new window is additionally rejected by the missing
+/// `AXTabGroup` signal.
+const TAB_BAR_HORIZONTAL_TOLERANCE: f64 = 8.0;
+
+/// Tab-bar-shaped counterpart to [`frames_match`]. The native-tab guard uses
+/// it to identify the window a new tab replaced, and `relayout_monitor` uses
+/// it to recognize a correction of the app's own tab-bar resize. Kept
+/// separate from `frames_match` so every other caller — and every ambiguous
+/// non-tab case — keeps the strict equality check.
+///
+/// Each tolerance is additionally capped at half the candidate's own extent.
+/// Two distinct tiles are separated by at least a full tile size (the inner
+/// gap only adds to that), so this makes it impossible for the match to reach
+/// an adjacent tile — even with `inner 0` or many windows squeezed into one
+/// axis — independently of the configured gaps.
+fn frames_match_across_tab_bar(old: Rect, new: Rect) -> bool {
+    let horizontal = TAB_BAR_HORIZONTAL_TOLERANCE.min(old.width / 2.0);
+    let vertical = TAB_BAR_FRAME_TOLERANCE.min(old.height / 2.0);
+    (old.x - new.x).abs() < horizontal
+        && (old.width - new.width).abs() < horizontal
+        && (old.y - new.y).abs() < vertical
+        && (old.height - new.height).abs() < vertical
+}
+
+/// Whether a layout write is really just undoing the app's own tab-bar
+/// resize: the window is already at a frame that differs from its tile by no
+/// more than a tab bar. Such a write must snap instead of animating — no
+/// layout changed, so a slide would only advertise the app's unwanted
+/// resize. Covering the frame shape (rather than remembering which windows
+/// were just folded) matters because closing a tab can move the surviving
+/// window more than once: the first pass folds it, and a later pass corrects
+/// the app's follow-up resize. Both passes see the same shape and snap.
+fn is_tab_bar_correction(current: Rect, target: Rect) -> bool {
+    !frames_match(current, target) && frames_match_across_tab_bar(current, target)
+}
+
 /// One already-managed window considered as the "old" half of a native-tab
 /// replacement. Plain data so the decision is unit-testable without a live
 /// `AXUIElement`.
@@ -173,6 +219,10 @@ struct NativeTabCandidate {
     frame: Rect,
     positionable: bool,
     pending_removal: bool,
+    /// This candidate is already known to be a member of a multi-tab group,
+    /// so it can be replaced by a survivor whose own tab bar has just
+    /// disappeared (the 2→1 tab close).
+    was_tab_group: bool,
 }
 
 /// Finds the unique managed window that a brand-new window is a native tab
@@ -186,16 +236,36 @@ fn native_tab_target(
     new_id: WindowId,
     new_pid: i32,
     new_frame: Rect,
-    new_has_tab_group: bool,
+    new_tab_group_buttons: Option<usize>,
 ) -> Option<WindowId> {
+    // A brand-new window has exactly one tab, so only a multi-tab group can
+    // prove the new window is an already-populated tab group's active member
+    // rather than a genuinely new window.
+    let new_has_tab_group = new_tab_group_buttons.is_some();
+    let new_is_multi_tab = new_tab_group_buttons.is_some_and(|count| count >= 2);
     let mut found = None;
     for candidate in candidates {
         if candidate.id == new_id
             || candidate.pid != new_pid
             || !candidate.positionable
             || candidate.pending_removal
-            || !frames_match(candidate.frame, new_frame)
         {
+            continue;
+        }
+        // An exact frame match is the normal signal. A native tab group is
+        // the one exception: showing/hiding the tab bar changes the window's
+        // height (and can nudge its top edge, and a few points of width at
+        // the solo gaps). Accept that shape only when the new window itself
+        // proves it's a tab AND the old window is already gone from the
+        // current scan, so an ordinary second window sharing a frame is
+        // still refused.
+        // A close from two tabs to one hides the tab bar, so the survivor
+        // cannot prove a multi-tab group on its own — the replaced window
+        // having been one is the equivalent proof there.
+        let replaces_hidden_tab = (new_is_multi_tab || candidate.was_tab_group)
+            && !fresh_ids.contains(&candidate.id)
+            && frames_match_across_tab_bar(candidate.frame, new_frame);
+        if !frames_match(candidate.frame, new_frame) && !replaces_hidden_tab {
             continue;
         }
         // A still-enumerable sibling is only trustworthy when the new
@@ -1125,6 +1195,14 @@ pub struct WmState {
     /// is folded into the existing managed window instead of placed as a
     /// separate tile/float. See `native_tab_target`.
     native_tabs: bool,
+    /// Managed windows known to be the active member of a *multi-tab*
+    /// app-owned group. Needed for the last close: going from two tabs to
+    /// one hides the tab bar, so the surviving window no longer exposes the
+    /// ≥2-tab-button proof a *new* window needs — the candidate it replaces
+    /// having been a tab is what makes that transition recognizable. Updated
+    /// from each new window's own tab-button count, so a group that collapses
+    /// to a single tab drops out again.
+    tab_group_members: HashSet<WindowId>,
     /// Mirrors `Settings::animate` — `apply_config` only swaps
     /// `frame_setter` between `InstantFrameSetter`/`TweenedFrameSetter`
     /// when this actually changes, so an unrelated config reload doesn't
@@ -1350,6 +1428,7 @@ impl Default for WmState {
             focus_follows_monitor: false,
             mouse_resize_step: 0.1,
             native_tabs: true,
+            tab_group_members: HashSet::new(),
             animate: tili_config::AnimationSpeed::Off,
             config_loaded_once: false,
             startup_frontmost_revealed: false,
@@ -1676,7 +1755,12 @@ impl WmState {
     /// app-owned native tab group, returning `new_id -> old_id` for each.
     /// Only called for a fresh scan and only when `native_tabs` is enabled;
     /// the returned map is empty in the common (non-tab) case.
-    fn native_tab_replacements(&self, pid: i32, fresh: &[AxWindow]) -> HashMap<WindowId, WindowId> {
+    fn native_tab_replacements(
+        &self,
+        pid: i32,
+        fresh: &[AxWindow],
+        tab_group_buttons: &HashMap<WindowId, Option<usize>>,
+    ) -> HashMap<WindowId, WindowId> {
         if !self.native_tabs || self.restore_active() {
             return HashMap::new();
         }
@@ -1702,6 +1786,7 @@ impl WmState {
                         PlacementKind::Tiled | PlacementKind::Floating { .. }
                     ),
                     pending_removal: self.pending_removal.contains_key(&id),
+                    was_tab_group: self.tab_group_members.contains(&id),
                 })
             })
             .collect();
@@ -1717,15 +1802,59 @@ impl WmState {
             {
                 continue;
             }
-            if let Some(old_id) = native_tab_target(
+            let new_frame = window.frame();
+            let new_tab_group_buttons = tab_group_buttons.get(&id).copied().flatten();
+            if trace::enabled() {
+                trace::log(format_args!(
+                    "tili-daemon: native-tab probe new={id} pid={pid} frame=({:.1},{:.1} {:.1}x{:.1}) tab_buttons={:?} in_fresh={}",
+                    new_frame.x,
+                    new_frame.y,
+                    new_frame.width,
+                    new_frame.height,
+                    new_tab_group_buttons,
+                    fresh_ids.contains(&id),
+                ));
+                for candidate in candidates.iter().filter(|c| c.pid == pid) {
+                    trace::log(format_args!(
+                        "tili-daemon: native-tab candidate id={} pid={} frame=({:.1},{:.1} {:.1}x{:.1}) positionable={} pending_removal={} in_fresh={} frame_match={} tab_bar_match={} was_tab_group={}",
+                        candidate.id,
+                        candidate.pid,
+                        candidate.frame.x,
+                        candidate.frame.y,
+                        candidate.frame.width,
+                        candidate.frame.height,
+                        candidate.positionable,
+                        candidate.pending_removal,
+                        fresh_ids.contains(&candidate.id),
+                        frames_match(candidate.frame, new_frame),
+                        frames_match_across_tab_bar(candidate.frame, new_frame),
+                        candidate.was_tab_group,
+                    ));
+                }
+            }
+            match native_tab_target(
                 &candidates,
                 &fresh_ids,
                 id,
                 pid,
-                window.frame(),
-                window.has_tab_group(),
+                new_frame,
+                new_tab_group_buttons,
             ) {
-                replacements.insert(id, old_id);
+                Some(old_id) => {
+                    if trace::enabled() {
+                        trace::log(format_args!(
+                            "tili-daemon: native-tab decision new={id} -> old={old_id}"
+                        ));
+                    }
+                    replacements.insert(id, old_id);
+                }
+                None => {
+                    if trace::enabled() {
+                        trace::log(format_args!(
+                            "tili-daemon: native-tab decision new={id} -> None"
+                        ));
+                    }
+                }
             }
         }
         replacements
@@ -1787,6 +1916,7 @@ impl WmState {
         self.force_ignored_window_ids.remove(&old);
         self.pending_removal.remove(&old);
         self.pending_bundle_retries.remove(&old);
+        self.tab_group_members.remove(&old);
         self.mark_session_dirty();
         None
     }
@@ -1829,7 +1959,22 @@ impl WmState {
         // placement before any of the new-window/rule/placement logic runs,
         // and drop the old tab (still tracked, now hidden) out of this
         // scan so it isn't mistaken for a normal close/repark.
-        let native_tab_replacements = self.native_tab_replacements(pid, &fresh);
+        //
+        // One AX read per brand-new standard window, reused both by the
+        // guard and by the tab-group-member bookkeeping below.
+        let tab_group_buttons: HashMap<WindowId, Option<usize>> = if self.native_tabs {
+            fresh
+                .iter()
+                .filter(|window| {
+                    !self.placements.contains_key(&window.id())
+                        && matches!(window.kind(), tili_ax::WindowKind::Standard)
+                })
+                .map(|window| (window.id(), window.tab_group_button_count()))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let native_tab_replacements = self.native_tab_replacements(pid, &fresh, &tab_group_buttons);
         let mut tab_replaced = false;
         if !native_tab_replacements.is_empty() {
             let replaced_old_ids: HashSet<WindowId> =
@@ -2039,6 +2184,21 @@ impl WmState {
             );
             self.place_new_window(id, &placement_kind, &target_workspace);
             placed_new_window = true;
+        }
+
+        // A window that is already the active member of a multi-tab group is
+        // remembered, so closing the second-to-last tab (the tab bar then
+        // disappears, leaving no ≥2-tab-button proof on the survivor) can
+        // still be folded. Counts below 2 drop the window back out.
+        for (&id, buttons) in &tab_group_buttons {
+            if !self.windows.contains_key(&id) {
+                continue;
+            }
+            if buttons.is_some_and(|count| count >= 2) {
+                self.tab_group_members.insert(id);
+            } else {
+                self.tab_group_members.remove(&id);
+            }
         }
 
         // A window that's real-OS-focused the instant it's created can win
@@ -3551,6 +3711,12 @@ impl WmState {
         self.focus_follows_monitor = config.settings.focus_follows_monitor;
         self.mouse_resize_step = config.settings.mouse_resize_step;
         self.native_tabs = config.settings.native_tabs;
+        if !self.native_tabs {
+            // The remembered members only exist to feed the guard; keeping
+            // stale ids across a disable/re-enable would outlive the app
+            // state they describe.
+            self.tab_group_members.clear();
+        }
         tili_ax::set_call_timeout_ms(config.settings.ax_timeout_ms);
         if config.settings.animate != self.animate {
             self.animate = config.settings.animate;
@@ -5802,6 +5968,7 @@ impl WmState {
         self.force_ignored_window_ids.remove(&id);
         self.special_anchors.remove(&id);
         self.special_float_manual.remove(&id);
+        self.tab_group_members.remove(&id);
         let Some(placement) = self.placements.remove(&id) else {
             return;
         };
@@ -6250,7 +6417,11 @@ impl WmState {
             if let Some(id) = tree.window_at(fullscreen_node)
                 && let Some(window) = self.windows.get_mut(&id)
             {
-                self.frame_setter.set_frame(window, area);
+                if is_tab_bar_correction(window.frame(), area) {
+                    self.frame_setter.snap(window, area);
+                } else {
+                    self.frame_setter.set_frame(window, area);
+                }
             }
             return;
         }
@@ -6258,7 +6429,11 @@ impl WmState {
         let placements = tree.layout(area, gaps);
         for (id, rect) in placements {
             if let Some(window) = self.windows.get_mut(&id) {
-                self.frame_setter.set_frame(window, rect);
+                if is_tab_bar_correction(window.frame(), rect) {
+                    self.frame_setter.snap(window, rect);
+                } else {
+                    self.frame_setter.set_frame(window, rect);
+                }
             }
         }
     }
@@ -7696,20 +7871,253 @@ mod tests {
             frame,
             positionable: true,
             pending_removal: false,
+            was_tab_group: false,
         }];
         let mut fresh = HashSet::new();
         fresh.insert(2);
         assert_eq!(
-            native_tab_target(&candidates, &fresh, 2, 42, frame, false),
+            native_tab_target(&candidates, &fresh, 2, 42, frame, None),
             Some(1)
         );
         // Wrong pid or frame never matches.
         assert_eq!(
-            native_tab_target(&candidates, &fresh, 2, 7, frame, false),
+            native_tab_target(&candidates, &fresh, 2, 7, frame, None),
             None
         );
         assert_eq!(
-            native_tab_target(&candidates, &fresh, 2, 42, Rect { x: 10.0, ..frame }, false),
+            native_tab_target(&candidates, &fresh, 2, 42, Rect { x: 10.0, ..frame }, None),
+            None
+        );
+    }
+
+    #[test]
+    fn native_tab_target_accepts_the_tab_bar_frame_shift_of_a_hidden_tab() {
+        // Real-hardware Terminal.app geometry, two shapes: a tab bar next to
+        // another window (`620x751` -> `620x770`), and a tab bar on a window
+        // alone at the solo gaps (`1120x699` -> `1118x741`, losing 2pt of
+        // width).
+        let old = Rect {
+            x: 644.0,
+            y: 33.0,
+            width: 620.0,
+            height: 751.0,
+        };
+        let with_tab_bar = Rect {
+            x: 644.0,
+            y: 30.0,
+            width: 620.0,
+            height: 770.0,
+        };
+        let solo = Rect {
+            x: 80.0,
+            y: 45.0,
+            width: 1120.0,
+            height: 699.0,
+        };
+        let solo_with_tab_bar = Rect {
+            x: 80.0,
+            y: 45.0,
+            width: 1118.0,
+            height: 741.0,
+        };
+        let candidates = [NativeTabCandidate {
+            id: 1,
+            pid: 42,
+            frame: old,
+            positionable: true,
+            pending_removal: false,
+            was_tab_group: false,
+        }];
+        let solo_candidates = [NativeTabCandidate {
+            frame: solo,
+            ..candidates[0]
+        }];
+        // Old tab hidden from the current scan, new window is a multi-tab
+        // group member (2+ tab buttons).
+        let old_hidden: HashSet<WindowId> = [2].into_iter().collect();
+        assert_eq!(
+            native_tab_target(&candidates, &old_hidden, 2, 42, with_tab_bar, Some(2)),
+            Some(1)
+        );
+        assert_eq!(
+            native_tab_target(
+                &solo_candidates,
+                &old_hidden,
+                2,
+                42,
+                solo_with_tab_bar,
+                Some(2)
+            ),
+            Some(1)
+        );
+        // No tab group at all, or a group with just one tab button, is not
+        // proof of an already-populated group — a brand-new window has one.
+        assert_eq!(
+            native_tab_target(&candidates, &old_hidden, 2, 42, with_tab_bar, None),
+            None
+        );
+        assert_eq!(
+            native_tab_target(&candidates, &old_hidden, 2, 42, with_tab_bar, Some(1)),
+            None
+        );
+        // Horizontal movement beyond a few points is never a tab-bar change.
+        assert_eq!(
+            native_tab_target(
+                &candidates,
+                &old_hidden,
+                2,
+                42,
+                Rect {
+                    x: old.x + 10.0,
+                    ..with_tab_bar
+                },
+                Some(2)
+            ),
+            None
+        );
+        // Same for a width change larger than rounding slack.
+        assert_eq!(
+            native_tab_target(
+                &solo_candidates,
+                &old_hidden,
+                2,
+                42,
+                Rect {
+                    width: solo.width - 20.0,
+                    ..solo_with_tab_bar
+                },
+                Some(2)
+            ),
+            None
+        );
+        // A vertical change beyond a tab bar's height is not a tab replacement.
+        assert_eq!(
+            native_tab_target(
+                &candidates,
+                &old_hidden,
+                2,
+                42,
+                Rect {
+                    y: old.y - 100.0,
+                    height: old.height + 100.0,
+                    ..with_tab_bar
+                },
+                Some(2)
+            ),
+            None
+        );
+        // A still-enumerable sibling keeps the strict frame requirement.
+        let both_visible: HashSet<WindowId> = [1, 2].into_iter().collect();
+        assert_eq!(
+            native_tab_target(&candidates, &both_visible, 2, 42, with_tab_bar, Some(2)),
+            None
+        );
+    }
+
+    #[test]
+    fn native_tab_target_folds_the_last_close_when_the_old_window_was_a_tab() {
+        let old = Rect {
+            x: 80.0,
+            y: 45.0,
+            width: 1120.0,
+            height: 699.0,
+        };
+        // 2→1 close: the surviving window's tab bar is gone, so it can't
+        // prove a multi-tab group by itself.
+        let survivor = Rect {
+            width: 1118.0,
+            height: 693.0,
+            ..old
+        };
+        let fresh: HashSet<WindowId> = [2].into_iter().collect();
+        let tab_member = [NativeTabCandidate {
+            id: 1,
+            pid: 42,
+            frame: old,
+            positionable: true,
+            pending_removal: false,
+            was_tab_group: true,
+        }];
+        assert_eq!(
+            native_tab_target(&tab_member, &fresh, 2, 42, survivor, None),
+            Some(1)
+        );
+        // A window that was never a tab-group member stays refused — this is
+        // exactly what the ≥2-tab-button proof is there to protect.
+        let plain = [NativeTabCandidate {
+            was_tab_group: false,
+            ..tab_member[0]
+        }];
+        assert_eq!(
+            native_tab_target(&plain, &fresh, 2, 42, survivor, None),
+            None
+        );
+    }
+
+    #[test]
+    fn native_tab_target_bounds_the_tab_bar_slack_by_the_candidates_own_size() {
+        // With `inner 0` and many stacked windows, a neighboring tile can be
+        // closer than the flat 64pt vertical tolerance. Capping it at half
+        // the candidate's height keeps a hold of the right tile only.
+        let old = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 100.0,
+        };
+        let neighbor = Rect {
+            x: 0.0,
+            y: 100.0,
+            ..old
+        };
+        let candidates = [
+            NativeTabCandidate {
+                id: 1,
+                pid: 42,
+                frame: old,
+                positionable: true,
+                pending_removal: false,
+                was_tab_group: false,
+            },
+            NativeTabCandidate {
+                id: 3,
+                pid: 42,
+                frame: neighbor,
+                positionable: true,
+                pending_removal: false,
+                was_tab_group: false,
+            },
+        ];
+        let fresh: HashSet<WindowId> = [2].into_iter().collect();
+        // A tab-bar-sized growth of the old tile matches it…
+        assert_eq!(
+            native_tab_target(
+                &candidates,
+                &fresh,
+                2,
+                42,
+                Rect {
+                    height: 141.0,
+                    ..old
+                },
+                Some(2)
+            ),
+            Some(1)
+        );
+        // …but a change past half its height doesn't (and would also be
+        // rejected for the neighbor, so the ambiguity guard never fires).
+        assert_eq!(
+            native_tab_target(
+                &candidates,
+                &fresh,
+                2,
+                42,
+                Rect {
+                    height: 161.0,
+                    ..old
+                },
+                Some(2)
+            ),
             None
         );
     }
@@ -7728,14 +8136,15 @@ mod tests {
             frame,
             positionable: true,
             pending_removal: false,
+            was_tab_group: false,
         }];
         let fresh: HashSet<WindowId> = [1, 2].into_iter().collect();
         assert_eq!(
-            native_tab_target(&candidates, &fresh, 2, 42, frame, false),
+            native_tab_target(&candidates, &fresh, 2, 42, frame, None),
             None
         );
         assert_eq!(
-            native_tab_target(&candidates, &fresh, 2, 42, frame, true),
+            native_tab_target(&candidates, &fresh, 2, 42, frame, Some(2)),
             Some(1)
         );
     }
@@ -7755,6 +8164,7 @@ mod tests {
                 frame,
                 positionable: true,
                 pending_removal: false,
+                was_tab_group: false,
             },
             NativeTabCandidate {
                 id: 3,
@@ -7762,11 +8172,12 @@ mod tests {
                 frame,
                 positionable: true,
                 pending_removal: false,
+                was_tab_group: false,
             },
         ];
         let fresh: HashSet<WindowId> = [2].into_iter().collect();
         assert_eq!(
-            native_tab_target(&candidates, &fresh, 2, 42, frame, false),
+            native_tab_target(&candidates, &fresh, 2, 42, frame, None),
             None
         );
     }
@@ -7787,6 +8198,7 @@ mod tests {
                 frame,
                 positionable: false,
                 pending_removal: false,
+                was_tab_group: false,
             },
             NativeTabCandidate {
                 id: 1,
@@ -7794,13 +8206,53 @@ mod tests {
                 frame,
                 positionable: true,
                 pending_removal: true,
+                was_tab_group: false,
             },
         ] {
             assert_eq!(
-                native_tab_target(&[candidate], &fresh, 2, 42, frame, false),
+                native_tab_target(&[candidate], &fresh, 2, 42, frame, None),
                 None
             );
         }
+    }
+
+    #[test]
+    fn tab_bar_corrections_snap_only_for_tab_bar_shaped_changes() {
+        let tile = Rect {
+            x: 80.0,
+            y: 45.0,
+            width: 1120.0,
+            height: 699.0,
+        };
+        // Opening a tab: the app grew the window before tili saw it.
+        assert!(is_tab_bar_correction(
+            Rect {
+                width: 1118.0,
+                height: 741.0,
+                ..tile
+            },
+            tile
+        ));
+        // Closing a tab can move the survivor again, in the other direction.
+        assert!(is_tab_bar_correction(
+            Rect {
+                width: 1118.0,
+                height: 693.0,
+                ..tile
+            },
+            tile
+        ));
+        // A real layout change (the tile itself was resized) is not.
+        assert!(!is_tab_bar_correction(
+            Rect {
+                width: 620.0,
+                height: 751.0,
+                ..tile
+            },
+            tile
+        ));
+        // Already exact — nothing to correct.
+        assert!(!is_tab_bar_correction(tile, tile));
     }
 
     #[test]

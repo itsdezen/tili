@@ -400,22 +400,37 @@ impl AxWindow {
         self.subrole.as_deref()
     }
 
-    /// Whether this window exposes an `AXTabGroup` child — a strong signal
-    /// that it belongs to an app-owned native tab group. Read lazily (only
-    /// for brand-new windows during native-tab detection), not on every
-    /// enumeration, so steady-state scanning pays nothing for it.
-    pub fn has_tab_group(&self) -> bool {
-        let Ok(children) = self.element.element_array_attribute("AXChildren") else {
-            return false;
-        };
-        children.iter().any(|child| {
+    /// How many real tab buttons live inside this window's `AXTabGroup`
+    /// child (`AXRadioButton`/`AXTabButton`), or `None` when the window has
+    /// no such group. A brand-new window starts with exactly one tab, so a
+    /// count of 2+ proves the window is currently a member of a *multi-tab*
+    /// app-owned group — a property no freshly created window can fake.
+    /// Reads the group's children (two AX round-trips) only for brand-new
+    /// windows during native-tab detection, never on ordinary scans.
+    pub fn tab_group_button_count(&self) -> Option<usize> {
+        let children = self.element.element_array_attribute("AXChildren").ok()?;
+        let group = children.iter().find(|child| {
             child
                 .string_attribute(AX_ROLE_ATTRIBUTE)
                 .ok()
                 .flatten()
                 .as_deref()
                 == Some("AXTabGroup")
-        })
+        })?;
+        let buttons = group.element_array_attribute("AXChildren").ok()?;
+        Some(
+            buttons
+                .iter()
+                .filter(|button| {
+                    button
+                        .string_attribute(AX_SUBROLE_ATTRIBUTE)
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        == Some("AXTabButton")
+                })
+                .count(),
+        )
     }
 
     pub fn frame(&self) -> Rect {

@@ -644,15 +644,54 @@ windows, and relayout the tree.
 before any new-window logic runs. Detection is deliberately conservative:
 
 - same pid as a managed `Tiled`/`Floating` window,
-- same frame (within `FLOAT_DRIFT_EPSILON`),
+- same frame (within `FLOAT_DRIFT_EPSILON`) — with one exception, below,
 - the old window is no longer in the current `AXWindows` scan, or the new
   window exposes an `AXTabGroup` child,
 - exactly one candidate (ambiguous matches are skipped).
 
+The tab-bar exception is gated by a *structural* proof first: the new window's
+`AXTabGroup` must contain at least two `AXTabButton`s (`tab_group_button_count`
+≥ 2). A genuinely new window starts with exactly one tab, so a multi-tab group
+is proof that the window is already an active member of an existing group — no
+frame tolerance can fake that. The one transition that can't produce that
+proof is closing from two tabs to one: the tab bar disappears with the
+second-to-last tab, so the survivor exposes no multi-tab group at all.
+`WmState::tab_group_members` remembers which managed windows were already
+known to be multi-tab members — refreshed from every new window's own button
+count, and dropped again when the surviving window reports a single tab. A
+candidate in that set is an equivalent proof, so the 2→1 close folds into the
+same placement instead of briefly becoming a second tile.
+
+Only then does the geometry decide *which* candidate it belongs to,
+tolerating a tab-bar-sized change: y/height may
+differ by up to `TAB_BAR_FRAME_TOLERANCE` (64pt) and x/width by up to
+`TAB_BAR_HORIZONTAL_TOLERANCE` (8pt), each further capped at half the
+candidate's own width/height. Real hardware showed why the slack is needed:
+Terminal.app's tab bar grows the window from `644,33 620x751` to
+`644,30 620x770` next to another window, and from `80,45 1120x699` to
+`80,45 1118x741` when the window is alone at the solo gaps (hence the
+horizontal slack). Strict equality made every tab look like a brand-new
+window — each one was tiled and the hidden tab windows stayed behind as
+permanent ghost slots.
+
+The half-extent cap is what makes this independent of configured gaps: two
+distinct tiles are separated by at least a full tile size (the `inner` gap
+only adds to it), so the tolerance can never reach an adjacent tile — even
+with `inner 0` or many windows stacked in one axis. A still-enumerable
+sibling still needs the strict frame match plus the new window's own
+tab-group evidence, so an ordinary second window can't be folded by accident.
+
 `replace_window_id` then swaps the tree leaf's `WindowId` and every
 per-window map (placements, anchors, manual geometry, floating bookkeeping)
 in place. No placement, rule match, relayout, or frame write happens, so a
-tab open/switch/close cannot move or resize the window. Background tabs are
+tab open/switch/close cannot move or resize the window. When the app's own
+tab bar *did* leave the window at a different frame (Terminal grows it on
+open, and can move the surviving window again while a tab closes), the
+correcting relayout writes the tile frame through
+`WindowFrameSetter::snap`: `relayout_monitor` recognizes the write as
+tab-bar-shaped (`is_tab_bar_correction`) rather than a real layout change, so
+it snaps on whichever pass sees it instead of animating the app's unwanted
+resize. Background tabs are
 intentionally not tracked: the app owns them, and session persistence keeps
 only the currently visible tab. `settings { native-tabs #false }` restores
 the old behavior if an app is detected incorrectly. This is a compatibility

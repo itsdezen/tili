@@ -17,6 +17,16 @@ use crate::window::{AxWindow, frame_matches};
 pub trait WindowFrameSetter {
     fn set_frame(&mut self, window: &mut AxWindow, target: Rect);
 
+    /// Writes `target` immediately, bypassing `Settings::animate`. For a
+    /// correction that isn't a layout change at all — a native tab group's
+    /// window was momentarily resized by the app's own tab bar appearing or
+    /// disappearing — animating back would draw attention to a geometry
+    /// change the user never asked for. Defaults to `set_frame` so the
+    /// instant setter needs no override.
+    fn snap(&mut self, window: &mut AxWindow, target: Rect) {
+        self.set_frame(window, target);
+    }
+
     /// Advances any in-flight animations by one tick, writing intermediate
     /// frames directly on whichever `AxWindow`s are still mid-tween. Called
     /// from `main.rs`'s dedicated animation timer, gated by
@@ -155,6 +165,11 @@ impl WindowFrameSetter for TweenedFrameSetter {
                 started: Instant::now(),
             },
         );
+    }
+
+    fn snap(&mut self, window: &mut AxWindow, target: Rect) {
+        self.active.remove(&window.id());
+        window.set_frame(target);
     }
 
     fn tick(&mut self, windows: &mut HashMap<WindowId, AxWindow>) {

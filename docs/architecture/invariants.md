@@ -253,9 +253,17 @@ low-fps on real hardware.
 
 ## Native tabs are opaque to the daemon
 
-- A brand-new window that matches a managed same-app/same-frame sibling
-  (old window no longer enumerable, or an explicit `AXTabGroup`) is the
-  active member of an app-owned tab group, not a new managed window.
+- A brand-new window that matches a managed same-app sibling (old window no
+  longer enumerable with a matching frame, or an explicit multi-tab
+  `AXTabGroup` with ≥2 tab buttons, or a candidate remembered as a multi-tab
+  member) is the active member of an app-owned tab group, not a new managed
+  window. The remembered-member case is the 2→1 close, where the tab bar
+  disappears and the survivor can't prove the group on its own. The tab bar itself changes the window's
+  geometry (Terminal.app grows it, and shaves a couple of points of width at
+  the solo gaps), so the tabs-gone case accepts a tab-bar-sized vertical
+  difference and a few points of horizontal slack, each capped at half the
+  candidate's own extent so it can never reach an adjacent tile — even with
+  `inner 0`. Larger horizontal movement is never a tab replacement.
 - The daemon swaps the existing tree leaf's `WindowId` and per-window maps
   in place. It never inserts a tile/float, applies rules, cascades, or
   relayouts, so opening/closing/switching a tab cannot move or resize the

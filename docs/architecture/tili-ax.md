@@ -119,9 +119,16 @@ which one is boxed behind `frame_setter` only when `Settings::animate`
 actually changes, so an unrelated reload never resets an animation
 already in flight.
 
-The trait has five more methods beyond `set_frame`, all no-op-defaulted
+The trait has six more methods beyond `set_frame`, all no-op-defaulted
 so `InstantFrameSetter` needs no changes:
 
+- `snap` — writes instantly and drops any tween for that window, for the
+  correction that must not be animated: the app's own tab-bar resize, where
+  opening or closing a tab left the window a tab-bar's height away from its
+  tile. Animating back would draw attention to a geometry change the user
+  never asked for, so tili snaps instead. `relayout_monitor` decides this
+  from the frame shape itself (`is_tab_bar_correction`), so both the opening
+  fold and a later close-time follow-up resize take the same path.
 - `tick` — advances every in-flight tween by one step, called from
   `tili-daemon`'s dedicated `animation_tick` (16ms/8ms depending on
   `AnimationSpeed::Medium`/`::High` — see
