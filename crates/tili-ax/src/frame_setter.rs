@@ -17,12 +17,13 @@ use crate::window::{AxWindow, frame_matches};
 pub trait WindowFrameSetter {
     fn set_frame(&mut self, window: &mut AxWindow, target: Rect);
 
-    /// Writes `target` immediately, bypassing `Settings::animate`. For a
-    /// correction that isn't a layout change at all — a native tab group's
-    /// window was momentarily resized by the app's own tab bar appearing or
-    /// disappearing — animating back would draw attention to a geometry
-    /// change the user never asked for. Defaults to `set_frame` so the
-    /// instant setter needs no override.
+    /// Writes `target` immediately, bypassing `Settings::animate`. Used where
+    /// a tween would show the wrong thing: correcting the app's own tab-bar
+    /// resize (animating back would advertise a change the user never asked
+    /// for), and seeding a newly placed window's entry slide (so it starts
+    /// just outside its slot instead of at the frame the app created it
+    /// with). Defaults to `set_frame` so the instant setter needs no
+    /// override.
     fn snap(&mut self, window: &mut AxWindow, target: Rect) {
         self.set_frame(window, target);
     }
@@ -73,6 +74,12 @@ pub trait WindowFrameSetter {
     /// `InstantFrameSetter` needs no changes — every write it makes is
     /// already instant.
     fn set_suppressed(&mut self, _suppressed: bool) {}
+
+    /// Changes how long tweens take, for a live `animate-duration-ms` config
+    /// reload. Applies to in-flight animations too (their progress is
+    /// recomputed from the current duration), so a reload doesn't strand
+    /// them. No-op default so `InstantFrameSetter` needs no changes.
+    fn set_duration(&mut self, _duration: Duration) {}
 }
 
 pub struct InstantFrameSetter;
@@ -204,6 +211,10 @@ impl WindowFrameSetter for TweenedFrameSetter {
 
     fn set_suppressed(&mut self, suppressed: bool) {
         self.suppressed = suppressed;
+    }
+
+    fn set_duration(&mut self, duration: Duration) {
+        self.duration = duration;
     }
 }
 

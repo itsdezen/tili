@@ -107,7 +107,8 @@ Four sanctioned, narrowly-scoped exceptions:
    isn't polled — the timer doesn't even tick — while nothing is
    mid-animation, which is always true under `AnimationSpeed::Off` and
    true the overwhelming majority of the time even when animating (each
-   animation only runs for `ANIMATION_DURATION`, 90ms). Faster than
+   animation only runs for the configured `animate-duration-ms`, 200ms by
+   default). Faster than
    `maintenance_tick` (30ms) because animation smoothness depends directly
    on this cadence, unlike `maintenance_tick`'s bookkeeping, where a
    coarser interval is invisible to the user.
@@ -173,11 +174,12 @@ dedicated `animation_tick` (16ms or 8ms, per `AnimationSpeed`) — see
 exception 4 in "No polling" below for why this is sanctioned rather than
 a plain new poll. An earlier version reused `maintenance_tick` (30ms)
 instead of a dedicated timer, to avoid adding a fourth polling exception
-at all; real-hardware testing showed 30ms/~6 steps over
-`ANIMATION_DURATION` read as visibly choppy, so it was split into its own
-faster, activity-gated timer instead — and then made speed-configurable
+at all; real-hardware testing showed 30ms steps over the 90ms animation of
+the time read as visibly choppy, so it was split into its own faster,
+activity-gated timer instead — and then made speed-configurable
 (`AnimationSpeed::Medium`/`::High`) once even 16ms/~60fps still read as
-low-fps on real hardware.
+low-fps on real hardware. The animation's own length is separately
+configurable via `settings { animate-duration-ms }` (200ms default).
 
 ## Session state is startup-only and never stores NodeIds
 

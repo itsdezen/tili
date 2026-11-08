@@ -8,7 +8,8 @@ use tili_ax::{
 };
 use tili_ipc::{Command, MonitorInfo, RectInfo, WindowInfo, WorkspaceInfo};
 use tili_tree::{
-    Direction, Gaps, NodeId, NodeSnapshot, Rect, Tree, TreeAnchor, TreeSnapshot, WindowId,
+    Direction, Gaps, NodeId, NodeSnapshot, Orientation, Rect, Tree, TreeAnchor, TreeSnapshot,
+    WindowId,
 };
 
 use crate::session::{
@@ -44,11 +45,11 @@ const DEFAULT_MODE: &str = "main";
 /// only meaningful at that same granularity.
 const FLOAT_DRIFT_EPSILON: f64 = 0.5;
 
-/// How long a `TweenedFrameSetter` (`Settings::animate`) takes to ease a
-/// window from its old frame to its new one — short enough to read as a
-/// snap rather than a hero animation, matching a window manager rather
-/// than a UI toolkit.
-const ANIMATION_DURATION: Duration = Duration::from_millis(90);
+/// Built-in default for `Settings::animate_duration_ms` — used until the
+/// first config load replaces it. Long enough to read as motion, short
+/// enough not to hold up a window operation; `settings {
+/// animate-duration-ms }` overrides it at runtime.
+const ANIMATION_DURATION: Duration = Duration::from_millis(200);
 
 /// `main.rs`'s `animation_tick` period for `AnimationSpeed::Medium`
 /// (~60fps) and `::High` (~120fps) — see `WmState::animation_tick_period`.
@@ -207,6 +208,25 @@ fn frames_match_across_tab_bar(old: Rect, new: Rect) -> bool {
 /// the app's follow-up resize. Both passes see the same shape and snap.
 fn is_tab_bar_correction(current: Rect, target: Rect) -> bool {
     !frames_match(current, target) && frames_match_across_tab_bar(current, target)
+}
+
+/// Start frame for a newly placed tiled window's entry animation: the target
+/// slot's own size, shifted one slot plus the inner gap in the direction the
+/// container grows. `insert_leaf` appends after the insertion point, so a
+/// horizontal container grows rightward and a vertical one downward — the
+/// start is therefore just outside the slot on that side, and the tween is a
+/// short slide into place rather than a crawl from the app's creation frame.
+fn entry_start_rect(target: Rect, orientation: Orientation, gap: f64) -> Rect {
+    match orientation {
+        Orientation::Horizontal => Rect {
+            x: target.x + target.width + gap,
+            ..target
+        },
+        Orientation::Vertical => Rect {
+            y: target.y + target.height + gap,
+            ..target
+        },
+    }
 }
 
 /// One already-managed window considered as the "old" half of a native-tab
@@ -1195,6 +1215,13 @@ pub struct WmState {
     /// is folded into the existing managed window instead of placed as a
     /// separate tile/float. See `native_tab_target`.
     native_tabs: bool,
+    /// Newly placed tiled windows whose *first* layout write should seed an
+    /// entry animation: snap them just outside their target slot first, then
+    /// tween in. Without this, a new window animates from wherever the app
+    /// first drew it (often full width or at the head of the list), which
+    /// reads as a long crawl across the layout instead of an insertion.
+    /// Consumed by `relayout_monitor` and cleared at the end of the pass.
+    animate_entry: HashSet<WindowId>,
     /// Managed windows known to be the active member of a *multi-tab*
     /// app-owned group. Needed for the last close: going from two tabs to
     /// one hides the tab bar, so the surviving window no longer exposes the
@@ -1210,6 +1237,10 @@ pub struct WmState {
     /// `main.rs` also reads this (via `animation_tick_period`) to know
     /// what period to drive `animation_tick` at.
     animate: tili_config::AnimationSpeed,
+    /// Mirrors `Settings::animate_duration_ms` — the duration the current
+    /// `frame_setter` was built with, so a live reload can update it (and
+    /// only it) without rebuilding the setter and dropping in-flight tweens.
+    animate_duration: Duration,
     /// Whether `apply_config` has run before. Only the *first* call
     /// resolves and applies a real default workspace (see
     /// `apply_config`'s doc comment) — every call after that is a hot
@@ -1428,8 +1459,10 @@ impl Default for WmState {
             focus_follows_monitor: false,
             mouse_resize_step: 0.1,
             native_tabs: true,
+            animate_entry: HashSet::new(),
             tab_group_members: HashSet::new(),
             animate: tili_config::AnimationSpeed::Off,
+            animate_duration: ANIMATION_DURATION,
             config_loaded_once: false,
             startup_frontmost_revealed: false,
             mouse_button_down: false,
@@ -1916,6 +1949,7 @@ impl WmState {
         self.force_ignored_window_ids.remove(&old);
         self.pending_removal.remove(&old);
         self.pending_bundle_retries.remove(&old);
+        self.animate_entry.remove(&old);
         self.tab_group_members.remove(&old);
         self.mark_session_dirty();
         None
@@ -2219,6 +2253,10 @@ impl WmState {
         if !self.mouse_button_down && !self.restore_active() {
             self.relayout_active();
         }
+        // Only this pass's relayout is meant to consume entry seeds; if it
+        // was skipped (mid-drag, restore), don't replay the slide on some
+        // later, unrelated layout.
+        self.animate_entry.clear();
     }
 
     /// Places a brand-new window into `target_workspace` — tiled into that
@@ -2303,6 +2341,12 @@ impl WmState {
         match placement_kind {
             PlacementKind::Tiled => {
                 self.insert_into_workspace_tree(id, target_workspace, false);
+                if !inactive {
+                    // This window's first layout write seeds its entry
+                    // animation instead of tweening from the app's own
+                    // creation frame — see `animate_entry`.
+                    self.animate_entry.insert(id);
+                }
             }
             PlacementKind::Floating { .. } => {
                 // Joins the tree as a `Node::Floating` leaf exactly like the
@@ -3718,14 +3762,21 @@ impl WmState {
             self.tab_group_members.clear();
         }
         tili_ax::set_call_timeout_ms(config.settings.ax_timeout_ms);
+        let animate_duration = Duration::from_millis(config.settings.animate_duration_ms);
         if config.settings.animate != self.animate {
             self.animate = config.settings.animate;
+            self.animate_duration = animate_duration;
             self.frame_setter = match self.animate {
                 tili_config::AnimationSpeed::Off => Box::new(InstantFrameSetter),
                 tili_config::AnimationSpeed::Medium | tili_config::AnimationSpeed::High => {
-                    Box::new(TweenedFrameSetter::new(ANIMATION_DURATION))
+                    Box::new(TweenedFrameSetter::new(animate_duration))
                 }
             };
+        } else if animate_duration != self.animate_duration {
+            // Only the duration moved: update the existing tweened setter in
+            // place so an unrelated reload doesn't drop in-flight animations.
+            self.animate_duration = animate_duration;
+            self.frame_setter.set_duration(animate_duration);
         }
         self.default_root_orientation = match config.settings.default_root_orientation.as_str() {
             "horizontal" => Some(tili_tree::Orientation::Horizontal),
@@ -5968,6 +6019,7 @@ impl WmState {
         self.force_ignored_window_ids.remove(&id);
         self.special_anchors.remove(&id);
         self.special_float_manual.remove(&id);
+        self.animate_entry.remove(&id);
         self.tab_group_members.remove(&id);
         let Some(placement) = self.placements.remove(&id) else {
             return;
@@ -6426,10 +6478,49 @@ impl WmState {
             return;
         }
 
+        let animate_entry = self.animate != tili_config::AnimationSpeed::Off;
         let placements = tree.layout(area, gaps);
         for (id, rect) in placements {
+            let entry = self.animate_entry.remove(&id);
             if let Some(window) = self.windows.get_mut(&id) {
-                if is_tab_bar_correction(window.frame(), rect) {
+                if entry && animate_entry {
+                    // New window: start it at its final size just outside the
+                    // slot on the side the container grows toward, then tween
+                    // in. This removes any dependence on whichever frame the
+                    // app happened to draw it at (full width for a second
+                    // window, an inherited tile for later ones).
+                    if let Some(orientation) = tree
+                        .find_node(id)
+                        .and_then(|node| tree.orientation_of(node))
+                    {
+                        let start = entry_start_rect(rect, orientation, gaps.inner);
+                        if trace::enabled() {
+                            trace::log(format_args!(
+                                "tili-daemon: new-window entry id={id} start=({:.1},{:.1} {:.1}x{:.1}) target=({:.1},{:.1} {:.1}x{:.1})",
+                                start.x,
+                                start.y,
+                                start.width,
+                                start.height,
+                                rect.x,
+                                rect.y,
+                                rect.width,
+                                rect.height,
+                            ));
+                        }
+                        self.frame_setter.snap(window, start);
+                        self.frame_setter.set_frame(window, rect);
+                    } else {
+                        // Sole window in its workspace: no sibling to slide
+                        // in beside, so land straight on the slot.
+                        if trace::enabled() {
+                            trace::log(format_args!(
+                                "tili-daemon: new-window entry id={id} -> snap target=({:.1},{:.1} {:.1}x{:.1})",
+                                rect.x, rect.y, rect.width, rect.height,
+                            ));
+                        }
+                        self.frame_setter.snap(window, rect);
+                    }
+                } else if is_tab_bar_correction(window.frame(), rect) {
                     self.frame_setter.snap(window, rect);
                 } else {
                     self.frame_setter.set_frame(window, rect);
@@ -8214,6 +8305,34 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn entry_start_rect_offsets_one_slot_in_the_containers_growth_direction() {
+        let target = Rect {
+            x: 100.0,
+            y: 50.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        assert_eq!(
+            entry_start_rect(target, Orientation::Horizontal, 8.0),
+            Rect {
+                x: 508.0,
+                y: 50.0,
+                width: 400.0,
+                height: 300.0,
+            }
+        );
+        assert_eq!(
+            entry_start_rect(target, Orientation::Vertical, 8.0),
+            Rect {
+                x: 100.0,
+                y: 358.0,
+                width: 400.0,
+                height: 300.0,
+            }
+        );
     }
 
     #[test]

@@ -204,6 +204,12 @@ pub struct Settings {
     /// feature whose smoothness depends on real-hardware AX write latency,
     /// not a default-on behavior change for every existing user.
     pub animate: AnimationSpeed,
+    /// How long one frame transition takes when `animate` is on, in
+    /// milliseconds. Defaults to 200ms: long enough to read as motion,
+    /// short enough not to hold up a window operation. Clamped to at least
+    /// 1ms; a zero-length tween is indistinguishable from `animate #false`
+    /// and would make the progress ratio meaningless.
+    pub animate_duration_ms: u64,
     /// Messaging timeout for each Accessibility app connection, in
     /// milliseconds. Bounded to 50–5000 by `tili-ax`; 500 is the default
     /// compromise between a hung app stalling the daemon and a legitimately
@@ -226,6 +232,7 @@ impl Default for Settings {
             default_root_orientation: "auto".to_string(),
             mouse_resize_step: 0.1,
             animate: AnimationSpeed::Off,
+            animate_duration_ms: 200,
             ax_timeout_ms: 500,
             native_tabs: true,
         }
@@ -516,6 +523,9 @@ fn parse_settings(doc: &KdlDocument) -> Settings {
                 _ => AnimationSpeed::Off,
             }
         };
+    }
+    if let Some(v) = as_u64(children.get_arg("animate-duration-ms")) {
+        settings.animate_duration_ms = v.max(1);
     }
     if let Some(v) = as_u64(children.get_arg("ax-timeout-ms")) {
         settings.ax_timeout_ms = v;
@@ -1435,6 +1445,25 @@ mod tests {
         let config = parse(source).unwrap();
         assert_eq!(config.settings.ax_timeout_ms, 250);
         assert!(!config.settings.native_tabs);
+    }
+
+    #[test]
+    fn animate_duration_defaults_and_parses() {
+        let config = parse("").unwrap();
+        assert_eq!(config.settings.animate_duration_ms, 200);
+
+        let source = r#"
+            settings {
+                animate "high"
+                animate-duration-ms 350
+            }
+        "#;
+        let config = parse(source).unwrap();
+        assert_eq!(config.settings.animate_duration_ms, 350);
+
+        // Zero would make a tween indistinguishable from `animate #false`.
+        let config = parse("settings { animate-duration-ms 0 }").unwrap();
+        assert_eq!(config.settings.animate_duration_ms, 1);
     }
 
     #[test]

@@ -113,22 +113,25 @@ real window must go through `dyn WindowFrameSetter`, not call
 (the original v1, still the default when `Settings::animate` is off) and
 `TweenedFrameSetter`, which eases a window from its old frame to its new
 one over a caller-supplied duration (an ease-out curve) instead of jumping
-straight there — `tili-daemon` constructs it with its own
-`ANIMATION_DURATION` (90ms). `tili-daemon::WmState::apply_config` swaps
-which one is boxed behind `frame_setter` only when `Settings::animate`
-actually changes, so an unrelated reload never resets an animation
-already in flight.
+straight there — `tili-daemon` constructs it with
+`Settings::animate_duration_ms` (200ms default, overridable in config).
+`tili-daemon::WmState::apply_config` swaps which one is boxed behind
+`frame_setter` only when `Settings::animate` itself changes; a duration-only
+reload updates the existing setter through `set_duration`, so an unrelated
+reload never resets an animation already in flight.
 
 The trait has six more methods beyond `set_frame`, all no-op-defaulted
 so `InstantFrameSetter` needs no changes:
 
-- `snap` — writes instantly and drops any tween for that window, for the
-  correction that must not be animated: the app's own tab-bar resize, where
-  opening or closing a tab left the window a tab-bar's height away from its
-  tile. Animating back would draw attention to a geometry change the user
-  never asked for, so tili snaps instead. `relayout_monitor` decides this
-  from the frame shape itself (`is_tab_bar_correction`), so both the opening
-  fold and a later close-time follow-up resize take the same path.
+- `snap` — writes instantly and drops any tween for that window, where a
+  tween would show the wrong thing. Two callers: the app's own tab-bar resize
+  (opening or closing a tab leaves the window a tab-bar's height away from
+  its tile; animating back would advertise a geometry change the user never
+  asked for, and `relayout_monitor` recognizes it from the frame shape via
+  `is_tab_bar_correction` so the opening fold and a later close-time
+  follow-up both snap), and a newly placed window whose entry slide is seeded
+  just outside its target slot instead of starting from the app's creation
+  frame.
 - `tick` — advances every in-flight tween by one step, called from
   `tili-daemon`'s dedicated `animation_tick` (16ms/8ms depending on
   `AnimationSpeed::Medium`/`::High` — see
@@ -172,8 +175,8 @@ burst of these into `pending_pids` (a `HashSet<i32>`, drained once per
 `maintenance_tick`, 30ms — see its own doc comment), so in practice
 `apply_windows_changed` → `relayout_active` → `set_frame` re-fires with
 the *same* target roughly once per `maintenance_tick` during an
-animation's lifetime (≈3 times over `ANIMATION_DURATION`'s 90ms), not
-once per animation tick. Still enough to matter: restarting the tween's
+animation's lifetime (≈7 times over the default 200ms), not once per
+animation tick. Still enough to matter: restarting the tween's
 clock on any one of those self-triggered calls would push convergence out
 by another `maintenance_tick` each time, and since the notification these
 calls exist to (mostly) ignore is a *guaranteed* by-product of the
