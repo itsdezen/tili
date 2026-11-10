@@ -16,6 +16,21 @@ This page mirrors the repository's
 directly rather than a separate hand-written summary — recent releases in
 full below, earlier ones collapsed further down.
 
+## [0.15.1] - 2026-11-10
+
+### Fixed
+
+- **Opening an app from an empty workspace no longer flashes the
+  previously-frontmost app's workspace first.** With an empty active
+  workspace macOS keeps reporting the last app whose window is parked
+  elsewhere as frontmost, so a Dock click that cold-launched another app
+  made the deferred click reveal switch to that stale app's workspace for a
+  frame. The click reveal now compares the Dock-visible app pids against a
+  snapshot taken on mouse-down and is dropped when a new one appeared; the
+  launched app's own `workspace-rules` placement handles the switch.
+  Re-clicking the already-frontmost app's Dock icon still works, and the
+  Cmd-Tab/Mission Control path is unchanged.
+
 ## [0.15.0] - 2026-11-09
 
 ### Added
