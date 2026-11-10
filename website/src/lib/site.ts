@@ -33,24 +33,44 @@ export interface Feature {
 
 export const features: Array<Feature> = [
   {
-    title: 'Event-driven, not polling',
-    text: 'The daemon subscribes to Accessibility and workspace notifications and reacts to them, so it does nothing while your windows are not changing.',
+    title: 'Event-driven',
+    text: 'The daemon subscribes to Accessibility and workspace notifications and reacts to them, so it does no work while your windows are not changing.',
   },
   {
     title: 'Public Accessibility API only',
     text: 'Exactly one narrowly-scoped private call is used anywhere in the codebase, to resolve a window’s real CGWindowID. Everything else is the public Accessibility API, and you never disable SIP.',
   },
   {
-    title: 'KDL configuration, hot reloaded',
-    text: 'Workspaces, keybinding modes, and floating rules are written in KDL and nest the way they actually relate. Save the file and the change is live, no daemon restart.',
+    title: 'Session restore',
+    text: 'Layout, focus, the active workspace per monitor, floating geometry, and special states — native fullscreen, minimized, hidden app — survive a restart or crash.',
   },
   {
-    title: 'Session restore',
-    text: 'Layout, focus, the active workspace per monitor, floating geometry, and special states survive a daemon restart or a crash.',
+    title: 'Native-tab guard',
+    text: 'Opening, closing, or switching an app-owned tab never creates a placement or relayouts the workspace.',
   },
   {
     title: 'Display-aware workspaces',
-    text: 'Every workspace has a home display. Route one with workspace, pull it to the focused display with workspace-here, or relocate it with move-workspace-to-monitor.',
+    text: 'Every workspace has a home display. The workspace command routes there, workspace-here pulls it to the focused display, and move-workspace-to-monitor relocates it. Every connected display gets an active workspace, with temporary display workspaces cleaned up on disconnect.',
+  },
+  {
+    title: 'Window rules and floating geometry',
+    text: 'Match app-id, title, AX role, and subrole; route to a workspace; choose float, tile, or ignore; and size floating windows absolutely or by ratio with optional centering. Workspace rules route an app’s first window by default, with always for every window.',
+  },
+  {
+    title: 'Opt-in animation',
+    text: 'Moves are instant by default. Turn on animate for an eased transition with a configurable duration, including a new window’s entry into its slot.',
+  },
+  {
+    title: 'Placement at window creation',
+    text: 'A new window joins the layout the moment it appears, so placement does not wait for a later refresh.',
+  },
+  {
+    title: 'Mouse drag-resize',
+    text: 'Drag a tile’s edge or corner; the result snaps to the same grid as keyboard resizes.',
+  },
+  {
+    title: 'KDL configuration, hot reloaded',
+    text: 'Workspaces, keybinding modes, and floating rules are written in KDL and nest the way they actually relate. Save the file and the change is live, no daemon restart.',
   },
   {
     title: 'Menu bar workspace badge',
@@ -58,7 +78,7 @@ export const features: Array<Feature> = [
   },
   {
     title: 'Signed releases through Homebrew',
-    text: 'The tap installs a real, signed tili.app. tili is MIT licensed and never needs the App Store sandbox to move your windows.',
+    text: 'The tap installs a real, signed tili.app. tili is MIT licensed and released through Homebrew.',
   },
 ]
 

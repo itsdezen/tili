@@ -1,11 +1,11 @@
 ---
 title: Introduction
-description: Why tili exists, how it avoids polling and private APIs, and what state the project is in today.
+description: Why tili exists, how it stays event-driven on public macOS APIs, and what state the project is in today.
 ---
 
 tili is a tiling window manager for macOS, built for speed. It follows an
 i3-style workflow — directional focus/move, named workspaces, keybinding
-modes — while staying entirely on public macOS APIs.
+modes — while staying on public macOS APIs.
 
 ## Where to start
 
@@ -24,50 +24,60 @@ is in today.
 
 ## Why tili
 
-Most tiling window managers on macOS force a trade-off: either they poll the
-screen and burn CPU doing it, or they reach for private, undocumented APIs
-that break every time Apple ships a system update. tili takes neither
-shortcut.
+tili is built around the details that matter once it is part of a daily
+workflow: state that survives a restart, workspaces that know where they
+belong, rules that can see the whole window, and placement that happens the
+moment a window appears.
 
-- **Event-driven, not polling.** The daemon subscribes to Accessibility and
-  workspace notifications and reacts to them — it does no work while your
-  windows aren't changing. That's the whole idea behind lower idle CPU/RAM
-  than the alternatives.
+- **Event-driven.** The daemon subscribes to Accessibility and workspace
+  notifications and reacts to them, so it does no work while your windows
+  aren't changing.
 - **Public API only.** Exactly one narrowly-scoped private call is used
   anywhere in the codebase (to resolve a window's real `CGWindowID`) —
   everything else is the public Accessibility API. You never disable System
   Integrity Protection to run tili.
-- **A config format that matches how you think.** [KDL](https://kdl.dev)
-  instead of flat TOML tables — workspaces, keybinding modes, and floating
-  rules nest the way they actually relate to each other.
-- **Session restore.** Layout, focus, active workspace per monitor,
-  floating geometry, and special states survive a restart or crash.
+- **Session restore, down to the special states.** Layout, focus, the active
+  workspace on each monitor, floating geometry, and special states — native
+  fullscreen, minimized, hidden app — survive a restart or crash.
+- **Native-tab guard.** App-owned tabs (Finder, Terminal, Ghostty) stay
+  inside the app: opening, closing, or switching a tab never creates a
+  placement or relayouts the workspace.
 - **Display-aware workspaces.** Every workspace has a home display:
   `workspace X` goes there, `workspace-here X` pulls it to the focused
   display, and `move-workspace-to-monitor next|prev|main` relocates it.
   Inactive workspaces park together at the southeast-most display's corner,
-  workspaces can be pinned to a monitor, and every display gets an active
-  workspace at startup.
-- **JSON query/subscribe.** `tili query state --json` and
-  `tili subscribe --json` make status-bar and script integration a
-  first-class path, not a long-poll workaround.
-- **Native-tab guard.** App-owned tabs (Finder, Terminal, Ghostty) stay
-  inside the app: opening/closing/switching tabs never creates placements
-  or relayouts.
-- **Animation-ready architecture, not animation-as-an-afterthought.** Every
-  window-frame mutation goes through a single seam (`WindowFrameSetter`);
-  instant moves and the opt-in tweened animation both use it.
-- **No hotkey daemon required.** tili owns its own global hotkeys. One
-  binary, one daemon, one config file.
-- **Open source, installed via Homebrew.** No App Store, no sandbox
-  restrictions on what a window manager needs to do.
+  and every connected display gets an active workspace, with synthetic
+  fallbacks cleaned up after their windows migrate.
+- **Window rules that see the whole window.** Match `app-id`, title regex,
+  AX `role`, and `subrole`; route a window to a workspace; choose `float`,
+  `tile`, or `ignore`; and size floating windows absolutely or by ratio with
+  optional centering. Workspace rules route an app's first window by
+  default, with `always` for every new window, and `tili rule` writes a
+  ready-to-paste rule for the focused window.
+- **Opt-in animation.** Moves are instant by default. Turn on `animate` for
+  an eased transition with a configurable duration (`animate-duration-ms`,
+  120ms by default), including a new window's entry into its slot.
+- **Placement at window creation.** A new window joins the layout the moment
+  it appears, so placement doesn't wait for a later refresh.
+- **Mouse drag-resize.** Drag a tile's edge or corner to resize it; the result
+  snaps to the same grid as keyboard resizes (`mouse-resize-step`).
+- **KDL configuration, hot reloaded.** Workspaces, keybinding modes, and
+  floating rules nest the way they actually relate, and saving the file
+  applies changes live.
+- **Menu bar workspace badge.** `tili-menubar` ships with the daemon and
+  shows the active workspace on the focused monitor, without a second status
+  bar app.
+- **Signed releases through Homebrew.** The tap installs a signed `tili.app`;
+  tili is MIT licensed and released through Homebrew.
 
 ## Status
 
 tili is daily-drivable today: tiling, workspaces, hot-reloaded config,
-built-in hotkeys, floating rules, multi-monitor, mouse/focus-follows-monitor,
-session restore, a menu bar workspace badge, and a real signed release
-pipeline. Pre-1.0
+built-in hotkeys, window rules (role/subrole, float/tile/ignore, floating
+geometry), multi-monitor with automatic display fallback workspaces,
+mouse/focus-follows-monitor, session restore, opt-in animation, a native-tab
+guard, a menu bar workspace badge, JSON query/subscribe, and a real signed
+release pipeline. Pre-1.0
 still means config schema and CLI surface can change between releases —
 check the [Roadmap](/docs/roadmap) for what's planned next, and the
 [CHANGELOG](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md) on

@@ -185,7 +185,7 @@ describe('site copy', () => {
   })
 
   it('lists the tiling-window-manager features and FAQ', () => {
-    expect(features).toHaveLength(7)
+    expect(features).toHaveLength(12)
     expect(faq).toHaveLength(5)
 
     for (const item of [...features, ...faq]) {

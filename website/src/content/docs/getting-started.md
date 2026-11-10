@@ -102,6 +102,10 @@ Two of those open a mode rather than running one command:
 - **`manage` mode** is one-shot: `alt-shift-h`/`j`/`k`/`l` join in that
   direction, `r` flattens the tree, and `escape` reloads the config.
 
+Tiles can also be resized with the mouse: drag a tile's edge or corner, and
+the release snaps to the same grid as the keyboard resize binds
+(`settings { mouse-resize-step 0.1 }`).
+
 Every bind lives in the commented example file; the schema behind them is
 in [Configuration → keybindings](/docs/configuration#keybindings). The CLI
 equivalents are in [Commands](/docs/commands).
