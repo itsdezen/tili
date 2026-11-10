@@ -251,6 +251,18 @@ async fn async_daemon_main(
     // same-pid read means nothing really changed and chasing it would
     // revert whatever workspace switch the user made in the meantime.
     let mut pending_reveal_allow_unchanged = false;
+    // Snapshot of every Dock-visible app pid taken on
+    // `MouseSignal::ButtonDown` — only meaningful for the click-driven
+    // reveal, which resolves whatever is frontmost a moment later. A pid
+    // that wasn't running at mouse-down but is by the time the deferred
+    // check runs proves this click started launching an app, so the
+    // frontmost read still naming the *previous* app can't be trusted (see
+    // `WmState::reveal_current_frontmost`'s doc comment). Captured on
+    // mouse-down rather than mouse-up because the Dock starts the launch on
+    // mouse-up — a mouse-up snapshot could already contain the new pid.
+    // Cleared by a `WmEvent::FrontmostAppChanged` arm, whose reveal is a
+    // different gesture with no click to attribute a launch to.
+    let mut pending_reveal_app_pids: Option<HashSet<i32>> = None;
     // Drains `pending_pids`, rechecks Phase 5's `pending_removal` grace
     // period, and now also the reveal debounce above and
     // `pending_launch_pids`'s grace period — one combined periodic-
@@ -516,6 +528,7 @@ async fn async_daemon_main(
                             &mut pending_reveal_deadline,
                             &mut pending_reveal_epoch,
                             &mut pending_reveal_allow_unchanged,
+                            &mut pending_reveal_app_pids,
                             event,
                         )
                         .await;
@@ -605,13 +618,20 @@ async fn async_daemon_main(
                 let reveal_due = pending_reveal_deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
                 if reveal_due {
                     pending_reveal_deadline = None;
+                    // Taken unconditionally: whatever this arm decides, the
+                    // snapshot is one-shot and must not leak into a later
+                    // reveal (see its doc comment above).
+                    let app_pids_at_click = pending_reveal_app_pids.take();
                     // A newer, explicit `switch_workspace` call (e.g. a
                     // rapid workspace-switch hotkey) already superseded
                     // whatever armed this deferred reveal — that call is
                     // authoritative, so drop the stale reveal instead of
                     // reverting the user's later navigation.
                     if pending_reveal_epoch == state.switch_epoch() {
-                        state.reveal_current_frontmost(pending_reveal_allow_unchanged);
+                        state.reveal_current_frontmost(
+                            pending_reveal_allow_unchanged,
+                            app_pids_at_click.as_ref(),
+                        );
                     }
                 }
                 changed = pids_changed || reveal_due || restore_finalized;
@@ -686,6 +706,12 @@ async fn async_daemon_main(
                     // to the tiled layout.
                     tili_ax::MouseSignal::ButtonDown => {
                         state.on_mouse_button_down();
+                        // Snapshot before the Dock can act on this press:
+                        // it launches on mouse-*up*, so a Dock-visible pid
+                        // absent here but present at the deferred reveal
+                        // can only be this click's own launch. See
+                        // `pending_reveal_app_pids`'s doc comment.
+                        pending_reveal_app_pids = Some(tili_ax::workspace::regular_app_pids());
                         changed = true;
                     }
                     tili_ax::MouseSignal::ButtonUp => {
@@ -1010,6 +1036,7 @@ async fn handle_event(
     pending_reveal_deadline: &mut Option<tokio::time::Instant>,
     pending_reveal_epoch: &mut u64,
     pending_reveal_allow_unchanged: &mut bool,
+    pending_reveal_app_pids: &mut Option<HashSet<i32>>,
     event: WmEvent,
 ) {
     match event {
@@ -1098,8 +1125,11 @@ async fn handle_event(
             // Unlike a real click, a notification-detected edge alone never
             // justifies chasing a same-pid read once the deferred check
             // actually runs — see `WmState::reveal_frontmost`'s
-            // `allow_unchanged_pid` doc comment.
+            // `allow_unchanged_pid` doc comment. Its reveal also has no
+            // click to attribute a launch to, so drop any mouse-down pid
+            // snapshot the click path left armed.
             *pending_reveal_allow_unchanged = false;
+            *pending_reveal_app_pids = None;
         }
     }
 }

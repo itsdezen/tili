@@ -5248,13 +5248,73 @@ impl WmState {
     /// its doc comment. `main.rs` passes `true` when a `MouseSignal::ButtonUp`
     /// contributed to the pending deferred check, `false` otherwise (a pure
     /// `WmEvent::FrontmostAppChanged` notification edge).
-    pub fn reveal_current_frontmost(&mut self, allow_unchanged_pid: bool) {
+    ///
+    /// `app_pids_at_click` is `tili_ax::workspace::regular_app_pids()`
+    /// snapshotted on `MouseSignal::ButtonDown`, and `None` for the
+    /// notification-driven path. It closes a gap neither
+    /// `pending_launch_pids` nor `suppress` can: a Dock click that *starts
+    /// launching* an app leaves `frontmost_app_pid()` still reporting the
+    /// previously-frontmost app until the new one takes over AX-frontmost
+    /// status — and on an empty workspace that previous app is typically
+    /// one whose window is parked on another workspace, so `suppress` is
+    /// false (it owns a live window) and the reveal switches to *that*
+    /// workspace for a frame, before the new window's own placement
+    /// switches back. `pending_launch_pids` only knows about launches
+    /// `WmEvent::AppLaunched` actually reported, and is cleared by the
+    /// launch's first scanned window — a splash/ignored window can clear it
+    /// before the real one exists. A Dock-visible pid that wasn't running
+    /// at mouse-down is proof this click started a launch without relying
+    /// on any notification, and `mouse-down` is deliberately earlier than
+    /// the Dock's own mouse-up launch: a mouse-up snapshot could already
+    /// contain the new pid. The launch's `place_new_window`
+    /// (`workspace-rules`) switches to the right workspace as soon as the
+    /// real window exists, so dropping the reveal is the whole fix.
+    ///
+    /// Two known, narrow gaps remain — both inherent to not asking the Dock
+    /// which tile was clicked: an already-running app with no windows
+    /// (re-activation spawns no new pid; only its own
+    /// `FrontmostAppChanged` racing `REVEAL_DEBOUNCE` protects that case),
+    /// and a launch whose process hasn't registered with `NSWorkspace`
+    /// within `REVEAL_DEBOUNCE` at all. Neither has been observed; closing
+    /// them would mean resolving the clicked Dock tile via AX, which the
+    /// localized tile titles make fragile.
+    pub fn reveal_current_frontmost(
+        &mut self,
+        allow_unchanged_pid: bool,
+        app_pids_at_click: Option<&HashSet<i32>>,
+    ) {
         if !self.pending_launch_pids.is_empty() {
+            return;
+        }
+        // See this function's doc comment on `app_pids_at_click`.
+        if let Some(app_pids_at_click) = app_pids_at_click
+            && Self::click_started_a_launch(
+                app_pids_at_click,
+                &tili_ax::workspace::regular_app_pids(),
+            )
+        {
+            trace::log(format_args!(
+                "tili-daemon: click reveal skipped: an app launch appeared since mouse-down"
+            ));
             return;
         }
         if let Some(pid) = tili_ax::workspace::frontmost_app_pid() {
             self.reveal_frontmost(pid, allow_unchanged_pid);
         }
+    }
+
+    /// Whether a Dock-visible app that wasn't running when the mouse went
+    /// down is running now — see `reveal_current_frontmost`'s doc comment.
+    /// Takes already-resolved pid sets rather than querying `NSWorkspace`
+    /// itself so the decision is unit-testable without a live AX/
+    /// `NSWorkspace` environment.
+    fn click_started_a_launch(
+        app_pids_at_click: &HashSet<i32>,
+        app_pids_now: &HashSet<i32>,
+    ) -> bool {
+        app_pids_now
+            .iter()
+            .any(|pid| !app_pids_at_click.contains(pid))
     }
 
     /// One-time startup correction: `apply_config` always seeds
@@ -9595,13 +9655,36 @@ mod tests {
         let mut state = floating_test_state();
         state.note_app_launched(1234);
 
-        state.reveal_current_frontmost(false);
+        state.reveal_current_frontmost(false, None);
 
         // The guard must return before ever touching `last_frontmost_pid`
         // (only `reveal_frontmost` sets it) or triggering a relayout —
         // proof the stale-pid AX query never ran.
         assert_eq!(state.last_frontmost_pid, None);
         assert_eq!(state.relayout_calls.get(), 0);
+    }
+
+    #[test]
+    fn click_started_a_launch_is_true_only_for_a_previously_absent_pid() {
+        let at_click = HashSet::from([100, 200]);
+        // A Dock-visible app that appeared after mouse-down: the click is
+        // launching something, so the frontmost read can't be trusted.
+        assert!(WmState::click_started_a_launch(
+            &at_click,
+            &HashSet::from([100, 200, 300])
+        ));
+        // Nothing new: an ordinary click — including re-clicking the
+        // already-frontmost app's Dock icon — must still reveal.
+        assert!(!WmState::click_started_a_launch(
+            &at_click,
+            &HashSet::from([100, 200])
+        ));
+        // An app quitting between mouse-down and the deadline is not a
+        // launch and must not suppress the reveal.
+        assert!(!WmState::click_started_a_launch(
+            &at_click,
+            &HashSet::from([100])
+        ));
     }
 
     #[test]

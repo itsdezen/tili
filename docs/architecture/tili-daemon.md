@@ -920,6 +920,31 @@ lives; moments later the new app's window actually appears and its own
 placement (`place_new_window`) switches again to the real target, producing
 a visible double-jump.
 
+That stale read is caught without depending on any event: `main.rs`
+snapshots `tili_ax::workspace::regular_app_pids()` on every
+`MouseSignal::ButtonDown` — deliberately before the Dock can act, since it
+launches on mouse-*up* — and passes it to `reveal_current_frontmost` as
+`app_pids_at_click`. A Dock-visible pid that wasn't running at mouse-down
+but is by the time the deferred check runs proves this click started a
+launch, so the frontmost read is still naming the previous app and the
+reveal is dropped entirely; the new window's own `place_new_window`/
+`workspace-rules` switches to its workspace as soon as it exists. This is
+notification-free on purpose: `AppLaunched` doesn't fire for every launch
+(below), and a launch's splash/ignored window clears `pending_launch_pids`
+before its real window exists. `.Regular`-only: an accessory/helper process
+launching is not something a Dock click asked for, and counting it would
+suppress a legitimate reveal. The `WmEvent::FrontmostAppChanged` arm passes
+`None`, leaving that path unchanged — a same-pid read there is already
+refused via `allow_unchanged_pid == false`, and a genuine pid change is the
+new app itself.
+
+Two narrow gaps remain, both inherent to not asking the Dock which tile was
+clicked: an already-running app with no windows (re-activating it spawns no
+new pid; only its own activation notification racing `REVEAL_DEBOUNCE`
+protects that case), and a launch whose process hasn't registered with
+`NSWorkspace` within `REVEAL_DEBOUNCE`. Closing either would mean resolving
+the clicked Dock tile through AX, which localized tile titles make fragile.
+
 `WmEvent::AppLaunched { pid, .. }` (from `NSWorkspaceDidLaunchApplicationNotification`
 via `tili-ax`'s workspace watcher) calls `WmState::note_app_launched(pid)`,
 recording `pid` in `pending_launch_pids: HashMap<i32, Instant>` until it
@@ -947,13 +972,16 @@ handler ignore the `pid` its event carries entirely.
 this race can involve, so `pending_launch_pids` can end up empty for the
 exact case it exists to catch — `REVEAL_DEBOUNCE` waiting longer buys
 nothing against that gap, only added latency on ordinary Cmd-Tab/
-Dock-click-reveal. What does reliably prevent the spurious switch is the
-pre-existing `suppress` check above (a previous pid owning zero live
-windows) — unrelated to anything in this section, already there before any
-of this. `pending_launch_pids`/`REVEAL_DEBOUNCE` stay in place as a
-secondary layer for whichever launches *do* get an `AppLaunched` event, at
-low fixed cost (a `HashMap` lookup, a short deadline), but `suppress` is
-the mechanism actually load-bearing for the common case. `REVEAL_DEBOUNCE`
+Dock-click-reveal. `suppress` above only covers a previous pid owning *zero*
+live windows — the reactivated-windowless case it was written for. It does
+**not** cover a previous pid that owns a live window on a parked workspace,
+which is precisely what an empty active workspace leaves frontmost:
+confirmed on real hardware, a Dock click launching Safari from an empty
+workspace flashed the parked workspace holding Ghostty for a frame. The
+mouse-down pid snapshot described above is what closes that case.
+`pending_launch_pids`/`REVEAL_DEBOUNCE` stay in place as a secondary,
+best-effort layer for whichever launches *do* get an `AppLaunched` event, at
+low fixed cost (a `HashMap` lookup, a short deadline). `REVEAL_DEBOUNCE`
 is kept short (100ms) rather than grown to reliably beat
 `NSWorkspaceDidLaunchApplicationNotification` latency, since that would
 mean covering a full cold launch (hundreds of ms) to be dependable — the
