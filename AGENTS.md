@@ -331,7 +331,10 @@ sync:changelog`), tag `vX.Y.Z`, and push the tag — `release.yml` waits for
 that commit's successful CI gate, builds signed aarch64/x86_64 binaries,
 and opens a **draft** GitHub release for manual review. Never hand-sign or
 ad-hoc-sign a release binary outside that pipeline (see CONTRIBUTING.md's
-Release engineering for why).
+Release engineering for why). Publish the draft only once the website
+deploy of that commit is live: its body links to `#vX.Y.Z` on the changelog
+page, and `release.yml` warns (rather than fails) when that anchor isn't up
+yet.
 
 The release body is not hand-written either: `release.yml` runs
 `website/scripts/release-notes.mjs`, which renders the install/signing
