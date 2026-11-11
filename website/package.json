@@ -11,6 +11,7 @@
     "verify": "bun run check && bun run lint && bun run format:check && bun run test && bun run harness",
     "check": "astro check",
     "check:build": "bun scripts/check-build.mjs",
+    "sync:changelog": "bun scripts/sync-changelog.mjs",
     "lint": "eslint .",
     "format": "prettier --write . && eslint --fix .",
     "format:check": "prettier --check .",

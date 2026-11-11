@@ -219,6 +219,20 @@ worth it once *any* of:
 - The self-signed certificate is nearing its expiry anyway — a natural
   moment to switch outright instead of minting another self-signed one.
 
+### Release notes
+
+Release bodies are generated, never hand-written. `release.yml` runs
+`website/scripts/release-notes.mjs <tag>`, which renders the install and
+signing lines, one bullet from each of the release's highest-signal changelog
+sections, and a link to that version's anchor on
+[tili.dezen.me/docs/changelog](https://tili.dezen.me/docs/changelog) — the
+canonical, formatted changelog. The page itself is generated from
+`CHANGELOG.md` by `cd website && bun run sync:changelog`, so a release's full
+text lives in exactly one place and the GitHub release page stays a short
+pointer. `scripts/rewrite-releases.sh` re-renders already-published releases
+with the same generator (dry run by default, `--apply` to write, `--restore
+<dir>` to undo).
+
 ### Homebrew tap
 
 `Formula/tili.rb` in this repo is a **template** — Homebrew taps live in a

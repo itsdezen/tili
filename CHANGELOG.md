@@ -52,8 +52,7 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 ### Changed
 
-- **Default animation duration is 120ms**, down from 200ms. Set
-  `animate-duration-ms 200` to keep the previous feel.
+- **Default animation duration is 120ms**, down from 200ms.
 - **The tab-bar correction after a native-tab fold is instant** rather than
   animated: the app moved the window, not a layout change tili initiated.
 
@@ -64,6 +63,11 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   the hidden tab windows behind as ghost slots. The guard now recognizes a
   tab-bar-sized frame change, remembers multi-tab members so the 2→1 close
   still folds, and snaps the corrective frame write.
+
+### Migration
+
+- Set `settings { animate-duration-ms 200 }` to keep the previous animation
+  feel; the default is now 120ms.
 
 ## [0.14.0] - 2026-11-07
 
@@ -83,11 +87,17 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
   800×600 points instead of 60% of its monitor's width and height. A fixed
   point size reads consistently across displays of different resolutions;
   a ratio grows the window on exactly the large screens where it doesn't
-  need to. Set `defaults { width-ratio 0.6; height-ratio 0.6 }` (or the
-  per-rule equivalents) to keep monitor-relative sizing.
+  need to.
 - **The menu bar badge defaults to the rounded shape** instead of the
-  fully-rounded pill. `menubar { shape "pill" }` restores the previous
-  look; the daemon-unreachable "connecting" badge always stays a pill.
+  fully-rounded pill. The daemon-unreachable "connecting" badge always stays
+  a pill.
+
+### Migration
+
+- To keep monitor-relative sizing, set `defaults { width-ratio 0.6;
+  height-ratio 0.6 }` (or the per-rule equivalents) — ratio-only configs keep
+  working unchanged and are not shadowed by the new absolute default.
+- To restore the old capsule menu bar badge, set `menubar { shape "pill" }`.
 
 ## [0.13.0] - 2026-11-05
 

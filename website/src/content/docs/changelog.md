@@ -11,10 +11,11 @@ patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
 For planned work rather than history, see the [Roadmap](/docs/roadmap).
 
-This page mirrors the repository's
-[`CHANGELOG.md`](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md)
-directly rather than a separate hand-written summary — recent releases in
-full below, earlier ones collapsed further down.
+Both this page and each GitHub release note are generated from the
+repository's [`CHANGELOG.md`](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md) — edit the changelog, not
+this page.
+
+<span id="v0.15.1"></span>
 
 ## [0.15.1] - 2026-11-11
 
@@ -22,124 +23,323 @@ full below, earlier ones collapsed further down.
 
 - **Opening or re-activating an app from an empty workspace no longer
   flashes the previously-frontmost app's workspace first.** With an empty
-  active workspace macOS keeps reporting the last app whose window is parked
-  elsewhere as frontmost, so a Dock click that launched — or re-opened —
-  another app left the deferred click reveal resolving that stale pid and
-  switching to its workspace for a frame. Two defenses now sit at the
-  decision point: the Dock-visible app pids are snapshotted on mouse-down
-  and the reveal is dropped when a new one appears, and a same-pid click
-  whose target workspace isn't visible is treated as ambiguous and retried
-  for up to ~1.3s (which covers re-opening an already-running windowless app
-  and a slow cold launch). Any real activation, launch, or workspace switch
-  ends the wait early; re-clicking the already-frontmost app's own Dock icon
-  still reveals its workspace, and the Cmd-Tab/Mission Control path is
-  unchanged.
+  active workspace, macOS keeps reporting the last app whose window is
+  parked elsewhere as frontmost, so a Dock click that launches — or
+  re-opens — another app left the deferred click reveal resolving that
+  stale pid and switching to its workspace for a frame before the new
+  window's placement switched back (reproduced with Safari from an empty
+  workspace while Ghostty's window was parked on another one). Two defenses
+  now sit at the decision point: `main.rs` snapshots
+  `tili_ax::workspace::regular_app_pids()` on every left mouse-down —
+  before the Dock, which launches on mouse-up, can start the process — and
+  drops the click reveal when a Dock-visible pid appears by the time its
+  deferred check runs; and a same-pid click whose target workspace isn't
+  visible is treated as ambiguous and retried for up to ~1.3s instead of
+  switching immediately, which covers re-opening an already-running app
+  with no windows (no new pid) and a slow cold launch. Any real activation,
+  launch, or workspace switch ends the wait early. The pid snapshot is
+  notification-free on purpose: `AppLaunched` doesn't fire for every
+  launch, and a launch's splash/ignored window clears
+  `pending_launch_pids` before its real window exists. Re-clicking the
+  already-frontmost app's own Dock icon still reveals its workspace, after
+  that bounded wait; the `FrontmostAppChanged`/Cmd-Tab path is unchanged.
+
+<span id="v0.15.0"></span>
 
 ## [0.15.0] - 2026-11-09
 
 ### Added
 
-- **New-window entry animation.** A newly tiled window starts at its target
-  slot's size just outside the edge its container grows toward, then eases
-  into place, instead of tweening from the frame the app created it with. A
-  lone window in a workspace lands straight on its slot.
-- **Configurable animation duration.** `animate-duration-ms` in `settings`
-  sets how long an `animate` transition takes (default 120ms, minimum 1ms).
-- **New windows are placed on creation,** not on the next 30ms maintenance
-  tick, removing up to 30ms of the app's native first frame from the flash
-  before tili places the window.
+- **New-window entry animation.** A newly tiled window now starts at its
+  target slot's size just outside the edge its container grows toward, then
+  eases into place, instead of tweening from whichever frame the app created
+  it with. A lone window in a workspace lands straight on its slot.
+- **Configurable animation duration.** `settings { animate-duration-ms N }`
+  (default 120ms, clamped to at least 1ms) sets how long an `animate` frame
+  transition takes. A duration-only hot reload updates in-flight animations
+  instead of dropping them.
+- **New windows are placed on creation, not on the next tick.** The AX
+  window-created notification now takes an immediate path (with a short
+  coalescing guard for multi-window launches), removing up to 30ms of the
+  app's native first frame from the flash before tili places the window.
 
 ### Changed
 
-- **Default animation duration is 120ms** (down from 200ms). The tab-bar
-  correction after a native-tab fold is now instant rather than animated.
+- **Default animation duration is 120ms**, down from 200ms.
+- **The tab-bar correction after a native-tab fold is instant** rather than
+  animated: the app moved the window, not a layout change tili initiated.
 
 ### Fixed
 
 - **Native-tab guard handles Terminal's tab-bar resize.** Opening, closing,
   or switching tabs no longer tiles each tab as a separate window or leaves
-  hidden tab windows behind as ghost slots; the 2→1 close also folds now.
+  the hidden tab windows behind as ghost slots. The guard now recognizes a
+  tab-bar-sized frame change, remembers multi-tab members so the 2→1 close
+  still folds, and snaps the corrective frame write.
 
 ### Migration
 
-- To keep the previous animation feel, set
-  `settings { animate-duration-ms 200 }`. The new default is 120ms.
+- Set `settings { animate-duration-ms 200 }` to keep the previous animation
+  feel; the default is now 120ms.
+
+<span id="v0.14.0"></span>
 
 ## [0.14.0] - 2026-11-07
 
 ### Added
 
 - **Absolute floating sizes alongside ratios.** `floating-rules`' `rule`
-  bodies accept `width-ratio`/`height-ratio`, and its `defaults` block
-  accepts absolute `width`/`height` (points). Both forms may be present at
-  once; per dimension the absolute value wins over a ratio at the same
-  level, and a matching rule still overrides `defaults`.
-- **Menu bar shape default is now `rounded`** instead of `pill`.
+  bodies now also accept `width-ratio`/`height-ratio`, and its `defaults`
+  block accepts absolute `width`/`height` (points). Both forms can be
+  present at once without a parse error; per dimension the absolute value
+  wins over a ratio at the same level, and a matching rule still overrides
+  `defaults`. Ratio-only configuration keeps working unchanged.
 
 ### Changed
 
-- **Floating windows use an absolute default size.** With no sizing
-  configured, a floating window opens at 800×600 points instead of 60% of
-  its monitor. A fixed point size behaves consistently across displays of
-  different resolutions; a ratio grows the window on exactly the large
-  screens where it doesn't need to.
+- **Floating windows use an absolute default size.** With no
+  `floating-rules` sizing configured, a floating window now opens at
+  800×600 points instead of 60% of its monitor's width and height. A fixed
+  point size reads consistently across displays of different resolutions;
+  a ratio grows the window on exactly the large screens where it doesn't
+  need to.
+- **The menu bar badge defaults to the rounded shape** instead of the
+  fully-rounded pill. The daemon-unreachable "connecting" badge always stays
+  a pill.
 
 ### Migration
 
 - To keep monitor-relative sizing, set `defaults { width-ratio 0.6;
-  height-ratio 0.6 }` (or the per-rule equivalents) — ratio-only configs
-  keep working unchanged and are not shadowed by the new absolute default.
+  height-ratio 0.6 }` (or the per-rule equivalents) — ratio-only configs keep
+  working unchanged and are not shadowed by the new absolute default.
 - To restore the old capsule menu bar badge, set `menubar { shape "pill" }`.
-  The daemon-unreachable "connecting" badge always stays a pill.
+
+<span id="v0.13.0"></span>
 
 ## [0.13.0] - 2026-11-05
 
 ### Added
 
 - **Global southeast parking.** Every parked window — from any workspace —
-  parks at the bottom-right corner of the southeast-most connected display,
-  and is re-parked after connect/disconnect, arrangement, resolution, or
-  display-id changes so it can't reappear on another monitor.
-- **JSON query/subscribe.** `tili query state --json` plus
-  `tili subscribe --json` (versioned `snapshot` then coalesced
-  `state_changed` events). Window JSON now includes `bundle_id`,
-  `workspace`, `focused`, `role`, and `subrole`.
-- **Copy-rule and role/subrole rules.** `tili rule` (and the menu bar)
-  emits a ready-to-paste rule; both rule sections accept `role`/`subrole`.
-- **Native-tab guard.** Tab open/close/switch no longer creates placements
-  or relayouts; the active tab replaces the managed window id in place.
-  Disable with `settings { native-tabs #false }`.
-- **`toggle-floating`** plus a default `alt-shift-f` binding.
-- **Configurable AX timeout** (`settings { ax-timeout-ms 500 }`).
-- **Multi-monitor workspace routing.** Every display gets an active
-  workspace at startup; `monitor="main|12"` pins are honored; fallback
-  workspaces use the monitor's pretty name or `Display N` and are cleaned
-  up on disconnect (windows migrate to the main/focused workspace).
-  `tili focus-monitor [main|next|prev|id]` targets a specific display.
-- **Home-display workspace flow.** Each workspace has a home display:
+  now parks at the bottom-right corner of the southeast-most connected
+  display instead of on its own workspace's display. Parking is re-applied
+  after connect/disconnect, arrangement, resolution/scale, display-id
+  rename, and session restore, so a parked window can't reappear on another
+  monitor after the layout changes.
+- **JSON query and subscription.** `tili query state --json` (plus
+  `windows`/`workspaces`/`monitors`) and `tili subscribe --json`, which
+  streams a versioned `snapshot` event followed by coalesced
+  `state_changed` events with a monotonic `seq`. Window payloads now
+  include `bundle_id`, `workspace`, `focused`, `role`, and `subrole`.
+- **Copy-rule ergonomics.** `tili rule [--workspace <name>] [--copy]`
+  prints/copies a ready-to-paste `floating-rules` or `workspace-rules`
+  snippet for the focused window; the menu bar exposes the same action.
+- **`role`/`subrole` rule matchers.** `floating-rules` and
+  `workspace-rules` accept optional exact-match AX role/subrole fields.
+- **Native-tab guard.** Opening, closing, or switching an app-owned native
+  tab no longer creates a placement, re-applies rules, cascades, or
+  relayouts. The active tab replaces the managed window id in place;
+  background tabs stay owned by the app. Disable with
+  `settings { native-tabs #false }`.
+- **`tili toggle-floating`** and a default `alt-shift-f` binding.
+- **Configurable AX timeout.** `settings { ax-timeout-ms 500 }` controls
+  the per-app Accessibility messaging timeout (clamped to 50–5000ms).
+- **Multi-monitor workspace routing.** Every connected display gets an
+  active workspace at startup; `workspace "x" monitor="main|12"` pins are
+  honored; fallback workspaces use the monitor's pretty name
+  (`Sidecar Display`, `DELL U2720Q`) or `Display N`, and are renumbered
+  on layout changes. Empty fallbacks are removed on disconnect; non-empty
+  ones migrate their windows to the main/focused workspace before removal.
+  `tili focus-monitor [main|next|prev|id]` focuses a specific display.
+- **Home-display workspace flow.** Every workspace now has a home display:
   `tili workspace <name>` goes there (or focuses the display already showing
-  it) and never shows a parked workspace on an unrelated display.
-  `tili workspace-here <name>` pulls a workspace to the focused display,
-  swapping with its occupant; `move-workspace-to-monitor next|prev|main`
-  pushes the active workspace or moves a parked one's home without
-  disturbing the target. `workspace-back` restores the previous
-  `(display, workspace)` pair. Default binds: `alt-ctrl-comma` /
-  `alt-ctrl-period` / `alt-ctrl-m`, and `alt-ctrl-<workspace>` for
-  `workspace-here`.
-- **Floating windows re-anchor** after workspace/display moves instead of
-  keeping the old monitor's coordinates.
+  it) and never materializes a parked workspace on an unrelated display.
+  `tili workspace-here <name>` explicitly pulls a workspace to the focused
+  display, swapping with its occupant. `tili move-workspace-to-monitor
+  next|prev|main` pushes the active workspace (swap) or moves a parked
+  workspace's home without disturbing the target. `tili workspace-back` now
+  restores the previous `(display, workspace)` pair instead of following a
+  workspace that may have moved displays. Default binds:
+  `alt-ctrl-comma`/`alt-ctrl-period`/`alt-ctrl-m` for previous/next/main,
+  and `alt-ctrl-<workspace>` for `workspace-here`.
+- **Floating windows re-anchor on display changes.** Rule-placed floating
+  windows no longer keep coordinates from the previous monitor after a
+  workspace moves or a display reconnects.
+
+<span id="v0.12.0"></span>
 
 ## [0.12.0] - 2026-11-05
 
 ### Added
 
-- **Full session state and restore.** Tiles/Accordion trees, focus, active
-  workspace per monitor, floating geometry, tiled fullscreen, and
-  native-fullscreen/minimized/hidden anchors now persist across restart or
-  crash. Versioned atomic `session.json` with `.bak`, startup grace window,
-  conservative window matching, `tili doctor` reporting, and clean
-  `tili uninstall` cleanup. Windows alive but unenumerable across Spaces
-  are kept deferred and retried instead of being reclassified as new.
+- **Full session state and restore.** tili now persists managed layout and
+  placements to a versioned JSON file and restores them on the next start:
+  Tiles and Accordion trees (nested containers, orientation, weights, MRU),
+  focus, active workspace per monitor, floating geometry, tiled fullscreen,
+  and native-fullscreen/minimized/hidden-application anchors. A startup
+  grace window matches reopened windows conservatively (hard identity first,
+  fallback only when unique); unmatched/late windows use normal rules.
+  Atomic writes plus `session.json.bak`, off-loop writes, corrupt/version
+  fallback, startup recovery after `kill -9`, and a zero-match guard that
+  preserves the previous state. Configure with `session { ... }` in
+  `tili.kdl`; `tili doctor` reports the file/restore summary and
+  `tili uninstall` removes it.
+- **Deferred windows survive native-fullscreen/Space transitions.** A saved
+  window that is alive but temporarily unenumerable at startup (native
+  fullscreen on another Space, minimized, or another macOS Space) is kept
+  in the next snapshot and retried through the normal window-change path
+  every 5s for up to 10 minutes instead of being reclassified as a new
+  window and losing its workspace placement. This fixes layout loss when
+  restarting tili while a native-fullscreen window is open.
+
+### Fixed
+
+- A corrupt primary session file falls back to `session.json.bak` and
+  removes the corrupt primary, so a later save cannot rotate garbage over
+  the good backup.
+- Zero-match session suppression is no longer cleared by automatic window
+  placement; only a real user action (command, hotkey, mouse release,
+  config/display change) resumes writing.
+
+### Changed
+
+- `tili-tree` gains a serializable `TreeSnapshot`/`TreeAnchor` API; no
+  `NodeId` is ever persisted.
+
+<span id="v0.11.2"></span>
+
+## [0.11.2] - 2026-10-28
+
+### Changed
+
+- **The menu bar refreshes with one round trip instead of four.** It used to
+  issue `ListMonitors`, `ListWorkspaces`, `CurrentMode` and `MenubarStyle`
+  as separate commands — four socket connections and four system-wide AX
+  focus queries per workspace change. A single `Snapshot` command now
+  returns the same four reads, and being read-only it skips the focus sync
+  entirely.
+- **The daemon no longer writes to `daemon.err.log` during normal
+  operation.** Per-command dispatch timings, per-switch phase timings,
+  per-window park timings and per-event NSWorkspace lines were
+  unconditional; they now require `TILI_TRACE_TIMING=1` at daemon launch.
+  A `tili ping` used to emit ~43 bytes of stderr per call and a workspace
+  switch ~1 KB; both are now zero. Real warnings and failures are
+  unchanged.
+- **The daemon runs two Tokio workers instead of one per CPU core**
+  (23-24 threads down to 17 on an M4), since the event loop is a single
+  task and the worker pool only serves spawned `WaitForChange`/AX-stream
+  tasks.
+- **The watcher resync enumerates each source once per 2s tick** instead of
+  walking the on-screen window list twice.
+- **Release binaries are about a third smaller** (thin LTO, one codegen
+  unit, stripped symbols): `tili-daemon` 4.47 MB -> 2.85 MB,
+  `tili-menubar` 1.28 MB -> 0.88 MB, `tili` 1.88 MB -> 1.25 MB. The layout
+  bench is 2-11% faster across 18 of 22 ids as a side effect.
+
+### Added
+
+- **Performance tooling**: `cargo bench -p tili-tree --bench layout` (layout,
+  insert, remove, focus, balance), `scripts/perf/collect.sh` (idle CPU/RSS/
+  footprint/thread sampling, opt-in command and workspace-switch
+  round-trips) and `scripts/perf/verify.sh` (the CI gate plus the bench,
+  with cached baselines and a regression threshold). Measurements and what
+  they do and do not cover live in `docs/perf/baseline.md`.
+
+<details>
+<summary>Earlier releases (v0.1.0 – v0.11.1)</summary>
+
+<span id="v0.11.1"></span>
+
+## [0.11.1] - 2026-09-09
+
+### Fixed
+
+- **A macOS native fullscreen (a browser video, or the green button) no
+  longer yanks the display back to the previous Space and steals focus.**
+  `kAXWindowsAttribute` — the AX attribute tili enumerates windows with —
+  only reports windows on the Space that's currently active, so entering a
+  fullscreen Space made every other window of that app vanish from its own
+  scan. tili read that as "closed", tore the still-open window out of its
+  workspace tree after the 100ms removal grace, and then real-focused a
+  sibling window — which activates that sibling's app and drops macOS
+  straight back out of fullscreen. Absence from a scan is no longer
+  evidence of a close: it now has to be confirmed by
+  `_AXUIElementGetWindow` on the window's own element, which answers
+  correctly across Spaces (and when the `AXWindows` read itself times out).
+- **A workspace no longer collapses to single-tile (`gaps.outer-solo`)
+  geometry, with both windows stacked exactly on top of each other, after a
+  fullscreen round trip.** Same root cause: the falsely-removed window left
+  the survivor alone in the tree, so it got the solo rect; the returning
+  window later got the same solo rect for itself. A quiet app isn't
+  rescanned until something makes it emit an AX notification, which is why
+  resizing a window by hand appeared to "fix" it.
+- **A workspace's layout no longer silently reverts to its configured
+  `layout=` after a window leaves and rejoins the tree.** Dropping to one
+  tiled window destroys the root container, and the next insert rebuilt it
+  from the config default — discarding a `layout`/`layout --root` toggle
+  made at runtime. The root container's layout is now carried across that
+  collapse. Still reset by a config reload declaring a new default, and by
+  the workspace emptying out completely.
+- **A macOS-disabled event tap no longer takes hotkeys (or
+  focus-follows-monitor) down for the rest of the session.** macOS disables
+  an event tap outright if its callback overruns the tap timeout —
+  classically after a sleep/wake — and neither tap handled the disable
+  notification it gets, so the tap stayed dead until the daemon was
+  restarted. Both taps now reinstall themselves. The mouse tap also
+  synthesizes the `LeftMouseUp` a disable can swallow, which would
+  otherwise leave tili believing a drag was still in progress and skipping
+  every relayout from then on.
+- **`tili fullscreen --native` can now actually exit native fullscreen.**
+  It was strictly one-way: entering worked, leaving never did. macOS reports
+  `AXFullScreen` and tili takes the window out of its workspace tree, so the
+  command's own "which window is focused" lookup — which only ever names
+  windows *in* the tree — could not name it. With that window alone in its
+  workspace the command failed with `no window is focused`; with a sibling
+  present it fullscreened the sibling instead, leaving two fullscreen
+  windows. The native branch now resolves its target from real OS focus.
+- **Exiting a fullscreen video no longer leaves an unrelated window
+  focused and stacked on top of the browser.** The throwaway window a
+  browser opens for a native-fullscreen video is destroyed a moment after
+  the exit, and tili reacted by raising whichever window happened to sit
+  next to it in the tree — over the browser macOS had just correctly
+  refocused. When the removed window's own app still has a window in that
+  workspace, macOS refocuses it itself, so tili no longer raises anything.
+- **Closing a window while a natively-fullscreened window is showing no
+  longer pulls the user out of fullscreen.** `remove_placement` skips its
+  reassigned-focus raise while the workspace holds a native-fullscreen
+  window: macOS is showing that window's own Space, so there is no sibling
+  on screen to hand focus to.
+
+<span id="v0.11.0"></span>
+
+## [0.11.0] - 2026-09-06
+
+### Added
+
+- **Workspaces can override the global starting layout** with
+  `workspace "name" layout="tiles"` or `layout="accordion"`. The override
+  applies when the workspace creates its first container and does not
+  relayout existing windows during a config reload.
+
+### Fixed
+
+- **The top-level `default-layout` setting was parsed but never applied.**
+  It now controls each workspace's initial container layout, falling back
+  to `tiles` when unset. Invalid global or per-workspace values are reported
+  by `tili doctor` and use the appropriate fallback.
+
+<span id="v0.10.1"></span>
+
+## [0.10.1] - 2026-09-05
+
+### Fixed
+
+- **Moving a window perpendicular to a two-window Accordion root changed
+  the layout to Tiles.** The replacement root now preserves the Accordion
+  layout while changing its orientation and placing the moved window on the
+  requested side.
+
+<span id="v0.10.0"></span>
 
 ## [0.10.0] - 2026-09-03
 
@@ -176,6 +376,8 @@ full below, earlier ones collapsed further down.
   workspace active at launch (`AppLaunched`) instead, for that app's first
   real window only, when no `workspace-rules` entry already claims it.
 
+<span id="v0.9.0"></span>
+
 ## [0.9.0] - 2026-08-30
 
 ### Added
@@ -186,6 +388,8 @@ full below, earlier ones collapsed further down.
   using `outer` unchanged. Same CSS shorthand as `outer`, overridable
   per-workspace alongside it. Unset (the default) falls back to `outer`,
   so existing configs are unaffected.
+
+<span id="v0.8.0"></span>
 
 ## [0.8.0] - 2026-08-28
 
@@ -261,6 +465,187 @@ full below, earlier ones collapsed further down.
 - **An unrecognized command string's error message didn't say which verb
   was unrecognized.**
 
+<span id="v0.7.3"></span>
+
+## [0.7.3] - 2026-08-28
+
+### Fixed
+
+- **Daemon startup (a real boot, or — far more commonly — a daemon restart
+  with apps already open) always revealed `default_workspace`, ignoring
+  whatever window was actually frontmost.** `apply_config` seeds
+  `default_workspace` before a single window has been scanned, and
+  nothing reactive fires for an app that was already frontmost before the
+  daemon's observer registered — so the default seed just stuck, and
+  whichever already-open window a `workspace-rules` match happened to
+  place *last* during the startup burst (processed in nondeterministic
+  pid order) could silently steal the display to yet another workspace
+  instead. `WmState::reveal_startup_frontmost` now runs once, right after
+  the initial scan of already-open windows settles, and switches
+  `focused_monitor` to whichever workspace the real frontmost window
+  already resolved into — leaving `default_workspace` alone whenever
+  there's nothing unambiguous to go on (e.g. Finder/the desktop is
+  frontmost with no window focused).
+- **Windows that can't actually be resized (an Electron app's startup
+  splash screen, a popup detached from its main window, etc.) were still
+  getting tiled into a slot they refused to fit, leaving them visibly
+  clamped/stuck** — window classification now also checks
+  `AXUIElementIsAttributeSettable(kAXSizeAttribute)`
+  (`tili_ax::AxWindow::is_resizable`), a general per-window AX signal
+  rather than a subrole/chrome-button heuristic, so it applies across apps
+  instead of needing a per-bundle-id rule. A window that reports itself as
+  non-resizable is now force-`Ignore`d (left untouched, matching normal
+  macOS behavior) regardless of its `WindowKind` or any matching
+  `floating-rules` entry. Reported against TradingView's startup splash and
+  its 3-dot-menu Settings popup, but the same shape affects other Electron
+  apps with detached auxiliary windows too.
+- **Post-wake readiness and the workspace-jump bug were both symptoms of the
+  same guessed timer** — `WAKE_GRACE_MAX`/`WAKE_GRACE_DEBOUNCE` replaced
+  entirely with a real per-window AX probe fired the instant wake is
+  observed, confirming each pid individually (`WmState::unconfirmed_pids`)
+  instead of gating everything behind one global deadline. A fast machine's
+  "wait for ready" now shrinks to the probe's actual round-trip instead of a
+  worst-case constant; a workspace can no longer auto-switch on behalf of a
+  pid that hasn't proven it's reconnected, however long that takes, instead
+  of being freed the moment an arbitrary clock ran out.
+- **Still-open windows without a matching `workspace-rules` entry got
+  relaid-out into the wrong spot after wake, and the active workspace/focus
+  could still drift away from what was showing right before sleep.** Two
+  fixes: the background watcher's own resync backstop
+  (`tili-ax`'s `resync_watchers`) could reliably win a race against the real
+  wake notification and rescan every window before `note_system_wake` had a
+  chance to protect any of them — it now self-detects a real sleep (its
+  `recv_timeout` wait running far longer than requested) and forwards a
+  synthetic wake signal first, closing the gap. And `place_new_window`/
+  `reveal_frontmost`'s auto-switch is no longer gated per-app-pid at all —
+  a hard `WmState::wake_lock_active` lock now blocks every auto-switch and
+  auto-refocus unconditionally from the moment wake is observed until the
+  next real hotkey- or socket-triggered command, since a per-pid probe
+  responding quickly doesn't mean the rest of the system's AX/WindowServer
+  state has actually settled.
+- **Switching workspaces had visible deadtime between the hotkey and the
+  screen actually updating** on workspaces with several windows —
+  `switch_workspace`'s park/relayout/reposition AX writes ran one window at
+  a time. They now fire concurrently (one thread per window, joined before
+  the switch returns), so the wait drops from the sum of every window's
+  round-trip to roughly the slowest one.
+- **All three fixes above never actually ran for this project's own
+  day-to-day "sleep," because that gesture isn't a real sleep.** Every one
+  of them is gated on `NSWorkspaceDidWakeNotification`, which macOS only
+  sends when the machine genuinely suspends — confirmed via real
+  `daemon.err.log` output that locking the screen and waiting for the
+  display to blank (this project's actual daily trigger, as opposed to
+  `pmset sleepnow`/lid-close/Apple-menu Sleep) never produces that
+  notification at all. Added `WmEvent::ScreenLocked`/`ScreenUnlocked`
+  (`com.apple.screenIsLocked`/`screenIsUnlocked`, via a new
+  `NSDistributedNotificationCenter` registration — a screen lock isn't an
+  `NSWorkspace` event) reusing the exact same `unconfirmed_pids`/
+  `wake_lock_active` machinery above rather than a parallel mechanism:
+  locking arms the freeze and marks every tracked window unconfirmed
+  immediately (no AX probe yet — the session is switched to `loginwindow`
+  while locked, where AX reads can't be trusted), and unlocking runs the
+  deferred probe once the session — and its AX connections — are actually
+  back.
+- **A window could stay parked off-screen indefinitely after unlock, only
+  reappearing after switching workspaces back and forth several times** —
+  `AxWindow::set_frame`/`set_position`/`set_size` discarded the AX write's
+  `Result` (`let _ =`) and advanced the cached frame to the target
+  unconditionally, even when the write itself had failed. A write briefly
+  failing right after unlock (the app still reconnecting to AX/WindowServer)
+  left the cache lying about the window's real position; every later call's
+  no-op-if-unchanged guard then compared against that lying cache, saw a
+  false match, and silently skipped writing the window back on-screen. All
+  three now only advance the cache on a successful write, so a failed write
+  leaves the cache honest and the very next call retries it for real.
+- **Two genuinely still-open windows got finalized as closed shortly after
+  unlocking the screen** — confirmed via real `daemon.err.log` output
+  showing them finalized ~93s "pending," essentially the entire lock
+  duration. The screen-lock freeze above blocks `finalize_expired_removals`
+  and the auto-switch paths, but did nothing about the background watcher's
+  own periodic resync (`tili-ax`'s `resync_watchers`), which kept
+  re-enumerating every on-screen app's windows throughout the lock — AX
+  reads for *other* apps can silently come back empty while the session is
+  on `loginwindow`, and a scan that comes back empty was indistinguishable
+  from a real close, landing the window in `pending_removal` mid-lock. The
+  watcher thread now tracks lock state and skips this resync entirely while
+  locked, forces one real full resync the instant unlock is observed
+  (rather than waiting for the next tick), and unlocking also restarts the
+  grace-period clock on any already-pending window — closing a race where
+  the daemon's single event loop could otherwise finalize an old pending
+  entry before that forced resync had actually re-verified it.
+- **The same finalize-as-closed bug above can also happen on a genuine
+  sleep, not just a screen lock** — a long real sleep advances `Instant`
+  just as much as a lock sitting frozen does, so any window already in
+  `pending_removal` before the machine suspended would have a clock read as
+  far past `removal_grace` the moment it wakes, regardless of the lock/wake
+  distinction. Both of the lock/unlock fix's layers now apply symmetrically
+  to `WmEvent::SystemDidWake`: the watcher thread forces one real full
+  resync immediately on wake (at both places it can observe one — the real
+  `NSWorkspaceDidWakeNotification` and its own `recv_timeout`-based sleep
+  detection — rather than only one of them), and `WmState::note_system_wake`
+  now also restarts the grace-period clock on every already-pending window,
+  same as `note_screen_unlocked`.
+
+<span id="v0.7.2"></span>
+
+## [0.7.2] - 2026-08-24
+
+### Fixed
+
+- **Wake-grace used one fixed 90s timer for every wake, instead of tracking
+  how long reconnection was actually still happening** — two symptoms, same
+  root cause. On a fast machine, everything after wake waited out the full
+  90s even once every app had long since reconnected. On a machine slower to
+  reconnect, an app that took longer than 90s to reconnect still got its
+  window wrongly `finalize_expired_removals`'d as closed, then rediscovered
+  moments later and treated as brand-new — re-triggering a matching
+  `workspace-rules` entry and silently jumping the active workspace (e.g.
+  entertainment → work). `note_system_wake` now starts a capped debounce
+  instead of a flat timer: the grace window extends by 3s (proposed,
+  `WAKE_GRACE_DEBOUNCE`) each time a window visibly vanishes or reconnects
+  during `apply_windows_changed`, capped at 180s from the wake instant
+  (proposed, `WAKE_GRACE_MAX`) — mirroring the existing
+  `FULL_RESYNC_DEBOUNCE`/`FULL_RESYNC_MAX_INTERVAL` shape in
+  `tili-ax/src/watch.rs`. `place_new_window`'s and `reveal_frontmost`'s
+  auto-switch guards are unchanged in behavior, just now keyed off the same
+  debounced deadline. Both new values are proposals pending real-hardware
+  validation, the same way 90s itself was only confirmed correct after
+  several rounds of real sleep/wake testing.
+
+<span id="v0.7.1"></span>
+
+## [0.7.1] - 2026-08-19
+
+### Fixed
+
+- **Dismissing a notification (or Spotlight with Esc) over an empty
+  workspace could jump the display to whatever workspace the previously
+  frontmost app lives on, and stick there.** Notification Center/Spotlight
+  transiently holding AX-frontmost status on themselves while animating a
+  dismiss was corrupting internal frontmost-tracking state, which the
+  following handback then misread as a genuine app switch to follow.
+
+<span id="v0.7.0"></span>
+
+## [0.7.0] - 2026-08-09
+
+### Added
+
+- **Menu bar badge now shows a distinct icon while `resize`/`manage`
+  keybinding modes are active** — ↔ for `resize`, ⚙ for `manage` (sized to
+  match the workspace name's own text height), instead of always showing
+  the plain workspace dot. Updates in lockstep with the daemon over the
+  existing event-driven `WaitForChange` channel — no polling, no visible
+  delay entering or exiting a mode.
+
+### Changed
+
+- **`manage` mode's default entry bind changed from `alt-shift-s` to
+  `alt-shift-m`**, for a clearer mnemonic ("**m**anage"). Update your own
+  config if you copied this bind from `example/tili.kdl`.
+
+<span id="v0.6.1"></span>
+
 ## [0.6.1] - 2026-07-25
 
 ### Fixed
@@ -274,6 +659,8 @@ full below, earlier ones collapsed further down.
   `Monitor.notch` is now only the amount by which the notch's safe area
   *exceeds* that baseline.
 
+<span id="v0.6.0"></span>
+
 ## [0.6.0] - 2026-07-25
 
 ### Added
@@ -286,6 +673,8 @@ full below, earlier ones collapsed further down.
   `#true`: use the configured top gap as-is, matching pre-existing
   behavior) — settable globally or per-workspace, same as `inner`/`outer`/
   `accordion`.
+
+<span id="v0.5.3"></span>
 
 ## [0.5.3] - 2026-07-23
 
@@ -303,6 +692,8 @@ full below, earlier ones collapsed further down.
   window should never be touched at all. Both are now force-`Ignore`d
   unconditionally, the same mechanism already used for Finder's "Copy" and
   "Connect to Server" dialogs and System Settings' suggestion popup.
+
+<span id="v0.5.2"></span>
 
 ## [0.5.2] - 2026-07-23
 
@@ -331,6 +722,8 @@ full below, earlier ones collapsed further down.
   one auxiliary window, and an explicit rule always wins over the
   kind-based default. Now force-`Ignore`d unconditionally, regardless of
   `floating-rules` config, the same way Finder's protected dialogs are.
+
+<span id="v0.5.1"></span>
 
 ## [0.5.1] - 2026-07-22
 
@@ -371,6 +764,8 @@ full below, earlier ones collapsed further down.
   regenerate the LaunchAgent plist with the corrected path — this fix only
   changes what a future `tili start` writes, not an already-installed
   plist.
+
+<span id="v0.5.0"></span>
 
 ## [0.5.0] - 2026-07-22
 
@@ -436,6 +831,8 @@ full below, earlier ones collapsed further down.
   window directly (`AxWindow::system_focused_id`), sidestepping the
   "which app" hop entirely.
 
+<span id="v0.4.4"></span>
+
 ## [0.4.4] - 2026-07-22
 
 ### Fixed
@@ -466,6 +863,8 @@ full below, earlier ones collapsed further down.
   existence before restarting both processes; each LaunchAgent is now
   checked independently.
 
+<span id="v0.4.3"></span>
+
 ## [0.4.3] - 2026-07-22
 
 ### Fixed
@@ -482,6 +881,8 @@ full below, earlier ones collapsed further down.
   this up after `tili stop && tili start` (or a fresh `brew upgrade` per
   its caveats).
 
+<span id="v0.4.2"></span>
+
 ## [0.4.2] - 2026-07-22
 
 ### Fixed
@@ -493,6 +894,8 @@ full below, earlier ones collapsed further down.
   LaunchAgent plist exists but the process isn't currently running) as a
   build failure. Switched to `quiet_system`, which doesn't raise on a
   non-zero exit.
+
+<span id="v0.4.1"></span>
 
 ## [0.4.1] - 2026-07-22
 
@@ -509,6 +912,8 @@ full below, earlier ones collapsed further down.
   non-fullscreenable utility panels a classic zoom button instead, so this
   generalizes to any app with the same window shape rather than a
   per-bundle-id fix.
+
+<span id="v0.4.0"></span>
 
 ## [0.4.0] - 2026-07-22
 
@@ -538,6 +943,8 @@ full below, earlier ones collapsed further down.
   parked, which was never meant to be seen, so there's no start point to
   meaningfully ease from).
 
+<span id="v0.3.1"></span>
+
 ## [0.3.1] - 2026-07-21
 
 ### Fixed
@@ -559,6 +966,8 @@ full below, earlier ones collapsed further down.
   window into the cascade-offset sequence instead. Added to the same
   ignore-list as the Dock/Spotlight/Notification Center's own transient
   chrome.
+
+<span id="v0.3.0"></span>
 
 ## [0.3.0] - 2026-07-21
 
@@ -588,8 +997,7 @@ full below, earlier ones collapsed further down.
   rather than drifting toward one corner — the cluster still reads as
   centered, but each window is individually visible and grabbable.
 
-<details>
-<summary>Earlier releases (v0.1.0 – v0.2.0)</summary>
+<span id="v0.2.0"></span>
 
 ## [0.2.0] - 2026-07-21
 
@@ -734,6 +1142,8 @@ full below, earlier ones collapsed further down.
   windows do routinely — instead of only when the pid actually exits,
   defeating the cache's whole purpose.
 
+<span id="v0.1.18"></span>
+
 ## [0.1.18] - 2026-07-20
 
 ### Fixed
@@ -759,6 +1169,8 @@ full below, earlier ones collapsed further down.
   period to 8s right after a real wake, so a merely-slow-to-reconnect
   window isn't misread as closed.
 
+<span id="v0.1.17"></span>
+
 ## [0.1.17] - 2026-07-19
 
 ### Fixed
@@ -770,6 +1182,8 @@ full below, earlier ones collapsed further down.
   from tiling unconditionally and by default — no config needed, and no
   `floating-rules` entry (not even one for `com.apple.finder`) can override
   it.
+
+<span id="v0.1.16"></span>
 
 ## [0.1.16] - 2026-07-18
 
@@ -784,6 +1198,8 @@ full below, earlier ones collapsed further down.
   1024x1024 `assets/icon.png` into `Contents/Resources/AppIcon.icns` and
   embeds it — both processes pick it up since they run from the same
   bundle.
+
+<span id="v0.1.15"></span>
 
 ## [0.1.15] - 2026-07-18
 
@@ -811,6 +1227,8 @@ full below, earlier ones collapsed further down.
   spuriously becoming AX-frontmost during a switch could poison the same
   bookkeeping.
 
+<span id="v0.1.14"></span>
+
 ## [0.1.14] - 2026-07-18
 
 ### Fixed
@@ -837,6 +1255,8 @@ full below, earlier ones collapsed further down.
   facto focus. `remove_placement` now re-raises the reassigned window for
   real whenever its workspace is still on screen.
 
+<span id="v0.1.13"></span>
+
 ## [0.1.13] - 2026-07-18
 
 ### Added
@@ -860,6 +1280,8 @@ full below, earlier ones collapsed further down.
   `pending_launch_pids`, a `WmEvent::AppLaunched`-keyed tracker — covering
   both paths into `reveal_frontmost` (`reveal_current_frontmost`'s
   click-driven fallback and `WmEvent::FrontmostAppChanged`'s direct call).
+
+<span id="v0.1.12"></span>
 
 ## [0.1.12] - 2026-07-18
 
@@ -941,8 +1363,9 @@ A ~1s delay between clicking a workspace item in the menu bar's dropdown
 and the switch happening is still open — ruled out IPC/socket overhead,
 App Nap, and the two menu-bar fixes above; narrowed to AppKit's own
 `NSMenuItem` target-action dispatch, undiagnosable further without a
-profiler attached to a running process. See
-`docs/architecture/tili-menubar.md`'s "Known issue" section.
+profiler attached to a running process.
+
+<span id="v0.1.11"></span>
 
 ## [0.1.11] - 2026-07-17
 
@@ -994,6 +1417,8 @@ A fix release addressing two issues found after `v0.1.10`.
   already fully visible as a true no-op, so an ordinary click that isn't
   reactivating anything costs one extra AX query and nothing more.
 
+<span id="v0.1.10"></span>
+
 ## [0.1.10] - 2026-07-17
 
 A fix release addressing one issue found after `v0.1.9`.
@@ -1007,6 +1432,8 @@ A fix release addressing one issue found after `v0.1.9`.
   `resize_weight` a subsequent `move_in_direction` bound each window to
   whatever weight already sat at its new array position rather than
   carrying its own weight along. The swap now moves both arrays together.
+
+<span id="v0.1.9"></span>
 
 ## [0.1.9] - 2026-07-16
 
@@ -1030,6 +1457,8 @@ A fix release addressing one issue found after `v0.1.8`.
   `Minimized`/`NativeFullscreen`/`HiddenApplication` (real, still-open
   windows in a special display state) counted as before.
 
+<span id="v0.1.8"></span>
+
 ## [0.1.8] - 2026-07-16
 
 A fix release addressing one issue found after `v0.1.7`.
@@ -1049,6 +1478,8 @@ A fix release addressing one issue found after `v0.1.7`.
   skips the workspace switch when that pid no longer owns any live
   window, since that's a reliable sign of this OS-driven reactivation
   rather than a genuine user-initiated app switch.
+
+<span id="v0.1.7"></span>
 
 ## [0.1.7] - 2026-07-16
 
@@ -1078,6 +1509,8 @@ A fix release addressing one issue found after `v0.1.6`.
   the same thread's samples now fall inside `nanosleep`, and measured
   daemon-wide average CPU dropped from ~40% to ~0.5% on real hardware.
 
+<span id="v0.1.6"></span>
+
 ## [0.1.6] - 2026-07-16
 
 A fix release addressing one issue reported after `v0.1.5`.
@@ -1104,6 +1537,8 @@ A fix release addressing one issue reported after `v0.1.5`.
   snapshot survives intact for however long the sleep lasts, so the
   eventual wake-time call diffs genuine before/after state and restores the
   correct workspace.
+
+<span id="v0.1.5"></span>
 
 ## [0.1.5] - 2026-07-16
 
@@ -1143,6 +1578,8 @@ safeguard against the first one recurring.
   real hardware (a live `tili-daemon`/`tili-menubar` restarting with new
   PIDs under the actual Homebrew sandbox, not just a local `cargo run`).
 
+<span id="v0.1.4"></span>
+
 ## [0.1.4] - 2026-07-16
 
 A fix release addressing one issue found after `v0.1.3`.
@@ -1157,6 +1594,8 @@ A fix release addressing one issue found after `v0.1.3`.
   edits only took effect after a manual `tili stop`/`tili start`. It now
   resolves the config path with `std::fs::canonicalize` first and watches
   the real target's directory instead.
+
+<span id="v0.1.3"></span>
 
 ## [0.1.3] - 2026-07-16
 
@@ -1192,6 +1631,8 @@ bar polish.
 - The menu bar's active-workspace indicator is now a leading "•" instead
   of a native checkmark, and "Quit" now reads "Quit tili" for clarity.
 
+<span id="v0.1.2"></span>
+
 ## [0.1.2] - 2026-07-15
 
 A fix release addressing one issue found after `v0.1.1`.
@@ -1207,6 +1648,8 @@ A fix release addressing one issue found after `v0.1.1`.
   restarts it automatically, so `brew upgrade` takes effect immediately. A
   fresh `brew install` is unaffected — it still leaves the first
   `tili start` to the user.
+
+<span id="v0.1.1"></span>
 
 ## [0.1.1] - 2026-07-15
 
@@ -1247,6 +1690,8 @@ A fix release addressing four issues found in daily use of `v0.1.0`.
   notifications (there's no way to intercept a window before its first
   paint), not a defect in tili's own placement logic — floating windows are
   never tiled first; see `place_floating_window`'s doc comment.
+
+<span id="v0.1.0"></span>
 
 ## [0.1.0] - 2026-07-15
 
@@ -1307,8 +1752,3 @@ First public release.
   CONTRIBUTING.md.
 
 </details>
-
-For the single source of truth (including whatever's landed since this
-page was last synced), see
-[`CHANGELOG.md`](https://github.com/itsdezen/tili/blob/main/CHANGELOG.md)
-on GitHub.

@@ -144,8 +144,9 @@ describe('docs onboarding', () => {
   it('links shipped roadmap versions to changelog anchors', () => {
     const roadmap = docs.find((doc) => doc.id === 'roadmap')
 
-    expect(roadmap?.body).toContain('/docs/changelog#0130---2026-11-05')
-    expect(roadmap?.body).toContain('/docs/changelog#0120---2026-11-05')
+    expect(roadmap?.body).toContain('/docs/changelog#v0.15.1')
+    expect(roadmap?.body).toContain('/docs/changelog#v0.13.0')
+    expect(roadmap?.body).toContain('/docs/changelog#v0.12.0')
   })
 })
 

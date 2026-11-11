@@ -22,6 +22,11 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            // Every job the tag's commit must pass, including the website one:
+            // the release body links to this version's anchor on the website
+            // changelog, so shipping while that page is broken would publish a
+            // dead link.
+            const required = ['fmt, clippy, test, build', 'website'];
             const terminalFailures = new Set([
               'action_required', 'cancelled', 'failure', 'stale',
               'startup_failure', 'timed_out',
@@ -33,18 +38,25 @@ jobs:
                 ref: context.sha,
                 filter: 'latest',
               });
-              const gate = data.check_runs.find(
-                run => run.name === 'fmt, clippy, test, build',
+              const runs = required.map(name =>
+                data.check_runs.find(run => run.name === name),
               );
-              if (gate?.conclusion === 'success') {
-                core.info(`CI gate passed: ${gate.html_url}`);
+              const failed = runs.find(run => terminalFailures.has(run?.conclusion));
+              if (failed) {
+                core.setFailed(`CI gate concluded ${failed.conclusion}: ${failed.html_url}`);
                 return;
               }
-              if (terminalFailures.has(gate?.conclusion)) {
-                core.setFailed(`CI gate concluded ${gate.conclusion}: ${gate.html_url}`);
+              if (runs.every(run => run?.conclusion === 'success')) {
+                core.info('CI gate passed: ' + runs.map(run => run.name).join(', '));
                 return;
               }
-              core.info(`Waiting for CI gate (${gate?.status ?? 'not started'})`);
+              core.info(
+                'Waiting for CI gate (' +
+                  runs
+                    .map(run => `${run?.name ?? 'missing'}: ${run?.status ?? 'not started'}`)
+                    .join(', ') +
+                  ')',
+              );
               await new Promise(resolve => setTimeout(resolve, 5000));
             }
             core.setFailed('Timed out waiting for the commit CI gate');
@@ -164,62 +176,38 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Pulls this tag's own section out of CHANGELOG.md so the release
-      # page shows what actually changed without a click-through — still
-      # linked below for the full history. Fails loudly (rather than
-      # shipping an empty body) if a release gets tagged without its
-      # CHANGELOG.md entry, the same "catch drift instead of shipping it"
-      # approach as xtask's version-match check.
-      - name: Extract this version's changelog section
+      # One body for every release, derived from CHANGELOG.md: install and
+      # signing lines, the release's highest-signal changes, and a link to the
+      # full entry on the website — the canonical changelog. Exits non-zero
+      # when the tag has no CHANGELOG.md section, the same "catch drift instead
+      # of shipping it" approach as xtask's version-match check.
+      - name: Compose release notes
+        run: |
+          set -euo pipefail
+          unsigned=""
+          if [ -z "${TILI_SIGNING_CERTIFICATE_P12}" ]; then unsigned="--unsigned"; fi
+          node website/scripts/release-notes.mjs "${GITHUB_REF_NAME}" ${unsigned} \
+            > release-notes.md
+
+      # The body links to this version's anchor on the website changelog.
+      # Cloudflare deploys that page from main and normally finishes long
+      # before a draft release is published, so a miss is a warning, not a
+      # failure: the release itself is correct and the anchor goes live with
+      # the deploy.
+      - name: Note if the changelog anchor is not live yet
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          awk -v ver="$version" '
-            /^## \[/ {
-              if (found) exit
-              if ($0 ~ "\\[" ver "\\]") { found = 1; next }
-              next
-            }
-            found { print }
-          ' CHANGELOG.md > changelog-section.md
-          if [ ! -s changelog-section.md ]; then
-            echo "::error::CHANGELOG.md has no '## [$version]' section — add one before tagging"
-            exit 1
-          fi
-
-      - name: Compose release notes (signed)
-        if: ${{ env.TILI_SIGNING_CERTIFICATE_P12 != '' }}
-        run: |
-          cat > release-notes.md <<'EOF'
-          **Install:** `brew install itsdezen/tap/tili`
-
-          Direct downloads are self-signed, not notarized; use right-click → Open. [Signing details](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering).
-
-          EOF
-          cat changelog-section.md >> release-notes.md
-          echo "" >> release-notes.md
-          echo "Full changelog: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)" >> release-notes.md
-
-      - name: Compose release notes (unsigned)
-        if: ${{ env.TILI_SIGNING_CERTIFICATE_P12 == '' }}
-        run: |
-          cat > release-notes.md <<'EOF'
-          ⚠️ **Unsigned development build.** tili does not codesign or
-          notarize release binaries yet — the self-signed certificate this
-          project's release strategy depends on
-          (see [CONTRIBUTING.md](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md#release-engineering))
-          hasn't been generated. Installing via
-          `brew install itsdezen/tap/tili` is unaffected by any of
-          this (Homebrew's `curl` download doesn't set macOS's
-          quarantine flag). If you download `tili.app` directly from
-          this page instead, Gatekeeper will block it on first launch;
-          run `xattr -d com.apple.quarantine tili.app` or right-click →
-          Open to proceed. Not recommended for daily use before v1.0.
-
-          EOF
-          cat changelog-section.md >> release-notes.md
-          echo "" >> release-notes.md
-          echo "Full changelog: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)" >> release-notes.md
+          page="https://tili.dezen.me/docs/changelog"
+          for attempt in 1 2; do
+            html=$(curl -fsS "${page}?v=${RANDOM}${RANDOM}" || true)
+            if printf '%s' "$html" | grep -q "id=\"v${version}\""; then
+              exit 0
+            fi
+            echo "changelog anchor not live yet (attempt ${attempt}/2)"
+            sleep 20
+          done
+          echo "::warning::${page}#v${version} is not live yet — it appears once the website deploy of this commit finishes."
 
       - name: Create release
         uses: softprops/action-gh-release@v2

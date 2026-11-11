@@ -239,6 +239,28 @@
   scroll-margin-top: var(--space-4);
 }
 
+/* Older changelog releases collapse into one `<details>`; without this it
+   reads as an unstyled box rather than a disclosure. */
+.prose details {
+  margin-top: var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-line);
+  background: var(--color-surface-2);
+}
+
+.prose summary {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+
+.prose details[open] summary {
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-line-soft);
+}
+
 .prose .heading-anchor,
 .prose .heading-anchor:visited {
   margin-left: var(--space-2);
