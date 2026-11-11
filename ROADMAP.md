@@ -2,6 +2,9 @@
 
 ## Shipped
 
+- **v0.15.1** — a Dock click that launches or re-opens an app from an empty
+  workspace no longer flashes the previously-frontmost app's parked
+  workspace first.
 - **v0.15.0** — native-tab guard fixes for Terminal's tab-bar resize and the
   2→1 close, new-window entry animation, configurable animation duration
   (120ms default), and immediate placement on window creation.

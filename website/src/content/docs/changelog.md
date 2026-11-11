@@ -16,6 +16,25 @@ This page mirrors the repository's
 directly rather than a separate hand-written summary — recent releases in
 full below, earlier ones collapsed further down.
 
+## [0.15.1] - 2026-11-11
+
+### Fixed
+
+- **Opening or re-activating an app from an empty workspace no longer
+  flashes the previously-frontmost app's workspace first.** With an empty
+  active workspace macOS keeps reporting the last app whose window is parked
+  elsewhere as frontmost, so a Dock click that launched — or re-opened —
+  another app left the deferred click reveal resolving that stale pid and
+  switching to its workspace for a frame. Two defenses now sit at the
+  decision point: the Dock-visible app pids are snapshotted on mouse-down
+  and the reveal is dropped when a new one appears, and a same-pid click
+  whose target workspace isn't visible is treated as ambiguous and retried
+  for up to ~1.3s (which covers re-opening an already-running windowless app
+  and a slow cold launch). Any real activation, launch, or workspace switch
+  ends the wait early; re-clicking the already-frontmost app's own Dock icon
+  still reveals its workspace, and the Cmd-Tab/Mission Control path is
+  unchanged.
+
 ## [0.15.0] - 2026-11-09
 
 ### Added
