@@ -920,6 +920,45 @@ lives; moments later the new app's window actually appears and its own
 placement (`place_new_window`) switches again to the real target, producing
 a visible double-jump.
 
+That stale read is caught without depending on any event: `main.rs`
+snapshots `tili_ax::workspace::regular_app_pids()` on every
+`MouseSignal::ButtonDown` — deliberately before the Dock can act, since it
+launches on mouse-*up* — and passes it to `reveal_current_frontmost` as
+`app_pids_at_click`. A Dock-visible pid that wasn't running at mouse-down
+but is by the time the deferred check runs proves this click started a
+launch, so the frontmost read is still naming the previous app and the
+reveal is dropped entirely; the new window's own `place_new_window`/
+`workspace-rules` switches to its workspace as soon as it exists. This is
+notification-free on purpose: `AppLaunched` doesn't fire for every launch
+(below), and a launch's splash/ignored window clears `pending_launch_pids`
+before its real window exists. `.Regular`-only: an accessory/helper process
+launching is not something a Dock click asked for, and counting it would
+suppress a legitimate reveal. The `WmEvent::FrontmostAppChanged` arm passes
+`None`, leaving that path unchanged — a same-pid read there is already
+refused via `allow_unchanged_pid == false`, and a genuine pid change is the
+new app itself.
+
+The other half of the same race needs a bounded wait rather than a
+snapshot: clicking the Dock icon of an **already-running app with no
+windows** re-activates it without spawning a new pid, so the snapshot can't
+see it, and `frontmost_app_pid()` still names the old app. For that
+ambiguous shape only — `pid_unchanged` on the click path whose target
+workspace isn't visible — `reveal_frontmost` returns "deferred" instead of
+switching, and `main.rs` re-arms `PendingReveal::deadline` up to
+`REVEAL_UNCHANGED_MAX_RETRIES` times (`REVEAL_UNCHANGED_RETRY`, ~1.3s
+total). Any real activation re-arms the deadline itself with
+`allow_unchanged_pid = false`, any launch fills `pending_launch_pids`, and a
+launch's own placement bumps `switch_epoch`, so all three end the wait
+early; only a genuinely unchanged pid (re-clicking the already-frontmost
+app's own Dock icon) uses the whole budget before switching. A click whose
+frontmost app is already visible on the current monitor never defers — the
+`Some(monitor_id)` branch is untouched.
+
+One gap remains: a launch whose process hasn't registered with `NSWorkspace`
+*and* hasn't taken AX-frontmost within the whole retry window. Closing it
+would mean resolving the clicked Dock tile through AX, which localized tile
+titles make fragile.
+
 `WmEvent::AppLaunched { pid, .. }` (from `NSWorkspaceDidLaunchApplicationNotification`
 via `tili-ax`'s workspace watcher) calls `WmState::note_app_launched(pid)`,
 recording `pid` in `pending_launch_pids: HashMap<i32, Instant>` until it
@@ -933,9 +972,9 @@ not-currently-visible (`None`) branch, the only branch that can switch
 workspaces, so it protects both callers (`reveal_current_frontmost` and
 `handle_event`'s `WmEvent::FrontmostAppChanged` arm) from one place.
 Neither caller invokes `reveal_frontmost` synchronously: both just arm
-`pending_reveal_deadline: Option<tokio::time::Instant>` to `now +
-REVEAL_DEBOUNCE`, and `maintenance_tick` runs the deferred
-`state.reveal_current_frontmost()` once that deadline passes (after that
+`PendingReveal::deadline` to `now + REVEAL_DEBOUNCE`, and `maintenance_tick`
+runs the deferred `state.reveal_current_frontmost()` once that deadline
+passes (after that
 tick's own `pending_pids` processing, so a same-tick `WindowsChanged` for a
 just-launched pid already clears `pending_launch_pids` first) — re-deriving
 whatever's actually frontmost fresh at execution time rather than trusting
@@ -947,13 +986,16 @@ handler ignore the `pid` its event carries entirely.
 this race can involve, so `pending_launch_pids` can end up empty for the
 exact case it exists to catch — `REVEAL_DEBOUNCE` waiting longer buys
 nothing against that gap, only added latency on ordinary Cmd-Tab/
-Dock-click-reveal. What does reliably prevent the spurious switch is the
-pre-existing `suppress` check above (a previous pid owning zero live
-windows) — unrelated to anything in this section, already there before any
-of this. `pending_launch_pids`/`REVEAL_DEBOUNCE` stay in place as a
-secondary layer for whichever launches *do* get an `AppLaunched` event, at
-low fixed cost (a `HashMap` lookup, a short deadline), but `suppress` is
-the mechanism actually load-bearing for the common case. `REVEAL_DEBOUNCE`
+Dock-click-reveal. `suppress` above only covers a previous pid owning *zero*
+live windows — the reactivated-windowless case it was written for. It does
+**not** cover a previous pid that owns a live window on a parked workspace,
+which is precisely what an empty active workspace leaves frontmost:
+confirmed on real hardware, a Dock click launching Safari from an empty
+workspace flashed the parked workspace holding Ghostty for a frame. The
+mouse-down pid snapshot described above is what closes that case.
+`pending_launch_pids`/`REVEAL_DEBOUNCE` stay in place as a secondary,
+best-effort layer for whichever launches *do* get an `AppLaunched` event, at
+low fixed cost (a `HashMap` lookup, a short deadline). `REVEAL_DEBOUNCE`
 is kept short (100ms) rather than grown to reliably beat
 `NSWorkspaceDidLaunchApplicationNotification` latency, since that would
 mean covering a full cold launch (hundreds of ms) to be dependable — the
@@ -990,7 +1032,7 @@ workspace-switch hotkey presses landing on an empty target workspace.
 `AxWindow::focus()` when the target has nothing to restore or
 default-focus (its `restore` block only runs `if let Some(node) =
 restore`), so real macOS frontmost-app state is left pointing at
-whatever was focused on the *previous* workspace. If `pending_reveal_deadline`
+whatever was focused on the *previous* workspace. If `PendingReveal::deadline`
 was armed (a `FrontmostAppChanged` notification or a click) before the user
 starts hopping through empty workspaces, it can still be pending when it
 fires — `REVEAL_DEBOUNCE` plus one `maintenance_tick` after the trigger,
@@ -1002,9 +1044,9 @@ calls (via `dispatch()`) have already moved the display on.
 finds its workspace no longer visible, and calls `switch_workspace` back
 to it, reverting the user's later navigation. `WmState::switch_epoch: u64`
 closes this: incremented once per real (non-no-op, non-error)
-`switch_workspace` call. Both `pending_reveal_deadline` call sites in
-`main.rs` snapshot `state.switch_epoch()` into a sibling
-`pending_reveal_epoch` when arming the deadline; `maintenance_tick` only
+`switch_workspace` call. Both `PendingReveal::deadline` call sites in
+`main.rs` snapshot `state.switch_epoch()` into `PendingReveal::epoch` when
+arming the deadline; `maintenance_tick` only
 calls `reveal_current_frontmost()` if that snapshot still matches
 `state.switch_epoch()` once the deadline fires — otherwise a newer,
 authoritative switch has already superseded whatever triggered the
@@ -1030,7 +1072,7 @@ real window, so a windowless system pid can't poison it; and
 `reveal_frontmost`/`reveal_current_frontmost` take an `allow_unchanged_pid`
 bool — the `None`/not-visible branch only switches workspaces when either
 that's `true` or `pid_unchanged` is `false`. `main.rs` tracks this
-alongside `pending_reveal_epoch` as `pending_reveal_allow_unchanged`: a
+alongside `PendingReveal::epoch` as `PendingReveal::allow_unchanged`: a
 `MouseSignal::ButtonUp` arm sets it `true` (the legitimate Dock-icon
 reactivation case above genuinely needs `pid_unchanged` to be true and
 still switch); a `WmEvent::FrontmostAppChanged` arm sets it `false` (a

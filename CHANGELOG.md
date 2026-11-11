@@ -6,6 +6,33 @@ All notable changes to this project are documented here. Format follows
 **Versioning (pre-1.0):** plain SemVer — minor bumps ship new features,
 patch bumps are fixes. This resets to standard SemVer conventions at v1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **Opening or re-activating an app from an empty workspace no longer
+  flashes the previously-frontmost app's workspace first.** With an empty
+  active workspace, macOS keeps reporting the last app whose window is
+  parked elsewhere as frontmost, so a Dock click that launches — or
+  re-opens — another app left the deferred click reveal resolving that
+  stale pid and switching to its workspace for a frame before the new
+  window's placement switched back (reproduced with Safari from an empty
+  workspace while Ghostty's window was parked on another one). Two defenses
+  now sit at the decision point: `main.rs` snapshots
+  `tili_ax::workspace::regular_app_pids()` on every left mouse-down —
+  before the Dock, which launches on mouse-up, can start the process — and
+  drops the click reveal when a Dock-visible pid appears by the time its
+  deferred check runs; and a same-pid click whose target workspace isn't
+  visible is treated as ambiguous and retried for up to ~1.3s instead of
+  switching immediately, which covers re-opening an already-running app
+  with no windows (no new pid) and a slow cold launch. Any real activation,
+  launch, or workspace switch ends the wait early. The pid snapshot is
+  notification-free on purpose: `AppLaunched` doesn't fire for every
+  launch, and a launch's splash/ignored window clears
+  `pending_launch_pids` before its real window exists. Re-clicking the
+  already-frontmost app's own Dock icon still reveals its workspace, after
+  that bounded wait; the `FrontmostAppChanged`/Cmd-Tab path is unchanged.
+
 ## [0.15.0] - 2026-11-09
 
 ### Added

@@ -23,17 +23,33 @@ use tili_ipc::{Command, Response};
 /// comment in `tili-ipc`).
 const WAIT_FOR_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How long `pending_reveal_deadline` waits before `maintenance_tick`
+/// How long `PendingReveal::deadline` waits before `maintenance_tick`
 /// actually runs the deferred `WmState::reveal_current_frontmost`. Kept
-/// short: `WmEvent::AppLaunched` doesn't reliably fire for every app launch
-/// that ends up racing this reveal, so `pending_launch_pids` can't be
-/// counted on to be populated by the time this deadline expires — the
-/// actual defense against a spurious switch is `reveal_frontmost`'s
-/// `suppress` check (a previous pid owning zero live windows), which is
-/// independent of this delay. A longer delay buys no proven benefit against
-/// that gap while making ordinary Cmd-Tab/Dock-click-reveal feel laggy, so
-/// this stays short rather than growing to cover a full app launch.
+/// short: `WmEvent::AppLaunched` doesn't reliably fire for every launch, and
+/// a cold launch's AX-frontmost takeover routinely takes longer than this,
+/// so the defenses against a spurious switch are not "wait long enough" but
+/// explicit evidence at the decision point — the mouse-down app-pid snapshot
+/// (`PendingReveal::app_pids`) and, for the ambiguous unchanged-pid click,
+/// the bounded `REVEAL_UNCHANGED_RETRY` attempts below. A longer *initial*
+/// delay would only make ordinary Cmd-Tab/Dock-click-reveal feel laggy.
 const REVEAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long each bounded retry of an unchanged-pid click reveal waits — see
+/// `REVEAL_UNCHANGED_MAX_RETRIES`. Only the ambiguous case pays this: a
+/// click that resolved to the *same* frontmost pid whose workspace isn't
+/// visible. The click may have been aimed at an already-running app with no
+/// windows, whose re-activation spawns no new pid and hasn't taken over
+/// AX-frontmost yet, so the reveal waits instead of switching to the stale
+/// pid's workspace.
+const REVEAL_UNCHANGED_RETRY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How many `REVEAL_UNCHANGED_RETRY` attempts an ambiguous click reveal gets
+/// before it is allowed to switch anyway (~1.3s total including the initial
+/// `REVEAL_DEBOUNCE`). Bounded rather than indefinite so re-clicking the
+/// already-frontmost app's own Dock icon still reveals its workspace; any
+/// real activation, launch, or workspace switch during the wait supersedes
+/// the reveal and ends it early.
+const REVEAL_UNCHANGED_MAX_RETRIES: u8 = 8;
 
 /// Spacing below which a second `WindowCreated` for the same pid stays on
 /// the debounced path instead of taking the immediate one. An app restoring
@@ -41,6 +57,56 @@ const REVEAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(10
 /// window; the first window still gets the fast path, which is the one whose
 /// native frame would otherwise linger on screen.
 const CREATED_DRAIN_COALESCE: std::time::Duration = std::time::Duration::from_millis(15);
+
+/// The one deferred "reveal whatever's frontmost" check, shared by the
+/// click path (`MouseSignal::ButtonUp`) and the notification path
+/// (`WmEvent::FrontmostAppChanged`). Bundled rather than threaded through
+/// `handle_event` as five separate `&mut` locals; each field keeps the doc
+/// comment it had as a loop-local.
+#[derive(Default)]
+struct PendingReveal {
+    /// When `maintenance_tick` should run `WmState::reveal_current_frontmost`.
+    /// Armed by both trigger paths (see `REVEAL_DEBOUNCE`) and re-armed by
+    /// `REVEAL_UNCHANGED_RETRY` while an unchanged-pid click reveal is
+    /// ambiguous. A real bounded deadline rather than "next
+    /// `maintenance_tick`" (30ms), since `AppLaunched`'s latency isn't
+    /// bounded by that tick's own interval.
+    deadline: Option<tokio::time::Instant>,
+    /// `WmState::switch_epoch()` snapshot taken whenever `deadline` is armed
+    /// — only meaningful while that deadline is `Some`. Lets
+    /// `maintenance_tick` detect a newer, explicit `switch_workspace` call (a
+    /// rapid workspace-switch hotkey, e.g.) that superseded whatever
+    /// triggered this deferred reveal, and skip running it instead of
+    /// reverting the user's later navigation.
+    epoch: u64,
+    /// Whether the *most recent* arm of `deadline` was a real
+    /// `MouseSignal::ButtonUp` click rather than a notification-detected
+    /// `WmEvent::FrontmostAppChanged` edge — forwarded to
+    /// `WmState::reveal_current_frontmost` as `allow_unchanged_pid`. A click
+    /// needs `true` (see that function's doc comment for the legitimate
+    /// Dock-icon-reactivation case this covers); a notification edge needs
+    /// `false`, since by the time the deferred check actually runs a same-pid
+    /// read means nothing really changed and chasing it would revert
+    /// whatever workspace switch the user made in the meantime.
+    allow_unchanged: bool,
+    /// Snapshot of every Dock-visible app pid taken on
+    /// `MouseSignal::ButtonDown` — only meaningful for the click-driven
+    /// reveal, which resolves whatever is frontmost a moment later. A pid
+    /// that wasn't running at mouse-down but is by the time the deferred
+    /// check runs proves this click started launching an app, so the
+    /// frontmost read still naming the *previous* app can't be trusted (see
+    /// `WmState::reveal_current_frontmost`'s doc comment). Captured on
+    /// mouse-down rather than mouse-up because the Dock starts the launch on
+    /// mouse-up — a mouse-up snapshot could already contain the new pid.
+    /// Cleared by a `WmEvent::FrontmostAppChanged` arm, whose reveal is a
+    /// different gesture with no click to attribute a launch to.
+    app_pids: Option<HashSet<i32>>,
+    /// How many `REVEAL_UNCHANGED_RETRY` attempts the current deferred reveal
+    /// has already used — see `REVEAL_UNCHANGED_MAX_RETRIES`. Reset by every
+    /// fresh arm of `deadline`, so it only ever counts retries of one
+    /// click/notification gesture.
+    retries: u8,
+}
 
 /// The real process entry point — deliberately not `#[tokio::main]`. A real
 /// `NSApplication` instance needs its `run()` to own the actual OS process
@@ -228,29 +294,10 @@ async fn async_daemon_main(
     // either trigger) a window to land in `pending_launch_pids` before the
     // deferred check runs, on the chance it closes a race where a
     // stale/transient `frontmost_app_pid()` read during a cold app launch
-    // causes a spurious workspace switch. A real bounded deadline rather
-    // than "next `maintenance_tick`" (30ms), since `AppLaunched`'s latency
-    // isn't bounded by that tick's own interval. See `REVEAL_DEBOUNCE` and
-    // `WmState::reveal_current_frontmost`'s doc comment for why this isn't
-    // the primary defense against the spurious switch.
-    let mut pending_reveal_deadline: Option<tokio::time::Instant> = None;
-    // Snapshot of `WmState::switch_epoch()` taken whenever
-    // `pending_reveal_deadline` above is armed — only meaningful while
-    // that deadline is `Some`. Lets `maintenance_tick` detect a newer,
-    // explicit `switch_workspace` call (a rapid workspace-switch hotkey,
-    // e.g.) that superseded whatever triggered this deferred reveal, and
-    // skip running it instead of reverting the user's later navigation.
-    let mut pending_reveal_epoch: u64 = 0;
-    // Whether the *most recent* arm of `pending_reveal_deadline` was a real
-    // `MouseSignal::ButtonUp` click rather than a notification-detected
-    // `WmEvent::FrontmostAppChanged` edge — forwarded to
-    // `WmState::reveal_current_frontmost` as `allow_unchanged_pid`. A click
-    // needs `true` (see that function's doc comment for the legitimate
-    // Dock-icon-reactivation case this covers); a notification edge needs
-    // `false`, since by the time the deferred check actually runs a
-    // same-pid read means nothing really changed and chasing it would
-    // revert whatever workspace switch the user made in the meantime.
-    let mut pending_reveal_allow_unchanged = false;
+    // causes a spurious workspace switch. See `REVEAL_DEBOUNCE` and
+    // `WmState::reveal_current_frontmost`'s doc comment for the primary
+    // defenses, which are evidence-based rather than this delay.
+    let mut pending_reveal = PendingReveal::default();
     // Drains `pending_pids`, rechecks Phase 5's `pending_removal` grace
     // period, and now also the reveal debounce above and
     // `pending_launch_pids`'s grace period — one combined periodic-
@@ -510,15 +557,7 @@ async fn async_daemon_main(
                                 | WmEvent::AppTerminated { .. }
                                 | WmEvent::FrontmostAppChanged { .. }
                         );
-                        handle_event(
-                            &mut state,
-                            &mut pending_pids,
-                            &mut pending_reveal_deadline,
-                            &mut pending_reveal_epoch,
-                            &mut pending_reveal_allow_unchanged,
-                            event,
-                        )
-                        .await;
+                        handle_event(&mut state, &mut pending_pids, &mut pending_reveal, event).await;
                         if session_event {
                             state.mark_session_dirty();
                         }
@@ -602,19 +641,47 @@ async fn async_daemon_main(
                 // just-launched pid that lands in the same tick the
                 // deadline expires already cleared it from
                 // `pending_launch_pids` before this decides whether to skip.
-                let reveal_due = pending_reveal_deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
+                let reveal_due = pending_reveal
+                    .deadline
+                    .is_some_and(|d| tokio::time::Instant::now() >= d);
+                // Only count this as a state change once it actually stops
+                // retrying — a deferred retry mutates nothing, so it
+                // shouldn't wake every `WaitForChange`/`Subscribe` client
+                // once per attempt.
+                let mut reveal_ran = reveal_due;
                 if reveal_due {
-                    pending_reveal_deadline = None;
+                    pending_reveal.deadline = None;
+                    // Taken unconditionally: whatever this arm decides, the
+                    // snapshot is one-shot and must not leak into a later
+                    // reveal (see its doc comment above). Put back below
+                    // when this attempt is deferred for a retry.
+                    let app_pids_at_click = pending_reveal.app_pids.take();
                     // A newer, explicit `switch_workspace` call (e.g. a
                     // rapid workspace-switch hotkey) already superseded
                     // whatever armed this deferred reveal — that call is
                     // authoritative, so drop the stale reveal instead of
                     // reverting the user's later navigation.
-                    if pending_reveal_epoch == state.switch_epoch() {
-                        state.reveal_current_frontmost(pending_reveal_allow_unchanged);
+                    if pending_reveal.epoch == state.switch_epoch() {
+                        // On the last attempt `can_retry` is false, so an
+                        // ambiguous unchanged-pid click is finally allowed
+                        // to switch instead of deferring forever — see
+                        // `REVEAL_UNCHANGED_MAX_RETRIES`.
+                        let can_retry = pending_reveal.retries < REVEAL_UNCHANGED_MAX_RETRIES;
+                        let deferred = state.reveal_current_frontmost(
+                            pending_reveal.allow_unchanged,
+                            app_pids_at_click.as_ref(),
+                            can_retry,
+                        );
+                        if deferred && can_retry {
+                            pending_reveal.retries += 1;
+                            pending_reveal.deadline =
+                                Some(tokio::time::Instant::now() + REVEAL_UNCHANGED_RETRY);
+                            pending_reveal.app_pids = app_pids_at_click;
+                            reveal_ran = false;
+                        }
                     }
                 }
-                changed = pids_changed || reveal_due || restore_finalized;
+                changed = pids_changed || reveal_ran || restore_finalized;
             }
             Some(config) = config_updates.recv() => {
                 println!("tili-daemon: config reloaded from {}", config_path.display());
@@ -686,6 +753,12 @@ async fn async_daemon_main(
                     // to the tiled layout.
                     tili_ax::MouseSignal::ButtonDown => {
                         state.on_mouse_button_down();
+                        // Snapshot before the Dock can act on this press:
+                        // it launches on mouse-*up*, so a Dock-visible pid
+                        // absent here but present at the deferred reveal
+                        // can only be this click's own launch. See
+                        // `PendingReveal::app_pids`'s doc comment.
+                        pending_reveal.app_pids = Some(tili_ax::workspace::regular_app_pids());
                         changed = true;
                     }
                     tili_ax::MouseSignal::ButtonUp => {
@@ -698,10 +771,12 @@ async fn async_daemon_main(
                         // doc comment for why `FrontmostAppChanged` never
                         // fires for that case on its own. Deferred by
                         // `REVEAL_DEBOUNCE` rather than called here directly
-                        // — see `pending_reveal_deadline`'s doc comment.
-                        pending_reveal_deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
-                        pending_reveal_epoch = state.switch_epoch();
-                        pending_reveal_allow_unchanged = true;
+                        // — see `PendingReveal::deadline`'s doc comment.
+                        pending_reveal.deadline =
+                            Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
+                        pending_reveal.epoch = state.switch_epoch();
+                        pending_reveal.retries = 0;
+                        pending_reveal.allow_unchanged = true;
                         changed = true;
                     }
                 }
@@ -1007,9 +1082,7 @@ fn drain_pending_windows(state: &mut WmState, pending_pids: &mut HashSet<i32>) -
 async fn handle_event(
     state: &mut WmState,
     pending_pids: &mut HashSet<i32>,
-    pending_reveal_deadline: &mut Option<tokio::time::Instant>,
-    pending_reveal_epoch: &mut u64,
-    pending_reveal_allow_unchanged: &mut bool,
+    pending_reveal: &mut PendingReveal,
     event: WmEvent,
 ) {
     match event {
@@ -1081,7 +1154,7 @@ async fn handle_event(
             // frontmost-app change (Cmd-Tab, Mission Control/Control Center)
             // that would otherwise never route through `dispatch()` at all
             // — the only path that reveals a parked workspace. Deferred
-            // through the same `pending_reveal_deadline` mechanism as
+            // through the same `PendingReveal::deadline` mechanism as
             // `MouseSignal::ButtonUp` (re-deriving whatever's frontmost
             // fresh via `reveal_current_frontmost` once the deadline fires,
             // rather than trusting this event's own `pid`) instead of
@@ -1093,13 +1166,17 @@ async fn handle_event(
             // frontmost before Spotlight — trusting that read immediately
             // would race the still-launching app's `pending_launch_pids`
             // entry the same way a stale click read did.
-            *pending_reveal_deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
-            *pending_reveal_epoch = state.switch_epoch();
+            pending_reveal.deadline = Some(tokio::time::Instant::now() + REVEAL_DEBOUNCE);
+            pending_reveal.epoch = state.switch_epoch();
             // Unlike a real click, a notification-detected edge alone never
             // justifies chasing a same-pid read once the deferred check
             // actually runs — see `WmState::reveal_frontmost`'s
-            // `allow_unchanged_pid` doc comment.
-            *pending_reveal_allow_unchanged = false;
+            // `allow_unchanged_pid` doc comment. Its reveal also has no
+            // click to attribute a launch to, so drop any mouse-down pid
+            // snapshot the click path left armed.
+            pending_reveal.allow_unchanged = false;
+            pending_reveal.app_pids = None;
+            pending_reveal.retries = 0;
         }
     }
 }

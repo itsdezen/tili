@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ptr::NonNull;
 use std::sync::mpsc::Receiver;
 
@@ -176,6 +177,29 @@ pub fn register_on_main(_mtm: MainThreadMarker) -> Receiver<AppEvent> {
     rx
 }
 
+/// Every currently running Dock-visible application's pid, as a set —
+/// used by the daemon's click-driven reveal to tell whether a mouse click
+/// started launching an app (a pid that wasn't running at mouse-down is
+/// now running). A launch's pid is registered with `NSWorkspace` before
+/// its window exists or it becomes AX-frontmost, so this is a
+/// notification-free way to notice "the frontmost read is about to go
+/// stale" at the moment of the decision. See
+/// `WmState::reveal_current_frontmost`'s doc comment.
+///
+/// Deliberately `.Regular`-only, matching `all_regular_app_pids` below and
+/// `is_regular_app`: an `.Accessory`/`.Prohibited` helper process launching
+/// is not something the user clicked a Dock icon for, and treating it as
+/// one would suppress a legitimate reveal.
+pub fn regular_app_pids() -> HashSet<i32> {
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .to_vec()
+        .into_iter()
+        .filter(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular)
+        .map(|app| app.processIdentifier())
+        .collect()
+}
+
 /// Every currently running "regular" (Dock-visible) application's pid,
 /// regardless of whether it has any on-screen window right now — unlike
 /// `enumerate::onscreen_owner_pids`, which only sees apps with a window
@@ -186,14 +210,7 @@ pub fn register_on_main(_mtm: MainThreadMarker) -> Receiver<AppEvent> {
 /// — so it needs a `watch_app` subscription set up proactively, before
 /// that happens, or its first new window has nothing watching for it.
 pub fn all_regular_app_pids() -> Vec<i32> {
-    let workspace = NSWorkspace::sharedWorkspace();
-    workspace
-        .runningApplications()
-        .to_vec()
-        .into_iter()
-        .filter(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular)
-        .map(|app| app.processIdentifier())
-        .collect()
+    regular_app_pids().into_iter().collect()
 }
 
 /// Resolves a running process's bundle identifier (e.g.
