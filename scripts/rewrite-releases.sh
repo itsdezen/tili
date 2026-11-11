@@ -127,7 +127,12 @@ for tag in "${tags[@]}"; do
   new="${BACKUP_DIR}/${tag}.new.md"
 
   if [ ! -e "$old" ]; then
-    gh release view "$tag" --json body -q .body >"$old" || die "no release for ${tag}"
+    # `gh`'s body keeps a trailing blank line that the generated body doesn't,
+    # which would make every re-run look like a change. Command substitution
+    # strips trailing newlines, so the saved copy is comparable byte-for-byte.
+    body=$(gh release view "$tag" --json body -q .body) ||
+      die "no release for ${tag}"
+    printf '%s\n' "$body" >"$old"
   fi
 
   unsigned=""
