@@ -105,7 +105,10 @@ if [ "$APPLY" -eq 1 ] && [ "$SKIP_SITE_CHECK" -eq 0 ]; then
 
   missing=0
   for tag in "${tags[@]}"; do
-    if ! printf '%s' "$page_html" | grep -q "id=\"v${tag#v}\""; then
+    # A herestring, not a pipe: `grep -q` exits as soon as it matches, which
+    # SIGPIPEs the writer, and `pipefail` would then report the pipeline as
+    # failed for every anchor near the top of the page.
+    if ! grep -q "id=\"v${tag#v}\"" <<<"$page_html"; then
       echo "  missing anchor: #v${tag#v}" >&2
       missing=$((missing + 1))
     fi

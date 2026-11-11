@@ -201,7 +201,9 @@ jobs:
           page="https://tili.dezen.me/docs/changelog"
           for attempt in 1 2; do
             html=$(curl -fsS "${page}?v=${RANDOM}${RANDOM}" || true)
-            if printf '%s' "$html" | grep -q "id=\"v${version}\""; then
+            # Here-string, not a pipe: `grep -q` exits on first match, and
+            # under `pipefail` the resulting SIGPIPE would read as "not found".
+            if grep -q "id=\"v${version}\"" <<<"$html"; then
               exit 0
             fi
             echo "changelog anchor not live yet (attempt ${attempt}/2)"
