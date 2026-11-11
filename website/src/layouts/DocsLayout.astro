@@ -153,6 +153,28 @@ const issueUrl = `${site.repository}/issues/new?title=${encodeURIComponent(
 
   <DocsSearch />
 
+  {/* Progressive enhancement: an anchor that points into a collapsed
+      `<details>` (older releases on the changelog) otherwise looks like a
+      broken link — the target exists but nothing scrolls into view. */}
+  <script is:inline data-enhancement="details-target">
+    function revealHashTarget() {
+      if (!window.location.hash) return
+
+      const target = document.getElementById(
+        decodeURIComponent(window.location.hash.slice(1)),
+      )
+      const details = target && target.closest('details')
+
+      if (!details || details.open) return
+
+      details.open = true
+      target.scrollIntoView()
+    }
+
+    revealHashTarget()
+    window.addEventListener('hashchange', revealHashTarget)
+  </script>
+
   {/* Progressive enhancement: heading ids already exist, so linking still
       works without this — the `#` is just a visible handle. */}
   <script is:inline data-enhancement="heading-anchors">

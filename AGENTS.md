@@ -41,7 +41,13 @@ Before committing, run the exact gate CI enforces (a red PR blocks merge):
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+(cd website && bun run verify)
 ```
+
+The Rust three run in CI's `fmt, clippy, test, build` job; the website gate
+runs in the `website` job (Cloudflare deploys `website/` from `main`, so this
+job is the only pre-merge check on the site build). `release.yml` waits for
+both before publishing.
 
 If `cargo fmt --check` fails, run `cargo fmt` and re-stage. Clippy warnings
 are hard errors (`-D warnings`); don't `#[allow]` one without a comment
@@ -309,13 +315,30 @@ move its entry from ROADMAP.md's planned list (and prune the covered
 design from docs/BLUEPRINT.md) into the relevant
 `docs/architecture/<crate>.md`.
 
+The website's changelog page is the one exception: it is generated from
+`CHANGELOG.md` (`cd website && bun run sync:changelog`), so never edit
+`website/src/content/docs/changelog.md` by hand — a vitest drift test
+compares it against the generator's output.
+
 ## Release process
 
 The project ships continuously — a feature/fix set becomes a release when
 it reaches a working, verifiable state. To cut one: update
 [CHANGELOG.md](CHANGELOG.md) (`Unreleased` → dated version section), bump
-`[workspace.package] version` in `Cargo.toml` to match, tag `vX.Y.Z`, and
-push the tag — `release.yml` waits for that commit's successful CI gate,
-builds signed aarch64/x86_64 binaries, and opens a **draft** GitHub release
-for manual review. Never hand-sign or ad-hoc-sign a release binary outside
-that pipeline (see CONTRIBUTING.md's Release engineering for why).
+`[workspace.package] version` in `Cargo.toml` to match, refresh the
+website's generated changelog page (`cd website && bun run
+sync:changelog`), tag `vX.Y.Z`, and push the tag — `release.yml` waits for
+that commit's successful CI gate, builds signed aarch64/x86_64 binaries,
+and opens a **draft** GitHub release for manual review. Never hand-sign or
+ad-hoc-sign a release binary outside that pipeline (see CONTRIBUTING.md's
+Release engineering for why).
+
+The release body is not hand-written either: `release.yml` runs
+`website/scripts/release-notes.mjs`, which renders the install/signing
+lines, one bullet from each of the release's highest-signal sections, and
+a link to `https://tili.dezen.me/docs/changelog#vX.Y.Z` — the canonical,
+per-release anchor. The full CHANGELOG.md section is what the website
+shows, so GitHub release notes stay a short pointer rather than a second
+copy. `scripts/rewrite-releases.sh` re-renders already-published releases
+with the same generator (dry run by default, `--apply` to write,
+`--restore <dir>` to undo).

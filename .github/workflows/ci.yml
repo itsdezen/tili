@@ -68,3 +68,22 @@ jobs:
       - name: Build (release profile)
         if: steps.changes.outputs.formula_only != 'true'
         run: cargo build --workspace --release
+
+  # Cloudflare deploys `website/` from main, so a broken site build only
+  # surfaces after the merge. This job is the pre-merge gate for that, and the
+  # only place the changelog page's drift test runs.
+  website:
+    name: website
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: website
+        run: bun install --frozen-lockfile
+
+      - name: Check, lint, format, test, build
+        working-directory: website
+        run: bun run verify

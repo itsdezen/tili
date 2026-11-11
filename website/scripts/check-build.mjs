@@ -7,11 +7,12 @@ const errors = []
 const htmlFiles = []
 const jsFiles = []
 
-// The only client-side JavaScript this site allows: the two inline
-// progressive enhancements (copy install command, copy code block) and
-// Pagefind's own bundle on docs pages. Everything else must stay static.
+// The only client-side JavaScript this site allows: the inline progressive
+// enhancements (copy install command, copy code block, heading anchors,
+// revealing a collapsed `<details>` for an incoming anchor) and Pagefind's own
+// bundle on docs pages. Everything else must stay static.
 const enhancementScript =
-  /data-enhancement=["'](copy-install|copy-code|heading-anchors)["']/
+  /data-enhancement=["'](copy-install|copy-code|heading-anchors|details-target)["']/
 const pagefindScript =
   /<script[^>]+src=["']\/pagefind\/pagefind-component-ui\.js["'][^>]*>/i
 
@@ -185,6 +186,30 @@ for (const required of [
   'pagefind/pagefind-component-ui.css',
 ]) {
   if (!existsSync(join(dist, required))) fail(`Missing dist/${required}`)
+}
+
+// Every GitHub release body links to `/docs/changelog#vX.Y.Z`, so a release
+// whose anchor is missing from the built page is a dead link from GitHub
+// rather than a cosmetic omission.
+const changelogHtml = join(dist, 'docs/changelog.html')
+
+if (existsSync(changelogHtml)) {
+  const html = readFileSync(changelogHtml, 'utf-8')
+  const changelog = readFileSync(
+    fileURLToPath(new URL('../../CHANGELOG.md', import.meta.url)),
+    'utf-8',
+  )
+  const versions = [...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\]/gm)].map(
+    (match) => match[1],
+  )
+
+  if (versions.length === 0) fail('CHANGELOG.md has no release sections')
+
+  for (const version of versions) {
+    if (!html.includes(`id="v${version}"`)) {
+      fail(`docs/changelog.html: missing release anchor #v${version}`)
+    }
+  }
 }
 
 const sitemapPath = join(dist, 'sitemap-0.xml')
