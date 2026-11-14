@@ -21,6 +21,7 @@
   "dependencies": {
     "@astrojs/sitemap": "^3.7.4",
     "astro": "^7.4.7",
+    "pagefind": "^1.6.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -31,7 +32,6 @@
     "eslint": "^10.14.0",
     "eslint-plugin-astro": "^3.2.1",
     "globals": "^17.14.0",
-    "pagefind": "^1.6.0",
     "prettier": "^3.9.10",
     "prettier-plugin-astro": "^1.1.2",
     "typescript": "6.0.3",
