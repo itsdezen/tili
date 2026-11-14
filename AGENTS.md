@@ -49,6 +49,11 @@ runs in the `website` job (Cloudflare deploys `website/` from `main`, so this
 job is the only pre-merge check on the site build). `release.yml` waits for
 both before publishing.
 
+`website/package.json` also pins `packageManager` to bun 1.4.4. Workers Builds
+reads that field to pick the runtime, and the build image will otherwise hand
+the project an older bun that cannot read the lockfile it installs from. Move
+that pin only together with `website/bun.lock`.
+
 If `cargo fmt --check` fails, run `cargo fmt` and re-stage. Clippy warnings
 are hard errors (`-D warnings`); don't `#[allow]` one without a comment
 explaining why (see `Tree`'s `#[allow(dead_code)]` in `tili-tree` for the

@@ -1,6 +1,7 @@
 {
   "name": "tili-website",
   "type": "module",
+  "packageManager": "bun@1.4.4",
   "version": "0.1.0",
   "private": true,
   "scripts": {
