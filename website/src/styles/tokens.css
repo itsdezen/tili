@@ -1,26 +1,26 @@
 :root {
-  --color-bg: #f2ede1;
-  --color-bg-grid: rgba(23, 21, 18, 0.035);
-  --color-surface: #fbf8f0;
-  --color-surface-2: #e9e2d2;
-  --color-ink: #171512;
-  --color-ink-muted: #5c574c;
-  --color-line: #29251f;
-  --color-line-soft: #d5cbb6;
-  --color-link: #0000cc;
-  --color-link-visited: #551a8b;
-  --color-selection: #d9e2f2;
-  --color-row-hover: #fff6cf;
-  --color-titlebar: #171512;
-  --color-titlebar-fg: #fbf8f0;
-  --color-titlebar-muted: #b9b2a3;
-  --color-status: #1f9d1f;
+  --color-bg: #ebd9a6;
+  --color-surface: #fbf1c7;
+  --color-surface-2: #f0e2b8;
+  --color-ink: #241f16;
+  --color-ink-muted: #5f5443;
+  --color-line: #2a2118;
+  --color-line-soft: #c9b68c;
+  --color-link: #076678;
+  --color-link-visited: #8f3f71;
+  --color-selection: #b8bb26;
+  --color-row-hover: #f8e3a3;
+  --color-titlebar: #282828;
+  --color-titlebar-fg: #fbf1c7;
+  --color-titlebar-muted: #a89984;
+  --color-status: #b8bb26;
 
-  --font-body: Georgia, 'Times New Roman', Times, serif;
+  --font-body: Verdana, Geneva, sans-serif;
   --font-ui: Verdana, Geneva, Tahoma, sans-serif;
-  --font-mono: 'Courier New', Courier, monospace;
+  --font-mono:
+    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 
-  --text-xs: 11px;
+  --text-xs: 12px;
   --text-sm: 13px;
   --text-base: 16px;
   --text-lg: 18px;
@@ -40,9 +40,9 @@
 
   --window-width: 680px;
   --window-width-wide: 920px;
-  --measure: 62ch;
+  --measure: 58ch;
   --docs-sidebar: 13rem;
-  --focus: #0000cc;
-  --shadow: 4px 4px 0 rgba(23, 21, 18, 0.12);
+  --focus: #076678;
+  --shadow: 4px 4px 0 #fe8019;
   --button-shadow: 2px 2px 0 var(--color-line);
 }

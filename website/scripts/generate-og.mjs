@@ -3,17 +3,10 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { Resvg } from '@resvg/resvg-js'
 
 // The social card is authored as SVG and rendered to a 1200×630 PNG. System
-// type is loaded explicitly so the output matches the site's Georgia / Verdana /
-// Courier stack instead of whatever fallback font the renderer picks.
+// type is loaded explicitly so the output matches the site's Verdana / Andale
+// Mono stack instead of whatever fallback font the renderer picks.
 const fontDir = '/System/Library/Fonts/Supplemental'
-const fontFiles = [
-  'Georgia.ttf',
-  'Georgia Bold.ttf',
-  'Verdana.ttf',
-  'Verdana Bold.ttf',
-  'Courier New.ttf',
-  'Courier New Bold.ttf',
-]
+const fontFiles = ['Verdana.ttf', 'Verdana Bold.ttf', 'Andale Mono.ttf']
   .map((file) => `${fontDir}/${file}`)
   .filter((file) => existsSync(file))
 
@@ -27,7 +20,7 @@ const resvg = new Resvg(source, {
   font: {
     fontFiles,
     loadSystemFonts: fontFiles.length === 0,
-    defaultFontFamily: 'Georgia',
+    defaultFontFamily: 'Verdana',
   },
 })
 

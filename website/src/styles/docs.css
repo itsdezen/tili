@@ -33,7 +33,7 @@
   color: var(--color-ink-muted);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
@@ -115,7 +115,7 @@
   color: var(--color-ink-muted);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
@@ -208,7 +208,7 @@
 }
 
 .prose {
-  max-width: 72ch;
+  max-width: 68ch;
 }
 
 .prose > * + * {
@@ -383,8 +383,8 @@
   font-size: var(--text-sm);
 }
 
-/* Shiki writes its own background inline; the panel stays ivory like every
-   other surface instead of introducing a second white. */
+/* Shiki writes its own background inline; the panel stays on the site's
+   surface tint instead of introducing a second background. */
 .prose pre.astro-code {
   background: var(--color-surface-2) !important;
 }
@@ -428,7 +428,7 @@
   color: var(--color-ink);
   font-family: var(--font-ui);
   font-size: var(--text-xs);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
@@ -484,26 +484,26 @@
  * Custom properties are exempt from `all`, which is why these still inherit.
  */
 :root {
-  --pf-text: #171512;
-  --pf-text-secondary: #5c574c;
-  --pf-text-muted: #5c574c;
-  --pf-background: #fbf8f0;
-  --pf-border: #d5cbb6;
-  --pf-border-focus: #0000cc;
-  --pf-skeleton: #e9e2d2;
-  --pf-skeleton-shine: #f2ede1;
-  --pf-hover: #fff6cf;
-  --pf-mark: #171512;
-  --pf-outline-focus: #0000cc;
+  --pf-text: #241f16;
+  --pf-text-secondary: #5f5443;
+  --pf-text-muted: #5f5443;
+  --pf-background: #fbf1c7;
+  --pf-border: #c9b68c;
+  --pf-border-focus: #076678;
+  --pf-skeleton: #f0e2b8;
+  --pf-skeleton-shine: #ebd9a6;
+  --pf-hover: #f8e3a3;
+  --pf-mark: #241f16;
+  --pf-outline-focus: #076678;
   --pf-outline-width: 2px;
   --pf-outline-offset: 2px;
   --pf-font: Verdana, Geneva, Tahoma, sans-serif;
   --pf-border-radius: 0px;
   --pf-input-height: 34px;
-  --pf-modal-backdrop: rgba(23, 21, 18, 0.35);
+  --pf-modal-backdrop: rgba(36, 31, 22, 0.35);
   --pf-modal-max-width: 640px;
   --pf-modal-top: 10dvh;
-  --pf-shadow-lg: 4px 4px 0 rgba(23, 21, 18, 0.18);
+  --pf-shadow-lg: 6px 6px 0 #fe8019;
 }
 
 .docs-search-trigger {

@@ -15,10 +15,6 @@ body {
   min-height: 100%;
   padding: var(--space-7) var(--space-4) var(--space-8);
   background-color: var(--color-bg);
-  background-image:
-    linear-gradient(var(--color-bg-grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--color-bg-grid) 1px, transparent 1px);
-  background-size: 24px 24px;
   color: var(--color-ink);
   font-family: var(--font-body);
   font-size: var(--text-base);
@@ -133,7 +129,7 @@ a:hover {
   color: var(--color-titlebar-fg);
   font-family: var(--font-ui);
   font-size: var(--text-xs);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.05em;
   line-height: 1.4;
   text-transform: uppercase;
 }
@@ -275,7 +271,7 @@ a:hover {
   color: var(--color-ink-muted);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
@@ -283,7 +279,7 @@ a:hover {
   font-family: var(--font-body);
   font-size: var(--text-3xl);
   font-weight: bold;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.02em;
   line-height: 1.15;
 }
 

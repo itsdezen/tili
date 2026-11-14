@@ -11,7 +11,7 @@ export const site = {
   authorUrl: 'https://dezen.me',
   installCommand: 'brew install itsdezen/tap/tili',
   ogImage: '/og-image.png',
-  themeColor: '#f2ede1',
+  themeColor: '#ebd9a6',
 } as const
 
 export interface NavLink {

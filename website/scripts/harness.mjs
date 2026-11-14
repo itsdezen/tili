@@ -186,8 +186,8 @@ async function checkAssets() {
   }
 
   const manifest = await (await fetch(`${baseUrl}/site.webmanifest`)).json()
-  if (manifest.theme_color !== '#f2ede1') {
-    fail('/site.webmanifest: theme_color must stay ivory')
+  if (manifest.theme_color !== '#ebd9a6') {
+    fail('/site.webmanifest: theme_color must match the desktop background')
   }
 }
 

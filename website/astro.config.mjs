@@ -72,7 +72,7 @@ export default defineConfig({
   markdown: {
     // Light-only site: a light syntax theme keeps code blocks readable on the
     // ivory surface without a second color scheme.
-    shikiConfig: { theme: 'github-light' },
+    shikiConfig: { theme: 'gruvbox-light-medium' },
     // Astro 7 defaults to Sätteri; the unified processor is opted into because
     // these two rehype passes are not expressible as Sätteri options.
     processor: unified({

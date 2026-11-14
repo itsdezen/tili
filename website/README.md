@@ -72,7 +72,7 @@ The OG image is generated from `src/assets/og-image.svg`:
 bun run og
 ```
 
-It loads Georgia/Verdana/Courier from the macOS system fonts, so run it locally
+It loads Verdana and Andale Mono from the macOS system fonts, so run it locally
 rather than in CI.
 
 ## Deploy
